@@ -1,0 +1,99 @@
+{
+  "name": "shraga",
+  "version": "0.1.13",
+  "description": "The teammate you delegate coding to — a self-hostable, multi-user AI coding agent web UI (Claude Code, with a pluggable engine seam).",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "//exports.server": "UNSTABLE internal seam (semver-exempt): ./server/* lets a downstream feature (e.g. the Circles Gmail overlay in shraga-circles) import the server-internal modules it already coupled to under the old rsync/overlay model — claude/sessions/contacts/mcp/paths. The stable public surface is '.' (createShraga + feature/engine/webhook/event seams). Depend on these subpaths only if '.' cannot express it, and expect breakage across minors.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json",
+    "./server/*": "./src/server/*.ts"
+  },
+  "license": "MIT",
+  "author": "Elya Livshitz",
+  "homepage": "https://livx.cc/shraga",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Livshitz/shraga.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Livshitz/shraga/issues"
+  },
+  "keywords": [
+    "ai-agent",
+    "coding-agent",
+    "claude-code",
+    "agent-runner",
+    "cli",
+    "self-hosted",
+    "web-ui"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "bin": {
+    "shraga": "./src/cli.ts"
+  },
+  "files": [
+    "src/",
+    "dist/client/",
+    "defaults/",
+    "!src/**/__tests__/**",
+    "!src/**/*.test.ts"
+  ],
+  "scripts": {
+    "dev": "concurrently \"PORT=3033 bun run --watch src/server/index.ts\" \"until curl -sf http://localhost:3033/api/version >/dev/null 2>&1; do sleep 0.2; done; vite --host --port 3032\"",
+    "dev:http": "DEV_HTTPS=0 bun run dev",
+    "build": "vite build",
+    "start": "bun run src/server/index.ts",
+    "typecheck": "bun run src/scripts/typecheck.ts",
+    "test": "bun test",
+    "summarize:conversations": "bun run src/scripts/summarize-conversations.ts",
+    "guard:publish": "bun -e \"const bad=Object.keys(process.env).filter(k=>/^(VITE_|FIREBASE_CONFIG)/.test(k)&&process.env[k]);if(bad.length){console.error('\\n\\u2716 Refusing to publish: '+bad.join(', ')+' set in the environment.\\n  The client build inlines these, so publishing would bake real credentials into dist/.\\n  Publish from CI (clean env), or re-run the publish under a scrubbed env (env -i).\\n');process.exit(1)}console.log('\\u2713 publish guard: no client-inlined config in env')\"",
+    "prepublishOnly": "bun run guard:publish && bun run build"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.141",
+    "@livx.cc/mcp-firebase": "^0.1.14",
+    "@radix-ui/react-accordion": "^1.2.2",
+    "@radix-ui/react-dialog": "^1.1.4",
+    "@radix-ui/react-scroll-area": "^1.2.2",
+    "@radix-ui/react-slot": "^1.1.1",
+    "@tailwindcss/typography": "^0.5.19",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cron-parser": "^5.5.0",
+    "cronstrue": "^3.14.0",
+    "edge.libx.js": "^0.6.1",
+    "express": "^4.21.1",
+    "firebase": "^11.0.0",
+    "lucide-react": "^0.468.0",
+    "mcp-slack-use": "github:Livshitz/mcp-slack-use#1dde291",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^9.0.0",
+    "recharts": "^3.8.0",
+    "rehype-highlight": "^7.0.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^2.6.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/express": "^5.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.2.1",
+    "postcss": "^8.5.1",
+    "tailwindcss": "^3.4.17",
+    "tailwindcss-animate": "^1.0.7",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.7"
+  }
+}

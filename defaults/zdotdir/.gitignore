@@ -1,0 +1,8 @@
+# zsh writes runtime state (.zcompdump, etc.) into ZDOTDIR — keep it out of the repo. Track only the
+# wrapper rc files that make the `claude` shim win on PATH.
+*
+!.gitignore
+!.zshenv
+!.zprofile
+!.zshrc
+!.zlogin

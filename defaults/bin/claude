@@ -1,0 +1,45 @@
+#!/usr/bin/env sh
+# shraga `claude` shim — pins a KNOWN session id for fresh Claude Code sessions so a dead pane can be
+# revived into the EXACT conversation that ran in it (modern CC no longer prints `claude --resume <id>`
+# on exit, and "newest session in cwd" mis-binds when several sessions share a project dir).
+#
+# For a fresh session it generates a uuid, records `<UNCLAW_PANE_ID> → <uuid>` under UNCLAW_DATA_DIR
+# (read by the revive resolver, server-side), then execs the real claude with `--session-id <uuid>`.
+# For resume/continue/print or when not running inside an shraga pane, it's a pure passthrough — zero
+# behaviour change. Never recurses: it resolves the real claude by removing its own dir from PATH.
+
+self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)
+real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$self_dir" | paste -sd: -) command -v claude 2>/dev/null)
+[ -n "$real" ] || real=claude   # fallback; should never happen
+
+record() { # $1 = session uuid → drop <paneToken>→<uuid> for the revive resolver
+  [ -n "$UNCLAW_DATA_DIR" ] && [ -n "$UNCLAW_PANE_ID" ] || return 0
+  d="$UNCLAW_DATA_DIR/pane-sessions"
+  mkdir -p "$d" 2>/dev/null && printf '%s' "$1" > "$d/$UNCLAW_PANE_ID" 2>/dev/null
+}
+
+# Only pin for a genuinely fresh interactive session: skip resume/continue (id already exists) and
+# --print/-p (scripted, not a revivable pane). For an explicit `--resume <uuid>` the resumed id IS this
+# pane's session, so record it (no --session-id) — revive can then re-resume it exactly.
+pin=1
+[ -n "$UNCLAW_PANE_ID" ] || pin=
+prev=
+for a in "$@"; do
+  case "$a" in
+    -r|--resume|-c|--continue|--fork-session|--from-pr|-p|--print) pin= ;;
+    --session-id) pin= ;;                  # caller pinned its own id — don't add a second (recorded below)
+    --session-id=*) pin=; case "${a#--session-id=}" in [0-9a-f]*-*-*-*-*) record "${a#--session-id=}" ;; esac ;;
+    --resume=*) pin=; case "${a#--resume=}" in [0-9a-f]*-*-*-*-*) record "${a#--resume=}" ;; esac ;;
+  esac
+  case "$prev" in -r|--resume|--session-id) case "$a" in [0-9a-f]*-*-*-*-*) record "$a" ;; esac ;; esac
+  prev="$a"
+done
+
+if [ -n "$pin" ]; then
+  sid=$(uuidgen 2>/dev/null | tr 'A-Z' 'a-z')
+  case "$sid" in
+    [0-9a-f]*-*-*-*-*) record "$sid"; exec "$real" --session-id "$sid" "$@" ;;
+  esac
+fi
+
+exec "$real" "$@"
