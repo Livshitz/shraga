@@ -1,0 +1,4 @@
+Canonical source for runtime scripts/ directory.
+Seeded to scripts/ on first startup (see src/server/seed.ts).
+Edit here first — runtime copies are gitignored and may diverge.
+Use `bun run reseed` to re-apply defaults to runtime dirs.

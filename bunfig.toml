@@ -1,0 +1,10 @@
+[test]
+# `bun test src/` treats "src/" as a FILTER (substring-matched against absolute paths), not a path.
+# Bun scans the whole cwd first — including node_modules, which here is a symlink to a sibling
+# project's shared tree containing linked sibling repos — then keeps every path containing "src/".
+# That silently counted OTHER repos' tests as ours ("67 pass" was really 15). Pinning the scan root
+# makes even a bare `bun test` hermetic to this repo.
+root = "src"
+
+# Mints one temp DATA_DIR before any test module imports paths.ts (which freezes it into a const).
+preload = ["./src/server/__tests__/setup.ts"]

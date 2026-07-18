@@ -1,0 +1,17 @@
+#!/usr/bin/env sh
+# claude-revive — surface the resume suggestion for a restarted terminal. Does NOT auto-run anything:
+# it just shows the captured resume command (`ccd -r <id>`) and the prior tab's title so you can verify and
+# choose to run it. On restart the same command is also pre-typed on your prompt (not submitted), so
+# usually you just review it there and press Enter. Env: UNCLAW_RESUME_CMD, UNCLAW_PTY_TITLE.
+
+cmd="${UNCLAW_RESUME_CMD:-}"
+title="${UNCLAW_PTY_TITLE:-}"
+
+if [ -z "$cmd" ]; then
+  printf '\033[2mclaude-revive: no resume suggestion captured for this terminal.\033[0m\n'
+  exit 0
+fi
+
+[ -n "$title" ] && printf '\033[2mprevious session:\033[0m \033[1m%s\033[0m\n' "$title"
+printf '\033[2mto revive, run:\033[0m \033[1;36m%s\033[0m\n' "$cmd"
+printf '\033[2m(not executed — review it, then run the above, or press Enter on the staged prompt)\033[0m\n'

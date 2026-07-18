@@ -1,0 +1,52 @@
+# dependencies
+node_modules
+vendor
+.libs/
+
+# build output
+dist
+out
+*.tgz
+*.tsbuildinfo
+
+# scratch / logs
+.tmp/
+logs
+nohup.out
+coverage
+*.lcov
+
+# env files — never commit real values
+.env
+.env.*
+!.env.example
+
+# runtime data dirs (root-anchored)
+/data
+/data-*
+/backups/
+/secrets/
+.internal-token
+
+# generated MCP config for local agent CLIs
+.mcp.json
+.mcp-*
+.para-pty
+
+# editor / OS
+.idea
+.cursor/**
+.DS_Store
+
+# local agent + operator tooling (not part of the public project)
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/shraga/
+.agent/
+tools/
+/scripts/
+vmdrop*.yaml
+.npmrc
+run-isolated.sh
+CLAUDE.md

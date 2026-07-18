@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <style>
+      /* The appwrap shell injects `*{-webkit-touch-callout:none}` to suppress long-press, which also
+         kills the iOS Copy/Paste callout on text inputs. Restore it on editable fields so paste works.
+         `input` (0,0,1) outranks the shell's `*` (0,0,0); !important guards against injection order. */
+      input, textarea, [contenteditable] { -webkit-touch-callout: default !important; }
+    </style>
+    <title>Shraga</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/client/main.tsx"></script>
+  </body>
+</html>
