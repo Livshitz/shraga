@@ -13,8 +13,7 @@ import { resolveModelSwitch } from '../model-aliases.ts';
 import type { WsEvent, AskQuestion, QuestionAnswers, QuestionHandler } from '../claude.ts';
 import type { AgentEngine, EngineStreamOpts, EngineModel } from './types.ts';
 import { getPromptSuffix } from '../prompt-suffix.ts';
-
-const PROJECT_ROOT = path.resolve(import.meta.dirname, '..', '..', '..');
+import { APP_ROOT } from '../paths.ts';
 const IMMUTABLE_SYSTEM_PROMPT = readFileSync(path.resolve(import.meta.dirname, '../../../defaults/system-prompt.md'), 'utf-8');
 const DEFAULT_USER_PROMPT = `You are a helpful assistant with access to MCP tools.`;
 const DEFAULT_ALLOWED_TOOLS = ['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch'];
@@ -175,7 +174,7 @@ export class ClaudeCodeEngine implements AgentEngine {
 
   async *stream(opts: EngineStreamOpts): AsyncGenerator<WsEvent> {
     const { config, directives } = opts;
-    const cwd = PROJECT_ROOT;
+    const cwd = APP_ROOT;
 
     const fullPrompt = buildHistoryPrompt(opts.conversation, opts.contextBlock, opts.prompt);
     const permMode = opts.onPermissionRequest ? 'default' : (config.permissionMode ?? 'acceptEdits');

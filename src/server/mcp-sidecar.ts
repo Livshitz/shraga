@@ -1,8 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import path from 'node:path';
 import { getHttpSidecarSpecs, type HttpSidecarSpec } from './shraga-config.ts';
+import { APP_ROOT } from './paths.ts';
 
-const PROJECT_ROOT = path.resolve(import.meta.dirname, '..', '..');
 const sidecars = new Map<string, { proc: ChildProcess; spec: HttpSidecarSpec }>();
 
 async function isPortAlive(url: string): Promise<boolean> {
@@ -17,7 +17,7 @@ async function isPortAlive(url: string): Promise<boolean> {
 let shuttingDown = false;
 
 function startOne(spec: HttpSidecarSpec, restarts = 0) {
-  const vendorDir = path.join(PROJECT_ROOT, 'vendor', spec.dir);
+  const vendorDir = path.join(APP_ROOT, 'vendor', spec.dir);
   const entrypoint = path.join(vendorDir, 'src/mcp/cli.ts');
   const args = ['run', entrypoint, '--port', String(spec.port)];
   const startedAt = Date.now();
