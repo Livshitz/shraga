@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { DATA_DIR } from './paths.ts';
+import { DATA_DIR, APP_ROOT } from './paths.ts';
 import type { McpServerConfig, McpConfig, McpHttpServerConfig } from './mcp.ts';
 
 /** Shorthand for vendor-dir MCPs (auto-resolves command/args from vendor/{name}) */
@@ -70,8 +70,6 @@ export function defineConfig(config: ShragaConfig): ShragaConfig {
   return config;
 }
 
-const PROJECT_ROOT = path.resolve(import.meta.dirname, '..', '..');
-
 /**
  * Config filenames, in precedence order. `shraga.config.ts` is canonical; `unclaw.config.ts` is
  * the legacy name kept for back-compat — existing deployments have that file in their data dir,
@@ -131,7 +129,7 @@ export function getGlobalMcpsFromConfig(): McpConfig {
       result[name] = { type: 'stdio', ...full } satisfies McpServerConfig;
     } else {
       const shorthand = entry as McpShorthandEntry;
-      const vendorDir = path.join(PROJECT_ROOT, 'vendor', shorthand.dir ?? name);
+      const vendorDir = path.join(APP_ROOT, 'vendor', shorthand.dir ?? name);
       const command = shorthand.command ?? 'bun';
       const args = shorthand.args ?? ['run', path.join(vendorDir, 'src/mcp/cli.ts'), '--stdio'];
       const env: Record<string, string> = {};

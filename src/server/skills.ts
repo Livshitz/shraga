@@ -1,12 +1,10 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, unlinkSync, renameSync } from 'node:fs';
 import path from 'node:path';
-import { DATA_DIR, dataPath } from './paths.ts';
+import { DATA_DIR, dataPath, APP_ROOT } from './paths.ts';
 import { getBuiltinSkillNames } from './seed.ts';
 import { dataSync } from './data-sync.ts';
 import { injectFile } from './file-inject.ts';
 import { getGlobalMcpConfig } from './mcp.ts';
-
-const PROJECT_ROOT = path.resolve(import.meta.dirname, '..', '..');
 
 const SKILLS_DIR = dataPath('skills');
 const DEFAULTS_PATH = dataPath('skills-defaults.json');
@@ -108,7 +106,7 @@ function formatMcpCommandBlock(mcpName: string, skillBody: string, args: string)
  * Markdown from `vendor/<serverName>/.claude/skills/<serverName>/SKILL.md` — same file the MCP exposes as skill://serverName/workflow.
  */
 export function resolveMcpBundledSkillContent(serverName: string): string | null {
-  const file = path.join(PROJECT_ROOT, 'vendor', serverName, '.claude/skills', serverName, 'SKILL.md');
+  const file = path.join(APP_ROOT, 'vendor', serverName, '.claude/skills', serverName, 'SKILL.md');
   if (!existsSync(file)) return null;
   return readFileSync(file, 'utf-8');
 }
@@ -128,7 +126,7 @@ export function resolvedSkillInjectionBlock(name: string): string | null {
 }
 
 function mcpSkillFilePath(serverName: string): string {
-  return path.join(PROJECT_ROOT, 'vendor', serverName, '.claude/skills', serverName, 'SKILL.md');
+  return path.join(APP_ROOT, 'vendor', serverName, '.claude/skills', serverName, 'SKILL.md');
 }
 
 /**

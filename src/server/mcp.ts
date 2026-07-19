@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
-import { dataPath } from './paths.ts';
+import { dataPath, APP_ROOT } from './paths.ts';
 import { dataSync } from './data-sync.ts';
 import { getGlobalMcpsFromConfig } from './shraga-config.ts';
 
@@ -151,8 +151,6 @@ function withStdioType(config: McpConfig): McpConfig {
   return out;
 }
 
-const PROJECT_ROOT = path.resolve(import.meta.dirname, '..', '..');
-
 /** Canonical path baked into MCP env when prod has the file deployed (cwd = app dir). */
 const GOOGLE_SA_DEPLOY_REL = './secrets/google-service-account.json';
 
@@ -163,7 +161,7 @@ const GOOGLE_SA_DEPLOY_REL = './secrets/google-service-account.json';
  */
 function finalizeGoogleServiceAccountCredentials(config: McpConfig): McpConfig {
   const jsonFromEnv = process.env.GOOGLE_SERVICE_ACCOUNT_JSON?.trim();
-  const defaultAbs = path.join(PROJECT_ROOT, 'secrets/google-service-account.json');
+  const defaultAbs = path.join(APP_ROOT, 'secrets/google-service-account.json');
   const defaultExists = existsSync(defaultAbs);
 
   let result = { ...config };
@@ -184,7 +182,7 @@ function finalizeGoogleServiceAccountCredentials(config: McpConfig): McpConfig {
     const pathOk =
       raw &&
       !raw.includes('${') &&
-      existsSync(path.isAbsolute(raw) ? raw : path.resolve(PROJECT_ROOT, raw.replace(/^\.\//, '')));
+      existsSync(path.isAbsolute(raw) ? raw : path.resolve(APP_ROOT, raw.replace(/^\.\//, '')));
 
     if (pathOk) continue;
     if (!defaultExists) continue;
