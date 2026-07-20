@@ -13,6 +13,7 @@ export interface Attachment {
 export type MessageBlock =
   | { type: 'text'; text: string }
   | { type: 'thinking'; text: string }
+  | { type: 'error'; text: string }
   | { type: 'image'; src: string }
   | { type: 'file'; src: string; name: string; mimeType: string }
   | { type: 'context'; label: string; text: string }
@@ -74,9 +75,10 @@ export function appendToAssistant(prev: ChatMessage[], block: MessageBlock): Cha
   return [...prev, { id: randomUUID(), role: 'assistant', blocks: [block] }];
 }
 
-export function appendErrorToAssistant(prev: ChatMessage[], text: string): ChatMessage[] {
+/** `kind: 'error'` renders as a failure block — matching what the server persists for a failed run. */
+export function appendErrorToAssistant(prev: ChatMessage[], text: string, kind: 'text' | 'error' = 'text'): ChatMessage[] {
   const last = prev[prev.length - 1];
-  const block: MessageBlock = { type: 'text', text };
+  const block: MessageBlock = { type: kind, text };
   if (last?.role === 'assistant') {
     return [...prev.slice(0, -1), { ...last, blocks: [...last.blocks, block] }];
   }
@@ -271,7 +273,7 @@ export function useConversation(socket: AgentSocket | null, opts: ConversationOp
           expectingTurnRef.current = false;
           setBusy(false);
           setQueue([]);
-          return setMessages((prev) => appendErrorToAssistant(prev, `⚠️ Error: ${event.message}`));
+          return setMessages((prev) => appendErrorToAssistant(prev, event.message, 'error'));
         case 'disconnected':
           // Any in-flight turn is interrupted on socket loss.
           return setBusy(false);
