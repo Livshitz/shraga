@@ -1,7 +1,21 @@
 import { randomUUID } from '@/lib/utils';
 import type { ChatMessage, MessageBlock } from '@/hooks/useConversation';
 
-/** Authenticated fetch with bearer token + timeout. Throws on !ok. */
+/** An !ok response from `apiFetch`, carrying the HTTP `status` so callers can branch on it.
+ *
+ *  WHY a class and not a bare Error: apiFetch THROWS on !ok — it never RETURNS a non-ok response — so
+ *  the natural-looking `const res = await apiFetch(…); if (res.status === 404) …` is DEAD CODE that
+ *  never runs. Callers must branch in the `catch`, and a stringified `Error('404 Not Found')` leaves
+ *  them parsing the message to do it. This shipped as a real bug: a dead-PTY cwd poller kept 404ing
+ *  every 3s forever because its "stop on 404" test sat on the return value. */
+export class ApiError extends Error {
+  constructor(public readonly status: number, statusText: string) {
+    super(`${status} ${statusText}`);
+    this.name = 'ApiError';
+  }
+}
+
+/** Authenticated fetch with bearer token + timeout. Throws `ApiError` (with `.status`) on !ok. */
 export async function apiFetch(
   path: string,
   getToken: () => Promise<string | null>,
@@ -19,7 +33,7 @@ export async function apiFetch(
       signal: controller.signal,
       headers: { Authorization: `Bearer ${token}`, ...init?.headers },
     });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    if (!res.ok) throw new ApiError(res.status, res.statusText);
     return res;
   } finally {
     clearTimeout(timer);
