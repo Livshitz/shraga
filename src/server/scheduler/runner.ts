@@ -192,6 +192,11 @@ export async function runSchedule(
       } else if (ev.type === 'error') {
         status = abortController.signal.aborted ? 'aborted' : 'error';
         error = ev.message;
+        // Nobody watches stderr on a scheduled run — record the failure in the transcript.
+        if (status === 'error') {
+          if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
+          assistantBlocks.push({ type: 'error', text: ev.message });
+        }
         break;
       }
     }
@@ -201,6 +206,8 @@ export async function runSchedule(
     } else {
       status = 'error';
       error = err?.message ?? String(err);
+      if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
+      assistantBlocks.push({ type: 'error', text: error ?? 'Unknown error' });
       console.error(`[scheduler] run error for ${schedule.id}:`, error);
     }
   } finally {

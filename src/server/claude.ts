@@ -382,7 +382,8 @@ export async function consumeStream(stream: AsyncGenerator<WsEvent>, onEvent?: (
     } else if (ev.type === 'done') {
       break;
     } else if (ev.type === 'error') {
-      text += `\n⚠️ ${ev.message}`;
+      if (text) { blocks.push({ type: 'text', text }); text = ''; }
+      blocks.push({ type: 'error', text: ev.message });
       break;
     }
   }
