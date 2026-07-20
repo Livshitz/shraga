@@ -15,10 +15,12 @@ export const HOURLY_SUMMARIZER_SCHEDULE_ID = 'builtin-conversation-summarizer';
 export const FAILURE_NOTIFIER_SCHEDULE_ID = 'builtin-failure-notifier';
 
 /** Generic triage prompt for the failure notifier. Deployments override the prompt
- *  (recipients, runbooks, base URL, severity rules) — their edits survive reconcile. */
+ *  (recipients, runbooks, severity rules) — their edits survive reconcile. The session link
+ *  is NOT part of that: it comes from the event payload (see getSessionUrl), precisely so it
+ *  reaches deployments whose stored prompt reconcile will never touch. */
 const FAILURE_NOTIFIER_PROMPT = [
   'A scheduled job just FAILED. The failure event payload is included in this message',
-  '(fields: name, scheduleId, status, error, sessionId). Duplicate alerts for the same',
+  '(fields: name, scheduleId, status, error, sessionId, sessionUrl). Duplicate alerts for the same',
   'job+error are already suppressed by this trigger\'s throttle, so just handle this one.',
   '',
   'TRIAGE — classify the error:',
@@ -35,9 +37,24 @@ const FAILURE_NOTIFIER_PROMPT = [
   '  *What:* <one plain-language line>',
   '  *Fix:* <actionable next step from triage>',
   '  *Error:* <error, truncated to ~400 chars, in backticks>',
-  '  *Session:* <deployment URL>/?session=<sessionId>',
+  '  *Session:* <the payload\'s sessionUrl, verbatim>',
+  'The payload carries a ready-made absolute sessionUrl. Use it EXACTLY as given — never build a',
+  'link yourself. If sessionUrl is absent the deployment has no public origin configured: OMIT the',
+  'Session line entirely. Do NOT substitute localhost, $PORT or any host you infer from the box —',
+  'the alert is read off-box and such a link is always dead.',
   'Do NOT try to fix the job yourself.',
 ].join('\n');
+
+/** The pre-sessionUrl Session line: it asked the model to improvise "<deployment URL>", which
+ *  nothing ever supplied, so it fell back to the only host it could see ($PORT → localhost).
+ *  Reconcile deliberately preserves a builtin's stored `task.prompt` so deployment edits survive
+ *  upgrades — which also means a stored prompt keeps this broken line forever. Heal just the line
+ *  (not the whole prompt), so a deployment's other customisations are untouched.
+ *  Only the placeholder itself and the label before it are replaced: anything the deployment
+ *  appended after the placeholder is a hand-written annotation, so it is carried over verbatim,
+ *  and every occurrence is healed (a stored prompt may mention the link more than once). */
+const LEGACY_SESSION_LINE = /^.*<deployment URL>\/\?session=<sessionId>(.*)$/gm;
+const SESSION_LINE_FIX = "  *Session:* <the payload's sessionUrl, verbatim — omit this line if absent>";
 
 export function isSystemSchedule(schedule: Schedule): boolean {
   return schedule.scope === 'system';
@@ -68,6 +85,13 @@ export function backfillScope(schedules: Schedule[]): void {
     // (breaks for npm-consumer apps) → the resolved absolute path.
     if (task.kind === 'job' && task.command === 'bun run summarize:conversations') {
       task.command = SUMMARIZER_CMD;
+    }
+    // Heal a persisted failure-notifier prompt still carrying the un-supplied "<deployment URL>"
+    // placeholder — reconcile won't touch task.prompt, so this is the only path that reaches it.
+    if (s.id === FAILURE_NOTIFIER_SCHEDULE_ID && typeof task.prompt === 'string') {
+      // `$1` keeps whatever the deployment wrote after the placeholder. No .test() guard:
+      // LEGACY_SESSION_LINE is global, and a global regex's .test() carries lastIndex between calls.
+      task.prompt = task.prompt.replace(LEGACY_SESSION_LINE, `${SESSION_LINE_FIX}$1`);
     }
   }
 }
