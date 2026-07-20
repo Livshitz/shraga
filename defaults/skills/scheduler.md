@@ -163,6 +163,8 @@ The system emits these onto the bus automatically — use them as the `source` o
   ```
   Runs that were *themselves* event-triggered do NOT emit `schedule.finished` — this prevents feedback loops, so you can't chain `schedule.finished` → event run → `schedule.finished` infinitely.
 
+  A `status: error` on a **prompt** run means it failed up to 3 times, not once: a transient failure that produced no output at all (no token, no tool call — so no side effect) is retried with a short backoff before being reported. So `error` is a real failure worth acting on, not a blip. Job (shell command) runs are never retried — a non-zero exit says nothing about what the command already did.
+
 ## Throttling event triggers
 
 Event triggers accept an optional `throttle` that suppresses duplicate fires **before** a run is spawned:
