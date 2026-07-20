@@ -66,6 +66,27 @@ export function resolvePromptFile(p: string): string {
   return existsSync(dataAnchored) ? dataAnchored : rootAnchored;
 }
 
+/**
+ * Bounded retry for transient engine failures on a prompt run.
+ *
+ * A cold-open race in the engine (observed: `database is locked` from @cursor/sdk, and an
+ * unreachable ANTHROPIC_BASE_URL) can kill a run in ~600ms having produced NOTHING — no first
+ * token, no tool call, no side effect. One blip then costs the whole day's run. The race window is
+ * milliseconds, so these delays are deliberately short: this is a blip retry, not an outage retry.
+ * Each delay is jittered (×0.5–1.5) so concurrent schedules don't retry in lockstep.
+ */
+const RETRY_BACKOFF_MS = [500, 2_000];
+const MAX_ATTEMPTS = RETRY_BACKOFF_MS.length + 1;
+
+/** Resolves after `ms`, or immediately on abort — a cancelled run must not sit out its backoff
+ *  holding the session lock and the running marker. */
+const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => {
+  if (signal?.aborted) return resolve();
+  const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', done); resolve(); };
+  const timer = setTimeout(done, ms);
+  signal?.addEventListener('abort', done, { once: true });
+});
+
 function formatEventBlock(e: EventContext): string {
   let body: string;
   try { body = JSON.stringify(e.payload, null, 2); } catch { body = String(e.payload); }
@@ -144,6 +165,9 @@ export async function runSchedule(
   const mcpServers = getMcpConfig(schedule.createdBy.uid);
 
   let assistantText = '';
+  // Thinking is real, billed model output but lands in no block (we don't persist it), so it needs
+  // its own flag to suppress retry — see the side-effect boundary below.
+  let producedThinking = false;
   const assistantBlocks: ConvBlock[] = [];
   const collectPartialBlocks = () => [
     ...assistantBlocks,
@@ -169,46 +193,81 @@ export async function runSchedule(
   onEvent({ type: 'schedule:run_started', scheduleId: schedule.id, sessionId, at: now });
 
   try {
-    for await (const ev of streamChat({
-      prompt,
-      sessionId,
-      uid: schedule.createdBy.uid,
-      userEmail: schedule.createdBy.email,
-      userName: schedule.createdBy.email.split('@')[0],
-      mcpServers,
-      abortController,
-      onPermissionRequest,
-    })) {
-      onEvent({ type: 'session_stream', sessionId, event: ev });
-      if (ev.type === 'text_delta') {
-        assistantText += ev.text;
-      } else if (ev.type === 'tool_use') {
-        if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
-        assistantBlocks.push({ type: 'tool_use', tool: ev.tool, toolUseId: ev.toolUseId, input: ev.input });
-      } else if (ev.type === 'tool_result') {
-        assistantBlocks.push({ type: 'tool_result', toolUseId: ev.toolUseId, output: ev.output });
-      } else if (ev.type === 'done') {
-        break;
-      } else if (ev.type === 'error') {
-        status = abortController.signal.aborted ? 'aborted' : 'error';
-        error = ev.message;
-        // Nobody watches stderr on a scheduled run — record the failure in the transcript.
-        if (status === 'error') {
-          if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
-          assistantBlocks.push({ type: 'error', text: ev.message });
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      status = 'ok';
+      error = undefined;
+      try {
+        for await (const ev of streamChat({
+          prompt,
+          sessionId,
+          uid: schedule.createdBy.uid,
+          userEmail: schedule.createdBy.email,
+          userName: schedule.createdBy.email.split('@')[0],
+          mcpServers,
+          abortController,
+          onPermissionRequest,
+        })) {
+          onEvent({ type: 'session_stream', sessionId, event: ev });
+          if (ev.type === 'text_delta') {
+            assistantText += ev.text;
+          } else if (ev.type === 'tool_use') {
+            if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
+            assistantBlocks.push({ type: 'tool_use', tool: ev.tool, toolUseId: ev.toolUseId, input: ev.input });
+          } else if (ev.type === 'thinking_delta') {
+            producedThinking = true;
+          } else if (ev.type === 'tool_result') {
+            assistantBlocks.push({ type: 'tool_result', toolUseId: ev.toolUseId, output: ev.output });
+          } else if (ev.type === 'done') {
+            break;
+          } else if (ev.type === 'error') {
+            status = abortController.signal.aborted ? 'aborted' : 'error';
+            error = ev.message;
+            break;
+          }
         }
+      } catch (err: any) {
+        if (abortController.signal.aborted) {
+          status = 'aborted';
+        } else {
+          status = 'error';
+          error = err?.message ?? String(err);
+        }
+      }
+
+      if (status !== 'error') break;
+
+      // The side-effect boundary. This is NOT an exact `ttft=-1` test — the engine emits events we
+      // don't track (model_resolved, stats) — it is the weaker but sufficient guarantee we actually
+      // need: if all three are empty, no side effect can have occurred, so re-running can't
+      // double-apply one (a posted DM, a written file). That holds because `tool_use` is yielded at
+      // content_block_start, BEFORE the tool executes — any tool that ran is always preceded by a
+      // `tool_use` already in `assistantBlocks`. `assistantText`/`producedThinking` additionally
+      // stop us re-billing a long model call that genuinely started producing before dying.
+      // Deliberately NOT counted: `model_resolved` and `stats` fire at spawn/on a timer before any
+      // generation — counting them would disable retry for the exact incident this exists for.
+      // `tool_use_input`, `tool_result_image`, `permission_request` and `question_request` need no
+      // separate flag: each is necessarily preceded by the `tool_use` that already set the boundary.
+      const producedOutput = assistantBlocks.length > 0 || assistantText.length > 0 || producedThinking;
+      if (producedOutput || abortController.signal.aborted || attempt >= MAX_ATTEMPTS) {
+        // Nobody watches stderr on a scheduled run — record the failure in the transcript.
+        if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
+        assistantBlocks.push({ type: 'error', text: error ?? 'Unknown error' });
+        console.error(`[scheduler] run error for ${schedule.id} (attempt ${attempt}/${MAX_ATTEMPTS}):`, error);
         break;
       }
-    }
-  } catch (err: any) {
-    if (abortController.signal.aborted) {
-      status = 'aborted';
-    } else {
-      status = 'error';
-      error = err?.message ?? String(err);
-      if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
-      assistantBlocks.push({ type: 'error', text: error ?? 'Unknown error' });
-      console.error(`[scheduler] run error for ${schedule.id}:`, error);
+
+      // Retries stay visible: a silent one would hide that the upstream engine is flaky.
+      const delay = Math.round(RETRY_BACKOFF_MS[attempt - 1]! * (0.5 + Math.random()));
+      console.warn(`[scheduler] attempt ${attempt}/${MAX_ATTEMPTS} for ${schedule.id} failed before any output, retrying in ${delay}ms:`, error);
+      appendMessage(sessionId, {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        blocks: [{ type: 'text', text: `⚠️ Attempt ${attempt}/${MAX_ATTEMPTS} failed before producing any output — retrying in ${delay}ms.\n\n\`${error}\`` }],
+      });
+      onEvent({ type: 'session_messages_changed', sessionId });
+      await sleep(delay, abortController.signal);
+      // Cancelling during the backoff is a user cancel, not a failure — don't spawn attempt N+1.
+      if (abortController.signal.aborted) { status = 'aborted'; error = undefined; break; }
     }
   } finally {
     flush();
