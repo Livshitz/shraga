@@ -32,7 +32,7 @@ Give it its own machine, its own keys, its own identity. Onboard it once, then d
 - **Skills**: reusable procedures you teach it once (files in `data/skills/`).
 - **MCP servers**: connect tools (GitHub, Slack, databases) per-user or globally.
 - **Schedules**: run agent jobs on a cron or in response to events.
-- **Programmatic API + MCP endpoint**: drive the the agent from scripts or from claude.ai.
+- **Programmatic API + MCP endpoint**: drive the agent from scripts or from claude.ai.
 
 ## What's in the box
 
