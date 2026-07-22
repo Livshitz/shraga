@@ -1,3 +1,7 @@
+---
+description: The embedded MCP endpoint (POST /mcp) and uck_ API keys that let external Claude clients access workspace, skills, sessions, schedules, and remote prompts.
+---
+
 # MCP Server & API Keys
 
 Shraga exposes an embedded MCP endpoint at `POST /mcp` so external Claude clients (Claude Desktop, Claude Cloud, other MCP consumers) can access workspace, skills, sessions, schedules, and run prompts remotely.

@@ -1,3 +1,7 @@
+---
+description: Maintain the communications log (data/comms-log.jsonl) to avoid duplicate or redundant proactive outreach.
+---
+
 # Communications Awareness
 
 You maintain a communications log to avoid duplicate or redundant **proactive** outreach. Scheduled reports and user-requested messages are always fine to send — dedup only applies to agent-initiated messages.

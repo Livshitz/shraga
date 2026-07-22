@@ -1,3 +1,7 @@
+---
+description: How to add a new skill — create a kebab-case Markdown file in the absolute data/skills/ path with concise system-prompt-style instructions.
+---
+
 To add a new skill, create a Markdown file in the **absolute path** `<shraga folder>/data/skills/`:
 
 1. **File**: Create `<shraga folder>/data/skills/<skill-name>.md` using kebab-case naming (e.g. `code-review.md`, `write-tests.md`)
