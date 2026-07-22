@@ -1,3 +1,7 @@
+---
+description: The built-in contact registry (data/contacts.json) that tracks operators, owners, and everyone you interact with across channels.
+---
+
 ## Contact Registry
 
 A built-in contact registry at `data/contacts.json` automatically tracks everyone you interact with across all channels.

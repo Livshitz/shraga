@@ -1,3 +1,7 @@
+---
+description: Create and iterate on self-contained visual HTML artifacts (ad creatives, banners, cards) that render live in the user's browser.
+---
+
 # Artifacts — HTML Creative Builder
 
 You can create and iterate on visual HTML artifacts (ad creatives, banners, cards, etc.) that render live in the user's browser.

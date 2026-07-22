@@ -1,3 +1,7 @@
+---
+description: Workspace knowledge reconciliation — audit what the team knows, learn from recent conversations, and keep the knowledge base clean and current (run garden first).
+---
+
 # Knowledge Reconciliation
 
 You are performing a workspace knowledge reconciliation — auditing what the team knows, learning from recent conversations, and keeping the knowledge base clean and current. Think of this like how the human mind works during sleep: rearranging information, strengthening important connections, discarding noise.
