@@ -1204,6 +1204,10 @@ async function runStream(ws: WebSocket, session: WsSession, sid: string, promptT
           console.log(`[ws] Suppressing error during steer for ${sid.slice(0, 8)}`);
         } else {
           console.error(`[ws] Error event for ${session.email}: ${event.message}`);
+          // Persist alongside whatever partial output the turn produced — flushAssistant() saves it.
+          if (thinkingText) { assistantBlocks.push({ type: 'thinking', text: thinkingText }); thinkingText = ''; }
+          if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
+          assistantBlocks.push({ type: 'error', text: event.message });
           send(ws, { type: 'error', message: event.message, sessionId: sid });
         }
         break;
@@ -1218,8 +1222,14 @@ async function runStream(ws: WebSocket, session: WsSession, sid: string, promptT
       console.log(`[ws] Stream aborted for steer in ${sid.slice(0, 8)}`);
     } else {
       stopReason = 'error';
-      console.error(`[ws] Stream error for ${session.email}:`, err.message || err);
-      send(ws, { type: 'error', message: err.message || String(err), sessionId: sid });
+      const msg = err.message || String(err);
+      console.error(`[ws] Stream error for ${session.email}:`, msg);
+      // Flush partial output first — flushAssistant() appends it in the finally, which would
+      // otherwise order the failure ahead of the text it followed.
+      if (thinkingText) { assistantBlocks.push({ type: 'thinking', text: thinkingText }); thinkingText = ''; }
+      if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
+      assistantBlocks.push({ type: 'error', text: msg });
+      send(ws, { type: 'error', message: msg, sessionId: sid });
     }
   } finally {
     clearInterval(partialInterval);
@@ -1561,7 +1571,8 @@ async function retryWebSession(session: SessionMeta, prompt: string) {
       } else if (ev.type === 'done') {
         break;
       } else if (ev.type === 'error') {
-        assistantText += `\n⚠️ ${ev.message}`;
+        if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
+        assistantBlocks.push({ type: 'error', text: ev.message });
         break;
       }
     }
@@ -1569,7 +1580,9 @@ async function retryWebSession(session: SessionMeta, prompt: string) {
     if (assistantBlocks.length) {
       appendMessage(sid, { id: crypto.randomUUID(), role: 'assistant', blocks: assistantBlocks });
       broadcast({ type: 'session_messages_changed', sessionId: sid });
-      const preview = assistantText.slice(0, 120) || '(completed)';
+      const errBlock = assistantBlocks.find((b) => b.type === 'error');
+      const preview = assistantText.slice(0, 120)
+        || (errBlock?.type === 'error' ? `⚠️ ${errBlock.text}`.slice(0, 120) : '(completed)');
       notifyUnread(session.uid, sid, preview, 'response', session.title);
     }
   } catch (err: any) {

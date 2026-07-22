@@ -98,8 +98,10 @@ async function* pumpStream(
         stopReason = ev.stopReason ?? 'end_turn';
         break;
       } else if (ev.type === 'error') {
+        // Slack gets it as text (it has no block renderer); the transcript gets a real error block.
         const t = `\n⚠️ ${ev.message}`;
-        assistantText += t;
+        if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
+        assistantBlocks.push({ type: 'error', text: ev.message });
         yield { type: 'text_delta', text: t };
         break;
       }
