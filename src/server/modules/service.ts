@@ -87,6 +87,7 @@ function installedManifest(name: string): ModuleManifest {
 
 /** README.md content of a module folder (installed or builtin), capped at 32KB. */
 export function readModuleReadme(name: string, from: 'installed' | 'builtin'): string | undefined {
+  if (!/^[\w-]+$/.test(name)) return undefined; // defense-in-depth: never path-join a raw name
   const file = path.join(from === 'builtin' ? path.join(BUILTIN_MODULES_DIR, name) : moduleDir(name), 'README.md');
   if (!existsSync(file)) return undefined;
   try { return readFileSync(file, 'utf-8').slice(0, 32 * 1024); }
