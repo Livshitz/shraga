@@ -37,6 +37,7 @@ import type { Schedule } from './scheduler/index.ts';
 import { listSkills, listMcpCommands, getSkill, saveSkill, deleteSkill, duplicateSkill, renameSkill, getDefaultSkills, setDefaultSkills, resolveDefaultSkillsContent, purgeExpiredSkills, lintSkills } from './skills.ts';
 import { listWorkspaceTree, listWorkspaceDir, readWorkspaceFile, safeResolve as resolveWorkspacePath, watchWorkspace, ensureDir as ensureWorkspaceDir } from './workspace.ts';
 import { seedDefaults, getBuiltinSkillNames } from './seed.ts';
+import { registerModuleRoutes, reconcileInstalledModules } from './modules/index.ts';
 import { hydrateSlackUserToken } from './slack/oauth.ts';
 import { registerMcpOAuthRoutes } from './mcp-oauth.ts';
 import { registerEventRoutes } from './events/routes.ts';
@@ -369,6 +370,9 @@ app.put('/api/skills-defaults', requireAuth, (req, res) => {
   setDefaultSkills(req.body);
   res.json({ ok: true });
 });
+
+// ── Data-plane modules ───────────────────────────────────────────────────────
+registerModuleRoutes(app, requireAuth);
 
 // ── Schedules ────────────────────────────────────────────────────────────────
 
@@ -937,7 +941,14 @@ function broadcast(data: object, exclude?: WebSocket) {
 setBroadcaster(broadcast); // let session-bus push async events (e.g. an add-on's background worker output) to clients
 ensureWorkspaceDir();
 watchWorkspace((event) => broadcast({ type: 'workspace_change', ...event }));
-if (!PASSIVE) { scheduler.start(broadcast); startEventDispatcher(); }
+if (!PASSIVE) {
+  scheduler.start(broadcast);
+  startEventDispatcher();
+  // Modules reconcile MUST follow scheduler.start(): upsertSchedule mutates the engine's
+  // in-memory list, which is empty (and would be saved over schedules.json) before start.
+  // Skipped when passive (single-active-writer: no data/ mutations from a standby twin).
+  try { reconcileInstalledModules(); } catch (err) { console.error('[modules] boot reconcile failed:', (err as Error).message); }
+}
 // Host telemetry is read-only (no persistence, unref'd timer) — not a writer or consumer, so it
 // runs in passive too. Otherwise a standby instance reports empty stats and /api/stats is a lie.
 statsSampler.start(broadcast);
