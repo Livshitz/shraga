@@ -1,3 +1,7 @@
+---
+description: Structural maintenance of the workspace knowledge base — deduplicate, restructure, compress, and cross-reference (run before reconcile).
+---
+
 # Knowledge Gardening
 
 You are performing structural maintenance on the workspace knowledge base — deduplicating, restructuring, compressing, and cross-referencing. Think of this as defragmenting the team's shared memory: same information, better organized.

@@ -52,6 +52,16 @@ export function getAgentConfig(): AgentConfig {
   return config;
 }
 
+/**
+ * Which credentials the claude-code SDK will resolve — process-global, derived from env at call time
+ * (an API-key env var wins over a stored claude.ai login, matching the SDK's own precedence). Surfaced
+ * to the UI so the header shows subscription-vs-API-key immediately, without waiting for a turn. The
+ * per-turn ground truth (SDK `apiKeySource`) is logged by the engine.
+ */
+export function getClaudeAuthSource(): 'subscription' | 'api-key' {
+  return process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN ? 'api-key' : 'subscription';
+}
+
 export function saveAgentConfig(config: AgentConfig): void {
   mkdirSync(DATA_DIR, { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));

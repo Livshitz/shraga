@@ -333,6 +333,14 @@ export class ClaudeCodeEngine implements AgentEngine {
         }
 
         if (m.type === 'system' && m.subtype === 'init') {
+          // Which credentials the SDK actually resolved (env key vs claude.ai login) — a process-global
+          // fact surfaced per-run so logs (incl. headless/scheduler) answer "subscription or API key?".
+          // Runtime `apiKeySource` is the RESOLVED source string (verified against the SDK, not its .d.ts
+          // enum): a named env var ("ANTHROPIC_API_KEY") ⇒ API key; "none"/"oauth" ⇒ stored login ⇒ sub.
+          const src = m.apiKeySource as string | undefined;
+          const authSource: 'subscription' | 'api-key' | undefined =
+            src == null ? undefined : src === 'none' || src === 'oauth' ? 'subscription' : 'api-key';
+          if (authSource) console.log(`[claude] Auth: ${authSource} (apiKeySource=${src})`);
           if (m.model) {
             console.log(`[claude] Init model=${m.model}${m.model !== options['model'] ? ` (requested ${options['model']})` : ''}`);
             // If the user explicitly asked to switch models via a [directive], announce the change

@@ -1,10 +1,10 @@
 #!/usr/bin/env bun
 // stdio↔HTTP bridge for MCP (Streamable HTTP transport, maintains session ID)
-// Generic: MCP_URL + MCP_API_KEY, or legacy: UNCLAW_URL + UNCLAW_API_KEY
-const baseUrl = (process.env.MCP_URL || process.env.UNCLAW_URL || 'http://localhost:3033').replace(/\/$/, '');
-const mcpPath = process.env.MCP_PATH || '/mcp';
-const apiKey = process.env.MCP_API_KEY || process.env.UNCLAW_API_KEY;
-if (!apiKey) { console.error('[mcp-bridge] MCP_API_KEY (or UNCLAW_API_KEY) is required'); process.exit(1); }
+// Env: SHRAGA_URL + SHRAGA_API_KEY (preferred), or generic MCP_URL + MCP_API_KEY, or legacy UNCLAW_*
+const baseUrl = (process.env.SHRAGA_URL || process.env.MCP_URL || process.env.UNCLAW_URL || 'http://localhost:3033').replace(/\/$/, '');
+const mcpPath = process.env.SHRAGA_MCP_PATH || process.env.MCP_PATH || '/mcp';
+const apiKey = process.env.SHRAGA_API_KEY || process.env.MCP_API_KEY || process.env.UNCLAW_API_KEY;
+if (!apiKey) { console.error('[mcp-bridge] SHRAGA_API_KEY (or MCP_API_KEY/UNCLAW_API_KEY) is required'); process.exit(1); }
 
 let sessionId: string | null = null;
 

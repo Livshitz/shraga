@@ -12,6 +12,7 @@ process.on('unhandledRejection', (reason) => {
   console.error('[server] Unhandled rejection (kept alive):', msg);
 });
 import { createServer } from 'node:http';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -20,7 +21,7 @@ import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import { requireAuth, verifyBearer, AUTH_PROVIDER, localLogin, addLocalUser, localUserCount } from './auth.ts';
 import { getMcpConfig, getRawMcpConfig, getResolvedMcpConfig, getGlobalMcpConfig, saveMcpConfig, maskEnvValues, mergeWithOriginal, type McpConfig } from './mcp.ts';
-import { streamChat, consumeStream, getAgentConfig, saveAgentConfig, type AgentConfig, type PermissionHandler, type QuestionHandler, type QuestionAnswers, type AttachmentMeta, type WsEvent } from './claude.ts';
+import { streamChat, consumeStream, getAgentConfig, saveAgentConfig, getClaudeAuthSource, type AgentConfig, type PermissionHandler, type QuestionHandler, type QuestionAnswers, type AttachmentMeta, type WsEvent } from './claude.ts';
 import { mountFeatures, registerFeature, resumeFeatureSession, collectFeatureFlags, collectSidecarRoutes } from './features.ts';
 import { registerSpaCatchAll } from './spa-catchall.ts';
 import { slackFeature } from './slack/feature.ts';
@@ -39,6 +40,7 @@ import { seedDefaults, getBuiltinSkillNames } from './seed.ts';
 import { hydrateSlackUserToken } from './slack/oauth.ts';
 import { registerMcpOAuthRoutes } from './mcp-oauth.ts';
 import { registerEventRoutes } from './events/routes.ts';
+import { registerWebhook } from './events/webhook.ts';
 import { startEventDispatcher } from './events/dispatcher.ts';
 import { seedOperators } from './contacts.ts';
 import { dataSync } from './data-sync.ts';
@@ -297,11 +299,14 @@ app.put('/api/mcps', requireAuth, (req, res) => {
 });
 
 app.get('/api/config', requireAuth, (_req, res) => {
-  res.json(getAgentConfig());
+  // `claudeAuthSource` is derived server state (not persisted config) — the spread always overrides
+  // any stale value, so it can never round-trip into agent-config.json even if a client echoes it back.
+  res.json({ ...getAgentConfig(), claudeAuthSource: getClaudeAuthSource() });
 });
 
 app.put('/api/config', requireAuth, (req, res) => {
-  saveAgentConfig(req.body as AgentConfig);
+  const { claudeAuthSource: _drop, ...config } = (req.body ?? {}) as AgentConfig & { claudeAuthSource?: string };
+  saveAgentConfig(config);
   res.json({ ok: true });
 });
 
@@ -1002,12 +1007,62 @@ app.post('/internal/activate', async (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/data-sync/webhook', async (req, res) => {
-  if (!activated || !dataSync.isEnabled()) return res.sendStatus(404);
-  const secret = process.env.DATA_SYNC_WEBHOOK_SECRET;
-  if (secret && req.headers['x-webhook-secret'] !== secret) return res.sendStatus(403);
-  await dataSync.pull();
-  res.sendStatus(200);
+// Constant-time equality for two strings (avoids leaking length/content via timing).
+function safeStrEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a), bb = Buffer.from(b);
+  return ab.length === bb.length && timingSafeEqual(ab, bb);
+}
+
+// Verify GitHub's HMAC signature (x-hub-signature-256 = "sha256=" + HMAC-SHA256(secret, RAW BODY)).
+// Must run over the EXACT bytes GitHub sent, captured as req.rawBody by express.json's verify hook —
+// re-serializing req.body would change the bytes and never match.
+function validGithubSignature(req: express.Request, secret: string): boolean {
+  const header = req.headers['x-hub-signature-256'];
+  if (typeof header !== 'string') return false;
+  const raw = (req as any).rawBody as Buffer | undefined;
+  if (!raw) return false;
+  const expected = 'sha256=' + createHmac('sha256', secret).update(raw).digest('hex');
+  return safeStrEqual(header, expected);
+}
+
+// Data-sync webhook, ported to shraga's first-class registerWebhook convention: the framework mounts
+// the PUBLIC route, captures rawBody, runs `verify` (the ONLY per-vendor piece — the HMAC below),
+// rejects on a falsy result, and on a pass emits the 'data-sync.pull' event. The subscribeEvent below
+// (gated on active/non-passive) consumes it and calls dataSync.pull(). Mounted on `app` at the
+// SAME position the bespoke route occupied — before the SPA catch-all — via the `path` option, so the
+// GitHub webhook needs no reconfig.
+//
+// Semantic deltas vs the old inline route (documented, deliberate):
+//   • bad signature → 400 (was 403): registerWebhook's convention is 400 for any falsy verify. GitHub
+//     treats any non-2xx as a failed delivery, so redelivery/behavior is unchanged.
+//   • not-activated / data-sync disabled → 200 (was 404): the route now always accepts + emits; the
+//     PULL is what's gated. In passive/standby no pull handler is subscribed (single-active-writer),
+//     and pull() itself no-ops when disabled — so no data is mutated. The webhook only ever targets
+//     the active instance, so the visible-status change is inert in practice.
+//   • response no longer awaits the pull: 200 is returned on emit and pull() runs async. This is the
+//     convention (and safer — a git pull must not block GitHub's ~10s webhook timeout).
+registerWebhook(app, {
+  source: 'data-sync.pull',
+  path: '/api/data-sync/webhook',
+  // Reuse the verified-correct crypto below verbatim — signature-only; activation/enablement gating
+  // lives on the pull handler, not here.
+  verify: (req) => {
+    const secret = process.env.DATA_SYNC_WEBHOOK_SECRET;
+    if (!secret) return true; // secret unset → open (current live behavior)
+    // Accept EITHER a valid GitHub HMAC signature OR the legacy plain header (backward-compat).
+    const plain = req.headers['x-webhook-secret'];
+    return validGithubSignature(req, secret) || (typeof plain === 'string' && safeStrEqual(plain, secret));
+  },
+});
+
+// Consume the verified webhook's event → pull. The PULL is gated on active (non-passive) via the live
+// `activated`/`PASSIVE` closure: a passive/standby twin shares DATA_DIR and must NOT mutate data/
+// (single-active-writer), and before promotion there's nothing to pull into serving. `activated` flips
+// true in activateConsumers(), so a promoted instance starts pulling with no extra wiring. pull() also
+// self-no-ops when data-sync is disabled.
+subscribeEvent('data-sync.pull', () => {
+  if (PASSIVE || !activated) return;
+  dataSync.pull().catch((err) => console.error('[data-sync] webhook pull failed:', (err as Error).message));
 });
 
 async function runStream(ws: WebSocket, session: WsSession, sid: string, promptText: string, attachments: AttachmentMeta[] | undefined, mcpServers: McpConfig, isSteerRestart = false, conversationReset = false, turnHints?: Record<string, unknown>) {

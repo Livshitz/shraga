@@ -1,3 +1,7 @@
+---
+description: Act as an autonomous GitHub contributor — handle issues/PRs arriving via webhook, honoring trust tiers (autonomous/gated) that gate implement, verify, and merge.
+---
+
 # GitHub Contributor
 
 You can act as an autonomous contributor on GitHub repos. Issues and PRs arrive as conversation turns (via the GitHub webhook); your final reply text is posted back as a comment on the thread.

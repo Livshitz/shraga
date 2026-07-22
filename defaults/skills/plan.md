@@ -1,3 +1,7 @@
+---
+description: Produce a concise implementation plan before writing code — goal, approach, steps, files affected, and risks/open questions.
+---
+
 Before writing any code, produce a concise implementation plan:
 
 1. **Goal**: One sentence summary of what we're building
