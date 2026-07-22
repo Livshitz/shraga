@@ -10,18 +10,19 @@ interface Props {
   trigger?: React.ReactNode;
 }
 
-function Toggle({ checked, onChange, title }: { checked: boolean; onChange: (v: boolean) => void; title?: string }) {
+// Same inline-switch idiom as ConfigPanel's Skill Discovery toggle.
+function Toggle({ checked, onChange, title, disabled }: { checked: boolean; onChange: (v: boolean) => void; title?: string; disabled?: boolean }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
       title={title}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative inline-flex shrink-0 items-center rounded-full transition-colors ${checked ? 'bg-primary' : 'bg-muted-foreground/30'}`}
-      style={{ height: 18, width: 32 }}
+      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${checked ? 'bg-primary' : 'bg-muted'}`}
     >
-      <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transform transition-transform ${checked ? 'translate-x-[15px]' : 'translate-x-[2px]'}`} />
+      <span className={`pointer-events-none block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform ${checked ? 'translate-x-5' : 'translate-x-0'}`} />
     </button>
   );
 }
@@ -38,12 +39,44 @@ function ConfigForm({ schema, config, onSave, saving }: {
   onSave: (config: Record<string, unknown>) => void;
   saving: boolean;
 }) {
+  // Text/number fields are kept as strings while editing; coercion happens only on Save.
   const [draft, setDraft] = useState<Record<string, unknown>>(() => {
     const d: Record<string, unknown> = {};
-    for (const [k, f] of Object.entries(schema)) d[k] = config[k] ?? f.default;
+    for (const [k, f] of Object.entries(schema)) {
+      const v = config[k] ?? f.default;
+      d[k] = f.type === 'boolean' ? Boolean(v) : v == null ? '' : String(v);
+    }
     return d;
   });
-  const set = (k: string, v: unknown) => setDraft((p) => ({ ...p, [k]: v }));
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const set = (k: string, v: unknown) => {
+    setDraft((p) => ({ ...p, [k]: v }));
+    setFieldErrors((p) => (p[k] ? { ...p, [k]: '' } : p));
+  };
+  const save = () => {
+    const out: Record<string, unknown> = {};
+    const errors: Record<string, string> = {};
+    for (const [k, f] of Object.entries(schema)) {
+      const v = draft[k];
+      if (f.type === 'boolean') { out[k] = Boolean(v); continue; }
+      const s = String(v ?? '').trim();
+      if (f.type === 'number') {
+        if (s === '') {
+          // Empty → fall back to the schema default; omit the key when there is no usable default.
+          if (typeof f.default === 'number' && Number.isFinite(f.default)) out[k] = f.default;
+          continue;
+        }
+        const n = Number(s);
+        if (!Number.isFinite(n)) { errors[k] = 'Not a number'; continue; }
+        out[k] = n;
+      } else {
+        out[k] = s;
+      }
+    }
+    if (Object.values(errors).some(Boolean)) { setFieldErrors(errors); return; }
+    setFieldErrors({});
+    onSave(out);
+  };
   return (
     <div className="space-y-2 pt-2">
       {Object.entries(schema).map(([key, field]) => (
@@ -52,17 +85,21 @@ function ConfigForm({ schema, config, onSave, saving }: {
           {field.type === 'boolean' ? (
             <Toggle checked={Boolean(draft[key])} onChange={(v) => set(key, v)} />
           ) : (
-            <Input
-              type={field.type === 'number' ? 'number' : 'text'}
-              value={String(draft[key] ?? '')}
-              onChange={(e) => set(key, field.type === 'number' ? Number(e.target.value) : e.target.value)}
-              className="h-7 text-xs flex-1"
-              placeholder={field.description}
-            />
+            <div className="flex-1 min-w-0">
+              <Input
+                type="text"
+                inputMode={field.type === 'number' ? 'decimal' : undefined}
+                value={String(draft[key] ?? '')}
+                onChange={(e) => set(key, e.target.value)}
+                className={`h-7 text-xs w-full ${fieldErrors[key] ? 'border-destructive' : ''}`}
+                placeholder={field.description}
+              />
+              {fieldErrors[key] && <p className="text-[10px] text-destructive mt-0.5">{fieldErrors[key]}</p>}
+            </div>
           )}
         </div>
       ))}
-      <Button size="sm" className="h-6 text-xs" disabled={saving} onClick={() => onSave(draft)}>
+      <Button size="sm" className="h-6 text-xs" disabled={saving} onClick={save}>
         {saving ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Check className="w-3 h-3 mr-1" />} Save config
       </Button>
     </div>
@@ -77,6 +114,7 @@ export function ModulesManager({ getToken, trigger }: Props) {
   const [actionError, setActionError] = useState<string | null>(null);
 
   const run = async (key: string, fn: () => Promise<void>) => {
+    if (busy) return; // one action in flight at a time
     setBusy(key);
     setActionError(null);
     try { await fn(); } catch (e: any) { setActionError(e.message); } finally { setBusy(null); }
@@ -134,6 +172,7 @@ export function ModulesManager({ getToken, trigger }: Props) {
                         checked={m.enabled}
                         onChange={(en) => run(`toggle-${m.name}`, () => toggle(m.name, en))}
                         title={m.enabled ? 'Disable' : 'Enable'}
+                        disabled={busy === `toggle-${m.name}`}
                       />
                       <span className="font-medium text-sm truncate">{m.name}</span>
                       <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-muted text-muted-foreground shrink-0">v{m.version}</span>
@@ -142,11 +181,11 @@ export function ModulesManager({ getToken, trigger }: Props) {
                       )}
                       <div className="flex-1" />
                       {busy === `toggle-${m.name}` && <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />}
-                      {hasSchema && (
+                      {(hasSchema || m.readme) && (
                         <button
                           className="text-muted-foreground hover:text-foreground transition-colors"
                           onClick={() => setExpanded(isExpanded ? null : m.name)}
-                          title="Configure"
+                          title="Details"
                         >
                           {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
                         </button>
@@ -163,6 +202,9 @@ export function ModulesManager({ getToken, trigger }: Props) {
                     {artifacts && <p className="text-[10px] text-muted-foreground">{artifacts}</p>}
                     {!isExpanded && configSummary(m) && (
                       <p className="text-[10px] font-mono text-muted-foreground truncate">{configSummary(m)}</p>
+                    )}
+                    {isExpanded && m.readme && (
+                      <pre className="text-[11px] text-muted-foreground whitespace-pre-wrap font-sans bg-muted/40 rounded p-2 max-h-48 overflow-y-auto">{m.readme}</pre>
                     )}
                     {isExpanded && hasSchema && (
                       <ConfigForm

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { api } from '@/lib/api';
 
 export interface ModuleConfigField {
   type: 'string' | 'number' | 'boolean';
@@ -18,6 +19,8 @@ export interface InstalledModule {
   configSchema?: ModuleConfigSchema;
   skillCount?: number;
   scheduleCount?: number;
+  /** Server contract addition: GET /api/modules entries may include the module's README (markdown). */
+  readme?: string;
 }
 
 export interface AvailableModule {
@@ -26,19 +29,6 @@ export interface AvailableModule {
   description?: string;
   installed: boolean;
   configSchema?: ModuleConfigSchema;
-}
-
-async function api<T>(path: string, getToken: () => Promise<string | null>, init?: RequestInit): Promise<T> {
-  const token = await getToken();
-  const res = await fetch(path, {
-    ...init,
-    headers: { Authorization: `Bearer ${token ?? ''}`, 'Content-Type': 'application/json', ...init?.headers },
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `${res.status} ${res.statusText}`);
-  }
-  return res.json();
 }
 
 export function useModules(getToken: () => Promise<string | null>, enabled: boolean, refreshKey = 0) {
@@ -57,6 +47,7 @@ export function useModules(getToken: () => Promise<string | null>, enabled: bool
       setAvailable(data.available ?? []);
       setUnsupported(false);
     } catch (e: any) {
+      // Note: this detection assumes a pre-modules server 404 carries no JSON `error` field (message stays "404 Not Found").
       if (/^404\b/.test(e.message)) setUnsupported(true);
       else setError(e.message);
     } finally {
