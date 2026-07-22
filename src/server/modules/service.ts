@@ -75,8 +75,22 @@ function moduleDir(name: string): string {
   return dataPath('modules', name);
 }
 
+/** Adoption backups are USER data (their original artifacts) — kept OUTSIDE the module
+ *  folder so reinstall/upgrade (copyDir rm+recreate) and uninstall (rmSync) never touch them. */
+function backupDir(name: string): string {
+  return dataPath('modules', '.backups', name);
+}
+
 function installedManifest(name: string): ModuleManifest {
   return readManifest(moduleDir(name));
+}
+
+/** README.md content of a module folder (installed or builtin), capped at 32KB. */
+export function readModuleReadme(name: string, from: 'installed' | 'builtin'): string | undefined {
+  const file = path.join(from === 'builtin' ? path.join(BUILTIN_MODULES_DIR, name) : moduleDir(name), 'README.md');
+  if (!existsSync(file)) return undefined;
+  try { return readFileSync(file, 'utf-8').slice(0, 32 * 1024); }
+  catch (err) { console.warn(`[modules] readme read failed for ${name}:`, (err as Error).message); return undefined; }
 }
 
 /** Built-ins shipped in defaults/modules/<name>/ — "available" = readdir. */
@@ -403,7 +417,8 @@ export function installModule(opts: { name?: string; path?: string }): Installed
 }
 
 /** Adoption (install-time, fresh installs only): unmanaged exact-name matches become managed.
- *  Skills: back up original to data/modules/<name>/adopted/*.orig before first overwrite.
+ *  Skills: back up original to data/modules/.backups/<name>/*.orig before first overwrite
+ *  (outside the module folder — survives reinstall/upgrade/uninstall).
  *  Schedules: stamp managedBy, keep the existing id, preserve enabled/runCount/lastRun. */
 function adoptExisting(rec: InstalledModule, manifest: ModuleManifest): void {
   for (const file of manifest.skills ?? []) {
@@ -412,16 +427,16 @@ function adoptExisting(rec: InstalledModule, manifest: ModuleManifest): void {
     if (!existsSync(existing)) continue;
     const { meta } = parseSkillFrontmatter(readFileSync(existing, 'utf-8'));
     if (meta.managedBy) continue;
-    const bakDir = path.join(moduleDir(rec.name), 'adopted');
+    const bakDir = backupDir(rec.name);
     mkdirSync(bakDir, { recursive: true });
     copyFileSync(existing, path.join(bakDir, `${name}.md.orig`));
-    dataSync.trackWrite(`modules/${rec.name}/adopted/${name}.md.orig`);
+    dataSync.trackWrite(`modules/.backups/${rec.name}/${name}.md.orig`);
     // Adoption = install-time consent to take the name over: with the backup safe,
     // remove the unmanaged original so applyModule's ownership guard lets the rendered
     // skill in (the guard otherwise protects unmanaged user skills from module clobber).
     unlinkSync(existing);
     dataSync.trackWrite(`skills/${name}.md`);
-    console.log(`[modules] ${rec.name}: adopted existing skill "${name}" (backup in adopted/)`);
+    console.log(`[modules] ${rec.name}: adopted existing skill "${name}" (backup in modules/.backups/${rec.name}/)`);
   }
   for (const def of manifest.schedules ?? []) {
     const renderedName = renderTemplate(def.name, effectiveConfig(manifest, rec.config));
