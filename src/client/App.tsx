@@ -14,6 +14,7 @@ import { Sidebar } from '@/components/Sidebar';
 import { ConversationPane } from '@/components/ConversationPane';
 import { McpManager } from '@/components/McpManager';
 import { SkillsManager } from '@/components/SkillsManager';
+import { ModulesManager } from '@/components/ModulesManager';
 import { SchedulesManager, type SchedulesManagerHandle } from '@/components/SchedulesManager';
 import type { ServerEvent } from '@/lib/ws';
 import type { WorkspaceEntry } from '@/components/WorkspaceTree';
@@ -28,6 +29,7 @@ import {
   EllipsisVertical,
   Settings,
   BookOpen,
+  Blocks,
   SquarePen,
 } from 'lucide-react';
 import { useDarkMode } from '@/hooks/useDarkMode';
@@ -396,6 +398,7 @@ function AppInner() {
               {slots.headerActions?.()}
               <McpManager getToken={getToken} />
               <SkillsManager getToken={getToken} onSkillsChange={setSkills} />
+              <ModulesManager getToken={getToken} />
               <SchedulesManager
                 ref={schedulesRef}
                 getToken={getToken}
@@ -436,6 +439,14 @@ function AppInner() {
                       trigger={
                         <button className="flex w-full items-center gap-2.5 rounded-md px-3 py-2.5 text-sm hover:bg-accent">
                           <BookOpen className="w-3.5 h-3.5" /> Skills
+                        </button>
+                      }
+                    />
+                    <ModulesManager
+                      getToken={getToken}
+                      trigger={
+                        <button className="flex w-full items-center gap-2.5 rounded-md px-3 py-2.5 text-sm hover:bg-accent">
+                          <Blocks className="w-3.5 h-3.5" /> Modules
                         </button>
                       }
                     />
