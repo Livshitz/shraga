@@ -290,6 +290,77 @@ describe('uninstall + skills-defaults', () => {
     uninstallModule('m-api');
   });
 
+  test('GET /api/modules installed entries carry TOP-LEVEL configSchema + description (UI contract)', async () => {
+    makeModule('m-shape', { configSchema: { color: { type: 'string', default: 'red' } } });
+    installModule({ path: path.join(FIXTURES, 'm-shape') });
+
+    const { registerModuleRoutes } = await import('../routes.ts');
+    const handlers: Record<string, Function> = {};
+    const fakeApp = {
+      get: (p: string, _a: unknown, h: Function) => { handlers[p] = h; },
+      post: () => {}, put: () => {}, delete: () => {},
+    };
+    registerModuleRoutes(fakeApp as never, (() => {}) as never);
+    let body: any;
+    handlers['/api/modules']({}, { json: (b: unknown) => { body = b; } });
+
+    const entry = body.installed.find((m: any) => m.name === 'm-shape');
+    expect(entry.description).toBe('test module m-shape');
+    expect(entry.configSchema).toEqual({ color: { type: 'string', default: 'red' } });
+    uninstallModule('m-shape');
+  });
+
+  test('PUT /api/modules/:name/config accepts the {config} wrapper; 400 without it', async () => {
+    makeModule('m-cfg', { configSchema: { owner: { type: 'string', default: 'elya' } } });
+    installModule({ path: path.join(FIXTURES, 'm-cfg') });
+
+    const { registerModuleRoutes } = await import('../routes.ts');
+    let putHandler: Function | undefined;
+    const fakeApp = {
+      get: () => {}, post: () => {}, delete: () => {},
+      put: (p: string, _a: unknown, h: Function) => { if (p === '/api/modules/:name/config') putHandler = h; },
+    };
+    registerModuleRoutes(fakeApp as never, (() => {}) as never);
+    const call = (reqBody: unknown) => {
+      let status = 200; let body: any;
+      putHandler!(
+        { params: { name: 'm-cfg' }, body: reqBody, user: { isOwner: true } },
+        { json: (b: unknown) => { body = b; }, status: (s: number) => ({ json: (b: unknown) => { status = s; body = b; } }) },
+      );
+      return { status, body };
+    };
+
+    // UI-shaped wrapper → 200, config applied
+    const ok = call({ config: { owner: 'zoe' } });
+    expect(ok.status).toBe(200);
+    expect(ok.body.config.owner).toBe('zoe');
+    expect(getInstalled('m-cfg')!.config.owner).toBe('zoe');
+
+    // missing / non-object config → 400
+    expect(call({}).status).toBe(400);
+    expect(call({ owner: 'raw' }).status).toBe(400);
+    expect(call({ config: 'nope' }).status).toBe(400);
+    expect(call({ config: ['a'] }).status).toBe(400);
+    uninstallModule('m-cfg');
+  });
+
+  test('install with a RELATIVE path resolves against DATA_DIR', () => {
+    const rel = path.join('workspace', 'modules-dev', 'm-rel');
+    const abs = dataPath(rel);
+    rmSync(abs, { recursive: true, force: true });
+    mkdirSync(abs, { recursive: true });
+    writeFileSync(path.join(abs, 'module.json'), JSON.stringify({
+      name: 'm-rel', version: '1.0.0', description: 'rel install', configSchema: {},
+    }));
+    const rec = installModule({ path: rel });
+    expect(rec.name).toBe('m-rel');
+    expect(rec.source).toBe(abs);
+    // not-found error still names the RESOLVED path
+    expect(() => installModule({ path: 'workspace/no-such-mod' }))
+      .toThrow(dataPath('workspace/no-such-mod'));
+    uninstallModule('m-rel');
+  });
+
   test('module-managed skill exposes managedBy via frontmatter parse', () => {
     makeModule('m-meta', { skill: 'body' });
     installModule({ path: path.join(FIXTURES, 'm-meta') });

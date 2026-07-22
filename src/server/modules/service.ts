@@ -13,7 +13,7 @@
  */
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, unlinkSync, renameSync, rmSync, copyFileSync, statSync, appendFileSync } from 'node:fs';
 import path from 'node:path';
-import { dataPath, PACKAGE_ROOT } from '../paths.ts';
+import { dataPath, DATA_DIR, PACKAGE_ROOT } from '../paths.ts';
 import { dataSync } from '../data-sync.ts';
 import * as scheduler from '../scheduler/index.ts';
 import type { Schedule } from '../scheduler/types.ts';
@@ -372,7 +372,8 @@ export function installModule(opts: { name?: string; path?: string }): Installed
   let srcDir: string;
   let source: string;
   if (opts.path) {
-    srcDir = path.resolve(opts.path);
+    // Relative paths are data-root-relative (skills document e.g. "workspace/modules-dev/<name>").
+    srcDir = path.isAbsolute(opts.path) ? opts.path : path.resolve(DATA_DIR, opts.path);
     source = srcDir;
   } else if (opts.name) {
     srcDir = path.join(BUILTIN_MODULES_DIR, opts.name);

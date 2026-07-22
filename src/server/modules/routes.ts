@@ -19,6 +19,8 @@ export function registerModuleRoutes(app: Express, requireAuth: RequestHandler):
       return {
         ...rec,
         manifest,
+        description: manifest?.description,
+        configSchema: manifest?.configSchema,
         readme: readModuleReadme(rec.name, 'installed'),
         skillCount: manifest?.skills?.length ?? 0,
         scheduleCount: manifest?.schedules?.length ?? 0,
@@ -56,7 +58,12 @@ export function registerModuleRoutes(app: Express, requireAuth: RequestHandler):
 
   app.put('/api/modules/:name/config', requireAuth, (req, res) => {
     if (!ownerOnly(req, res)) return;
-    try { res.json(setModuleConfig(String(req.params.name), req.body ?? {})); }
+    const { config } = req.body ?? {};
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      res.status(400).json({ error: 'Body must be {"config": {...}}' });
+      return;
+    }
+    try { res.json(setModuleConfig(String(req.params.name), config)); }
     catch (err) {
       const msg = (err as Error).message;
       res.status(msg.includes('not installed') ? 404 : 400).json({ error: msg });
