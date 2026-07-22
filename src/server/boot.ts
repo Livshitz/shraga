@@ -40,6 +40,7 @@ import { seedDefaults, getBuiltinSkillNames } from './seed.ts';
 import { hydrateSlackUserToken } from './slack/oauth.ts';
 import { registerMcpOAuthRoutes } from './mcp-oauth.ts';
 import { registerEventRoutes } from './events/routes.ts';
+import { registerWebhook } from './events/webhook.ts';
 import { startEventDispatcher } from './events/dispatcher.ts';
 import { seedOperators } from './contacts.ts';
 import { dataSync } from './data-sync.ts';
@@ -1021,17 +1022,44 @@ function validGithubSignature(req: express.Request, secret: string): boolean {
   return safeStrEqual(header, expected);
 }
 
-app.post('/api/data-sync/webhook', async (req, res) => {
-  if (!activated || !dataSync.isEnabled()) return res.sendStatus(404);
-  const secret = process.env.DATA_SYNC_WEBHOOK_SECRET;
-  if (secret) {
+// Data-sync webhook, ported to shraga's first-class registerWebhook convention: the framework mounts
+// the PUBLIC route, captures rawBody, runs `verify` (the ONLY per-vendor piece — the HMAC below),
+// rejects on a falsy result, and on a pass emits the 'data-sync.pull' event. The subscribeEvent below
+// (gated on active/non-passive) consumes it and calls dataSync.pull(). Mounted on `app` at the
+// SAME position the bespoke route occupied — before the SPA catch-all — via the `path` option, so the
+// GitHub webhook needs no reconfig.
+//
+// Semantic deltas vs the old inline route (documented, deliberate):
+//   • bad signature → 400 (was 403): registerWebhook's convention is 400 for any falsy verify. GitHub
+//     treats any non-2xx as a failed delivery, so redelivery/behavior is unchanged.
+//   • not-activated / data-sync disabled → 200 (was 404): the route now always accepts + emits; the
+//     PULL is what's gated. In passive/standby no pull handler is subscribed (single-active-writer),
+//     and pull() itself no-ops when disabled — so no data is mutated. The webhook only ever targets
+//     the active instance, so the visible-status change is inert in practice.
+//   • response no longer awaits the pull: 200 is returned on emit and pull() runs async. This is the
+//     convention (and safer — a git pull must not block GitHub's ~10s webhook timeout).
+registerWebhook(app, {
+  source: 'data-sync.pull',
+  path: '/api/data-sync/webhook',
+  // Reuse the verified-correct crypto below verbatim — signature-only; activation/enablement gating
+  // lives on the pull handler, not here.
+  verify: (req) => {
+    const secret = process.env.DATA_SYNC_WEBHOOK_SECRET;
+    if (!secret) return true; // secret unset → open (current live behavior)
     // Accept EITHER a valid GitHub HMAC signature OR the legacy plain header (backward-compat).
     const plain = req.headers['x-webhook-secret'];
-    const ok = validGithubSignature(req, secret) || (typeof plain === 'string' && safeStrEqual(plain, secret));
-    if (!ok) return res.sendStatus(403);
-  }
-  await dataSync.pull();
-  res.sendStatus(200);
+    return validGithubSignature(req, secret) || (typeof plain === 'string' && safeStrEqual(plain, secret));
+  },
+});
+
+// Consume the verified webhook's event → pull. The PULL is gated on active (non-passive) via the live
+// `activated`/`PASSIVE` closure: a passive/standby twin shares DATA_DIR and must NOT mutate data/
+// (single-active-writer), and before promotion there's nothing to pull into serving. `activated` flips
+// true in activateConsumers(), so a promoted instance starts pulling with no extra wiring. pull() also
+// self-no-ops when data-sync is disabled.
+subscribeEvent('data-sync.pull', () => {
+  if (PASSIVE || !activated) return;
+  dataSync.pull().catch((err) => console.error('[data-sync] webhook pull failed:', (err as Error).message));
 });
 
 async function runStream(ws: WebSocket, session: WsSession, sid: string, promptText: string, attachments: AttachmentMeta[] | undefined, mcpServers: McpConfig, isSteerRestart = false, conversationReset = false, turnHints?: Record<string, unknown>) {

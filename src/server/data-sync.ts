@@ -25,6 +25,7 @@ export class DataSync {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private pushing = false;
   private pulling = false;
+  private pullPending = false;
   private ready = false;
   private warnedDisabled = false;
 
@@ -182,18 +183,28 @@ export class DataSync {
   }
 
   async pull(): Promise<void> {
-    // In-flight coalescing: a pull already running will incorporate the latest remote state, so an
-    // overlapping webhook trigger can safely SKIP rather than interleave stash/merge/pop on shared
-    // uncommitted state. finally clears the flag so a thrown pull can't wedge it permanently.
+    // Coalesce overlapping triggers WITHOUT dropping any. Serializing pulls is required — concurrent
+    // stash/merge/pop on shared uncommitted state would corrupt the worktree. But a trigger that
+    // arrives mid-pull (webhook B fires while pull A is already past its `git fetch`) references a
+    // commit A will NOT see, so silently skipping B leaves a pure-consumer permanently stale (no
+    // periodic poller catches up). Instead, mark work pending and guarantee exactly one follow-up
+    // pass after the current one — mirrors the push-side pending/re-run pattern (flush()).
     if (this.pulling) {
-      console.log(`${TAG} Pull already in progress, skipping (coalesced)`);
+      this.pullPending = true;
+      console.log(`${TAG} Pull in progress — queued a follow-up (coalesced)`);
       return;
     }
     this.pulling = true;
     try {
-      await this._pull();
+      do {
+        // Clear BEFORE the pass: a trigger during this _pull() re-sets it → one more loop.
+        this.pullPending = false;
+        await this._pull();
+      } while (this.pullPending);
     } finally {
+      // Reset both so a throw mid-pass can never wedge the lock or a stale pending flag.
       this.pulling = false;
+      this.pullPending = false;
     }
   }
 
