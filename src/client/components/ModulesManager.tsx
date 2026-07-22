@@ -58,14 +58,21 @@ function ConfigForm({ schema, config, onSave, saving }: {
     const errors: Record<string, string> = {};
     for (const [k, f] of Object.entries(schema)) {
       const v = draft[k];
-      if (f.type === 'boolean') { out[k] = Boolean(v); continue; }
+      // Empty/absent values with no usable schema default are OMITTED from the PUT
+      // (symmetric across types), so untouched no-default fields don't get written as ""/false.
+      if (f.type === 'boolean') {
+        const b = Boolean(v);
+        if (!b && config[k] === undefined && typeof f.default !== 'boolean') continue;
+        out[k] = b;
+        continue;
+      }
       const s = String(v ?? '').trim();
+      if (s === '') {
+        if (f.type === 'number' && typeof f.default === 'number' && Number.isFinite(f.default)) out[k] = f.default;
+        else if (f.type === 'string' && typeof f.default === 'string' && f.default !== '') out[k] = f.default;
+        continue;
+      }
       if (f.type === 'number') {
-        if (s === '') {
-          // Empty → fall back to the schema default; omit the key when there is no usable default.
-          if (typeof f.default === 'number' && Number.isFinite(f.default)) out[k] = f.default;
-          continue;
-        }
         const n = Number(s);
         if (!Number.isFinite(n)) { errors[k] = 'Not a number'; continue; }
         out[k] = n;
