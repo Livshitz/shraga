@@ -22,6 +22,8 @@ export interface SkillMeta {
   expires?: string;
   origin?: string;
   reviewed?: boolean;
+  /** `managed-by: <module>@<version>` — set on skills rendered by a data-plane module. */
+  managedBy?: string;
 }
 
 export function isExpired(meta: SkillMeta): boolean {
@@ -66,6 +68,7 @@ export function parseSkillFrontmatter(content: string): { meta: SkillMeta; body:
     }
     if (key === 'expires') meta.expires = val;
     if (key === 'origin') meta.origin = val;
+    if (key === 'managed-by') meta.managedBy = val;
     if (key === 'reviewed') meta.reviewed = val === 'true' ? true : val === 'false' ? false : undefined;
   }
   return { meta, body };

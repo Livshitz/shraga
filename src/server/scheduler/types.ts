@@ -59,4 +59,7 @@ export interface Schedule {
   nextRun?: number;
   lastRun?: ScheduleRunSummary;
   runCount: number;
+  /** Set when a data-plane module owns this schedule (module name). Module reconcile
+   *  updates trigger/task; enable/disable snapshots live in the module's state entry. */
+  managedBy?: string;
 }
