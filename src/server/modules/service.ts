@@ -416,6 +416,11 @@ function adoptExisting(rec: InstalledModule, manifest: ModuleManifest): void {
     mkdirSync(bakDir, { recursive: true });
     copyFileSync(existing, path.join(bakDir, `${name}.md.orig`));
     dataSync.trackWrite(`modules/${rec.name}/adopted/${name}.md.orig`);
+    // Adoption = install-time consent to take the name over: with the backup safe,
+    // remove the unmanaged original so applyModule's ownership guard lets the rendered
+    // skill in (the guard otherwise protects unmanaged user skills from module clobber).
+    unlinkSync(existing);
+    dataSync.trackWrite(`skills/${name}.md`);
     console.log(`[modules] ${rec.name}: adopted existing skill "${name}" (backup in adopted/)`);
   }
   for (const def of manifest.schedules ?? []) {
