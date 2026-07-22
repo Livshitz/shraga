@@ -1,3 +1,7 @@
+---
+description: Write comprehensive tests for given code — happy path, edge cases, and error conditions, with mocked dependencies and behavior-focused assertions.
+---
+
 Write comprehensive tests for the given code. Follow these guidelines:
 
 - Cover the happy path, edge cases, and error conditions

@@ -1,3 +1,7 @@
+---
+description: Systematic debugging workflow — reproduce, hypothesize likely root causes, investigate, isolate the smallest failing case, apply a targeted fix, and verify.
+---
+
 You are debugging a problem. Follow this systematic approach:
 
 1. **Reproduce**: Confirm you understand the exact symptom and when it occurs
