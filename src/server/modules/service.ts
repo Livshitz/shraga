@@ -300,6 +300,8 @@ function applyModule(rec: InstalledModule): void {
     const id = scheduleIdFor(rec, def);
     expectedIds.add(id);
     const rendered = renderDeep({ name: def.name, trigger: def.trigger, task: def.task }, config, `${rec.name}/schedules/${def.def}`);
+    // A templated model knob rendered to "" must not ship a bogus empty model — omit the field.
+    if ('model' in rendered.task && !(rendered.task as { model?: string }).model) delete (rendered.task as { model?: string }).model;
     const existing = scheduler.getSchedule(id);
     const now = Date.now();
     const schedule: Schedule = {

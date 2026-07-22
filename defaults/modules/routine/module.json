@@ -1,12 +1,14 @@
 {
   "name": "routine",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Daily operating contract — cadence (dispatcher ticks + work blocks), OKR-anchored priorities, autonomy tiers, comms policy, and an agenda seed.",
   "configSchema": {
     "workingDays":   { "type": "string",  "default": "Sun–Thu",              "description": "Working days, prose (shown in the skill)" },
     "workHours":     { "type": "string",  "default": "08:00–18:00",          "description": "Working hours, prose (shown in the skill)" },
     "tz":            { "type": "string",  "default": "Asia/Jerusalem",       "description": "IANA timezone for schedules and hours" },
     "tickCron":      { "type": "string",  "default": "0 8-17 * * 0-4",       "description": "Cron for the hourly dispatcher tick (keep inside work hours)" },
+    "tickModel":     { "type": "string",  "default": "haiku",                "description": "Model for the dispatcher tick — keeps ticks on a cheap model (most end in a skip)" },
+    "maxSelfWakesPerDay": { "type": "number", "default": 4,                  "description": "Max agent-booked self-wake-* continuations per day" },
     "workBlockCron": { "type": "string",  "default": "0 12 * * 0-4",         "description": "Cron for the fallback work block (schedule ships disabled)" },
     "okrSource":     { "type": "string",  "default": "okrs/q3-2026-draft.md","description": "Data-relative path to the OKR doc anchoring priorities" },
     "channel":       { "type": "string",  "default": "#agf-dev",             "description": "Primary comms channel once past pilot" },
@@ -19,7 +21,7 @@
       "def": "tick",
       "name": "routine-tick",
       "trigger": { "kind": "cron", "expr": "{{tickCron}}", "tz": "{{tz}}" },
-      "task": { "kind": "prompt", "prompt": "Dispatcher tick: load the routine skill (Dispatcher tick rules) and workspace/agenda.md, then follow the tick logic. Most ticks should end in a skip." }
+      "task": { "kind": "prompt", "prompt": "Dispatcher tick: load the routine skill (Dispatcher tick rules) and workspace/agenda.md, then follow the tick logic. Most ticks should end in a skip.", "model": "{{tickModel}}" }
     },
     {
       "def": "work-block",
