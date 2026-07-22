@@ -156,6 +156,51 @@ describe('adoption', () => {
     expect(bak).toBe('# my hand-written skill\n');
   });
 
+  test('builtin routine adopts the circles pre-state: task.model haiku preserved via knob, scope→system, runtime kept', () => {
+    // Circles pre-state: unmanaged user-scope tick with a hand-set cheap model
+    const pre: Schedule = {
+      id: 'circles-tick-id', name: 'routine-tick', enabled: true,
+      trigger: { kind: 'cron', expr: '0 9-16 * * 0-4', tz: 'Asia/Jerusalem' },
+      task: { kind: 'prompt', prompt: 'old hand-written tick prompt', model: 'haiku' },
+      scope: 'user', createdBy: { uid: 'elya', email: 'elya@x.com' },
+      createdAt: 1, updatedAt: 1, runCount: 99,
+    };
+    expect(scheduler.upsertSchedule(pre).ok).toBe(true);
+
+    installModule({ name: 'routine' });
+    expect(scheduler.getSchedule('mod-routine-tick')).toBeUndefined(); // adopted, not duplicated
+    const adopted = scheduler.getSchedule('circles-tick-id')!;
+    expect(adopted.managedBy).toBe('routine');
+    expect(adopted.scope).toBe('system');                              // intended (F2)
+    expect((adopted.task as { model?: string }).model).toBe('haiku');  // model round-trips via tickModel knob
+    expect(adopted.runCount).toBe(99);
+    expect(adopted.enabled).toBe(true);
+    expect(adopted.trigger).toEqual({ kind: 'cron', expr: '0 8-17 * * 0-4', tz: 'Asia/Jerusalem' }); // def wins trigger
+
+    uninstallModule('routine');
+    scheduler.deleteSchedule('circles-tick-id');
+    rmSync(dataPath('workspace/agenda.md'), { force: true });
+    rmSync(dataPath('modules', '.backups', 'routine'), { recursive: true, force: true });
+  });
+
+  test('a model knob rendered to "" is omitted from the schedule task', () => {
+    makeModule('m-model', {
+      configSchema: { mdl: { type: 'string', default: '' } },
+      scheduleName: 'm-model tick',
+    });
+    // inject model template into the fixture manifest
+    const mf = path.join(FIXTURES, 'm-model', 'module.json');
+    const m = JSON.parse(readFileSync(mf, 'utf-8'));
+    m.schedules[0].task.model = '{{mdl}}';
+    m.configSchema.owner = { type: 'string', default: 'elya' };
+    writeFileSync(mf, JSON.stringify(m));
+
+    installModule({ path: path.join(FIXTURES, 'm-model') });
+    const s = scheduler.getSchedule('mod-m-model-tick')!;
+    expect('model' in s.task).toBe(false);
+    uninstallModule('m-model');
+  });
+
   test('adoption backup survives reinstall (v2 upgrade) AND uninstall', () => {
     writeFileSync(dataPath('skills', 'm-keep.md'), '# precious user original\n');
     makeModule('m-keep', { skill: 'rendered v1' });
@@ -372,10 +417,18 @@ describe('uninstall + skills-defaults', () => {
     expect(skill).toContain('okrs/q3-2026-draft.md');         // okrSource default rendered
     expect(skill).toContain('Pilot restriction active: **true**');
     expect(skill).not.toContain('{{');                        // every placeholder resolved
+    // Restored doctrine renders (F3)
+    expect(skill).toContain('self-wake-<slug>');
+    expect(skill).toContain('max 4 self-wakes per day');      // maxSelfWakesPerDay default rendered
+    expect(skill).toContain('rules out a previously stated theory');
+    expect(skill).toContain('event-triggered reactions');
+    expect(skill).toContain('Unsure which tier → digest');
+    expect(skill).toContain('NOT the board — `tasks/tasks.md` is the durable record');
 
     const tick = scheduler.getSchedule('mod-routine-tick')!;
     expect(tick.enabled).toBe(true);
     expect(tick.trigger).toEqual({ kind: 'cron', expr: '0 8-17 * * 0-4', tz: 'Asia/Jerusalem' });
+    expect((tick.task as { model?: string }).model).toBe('haiku'); // tickModel knob rendered
     const block = scheduler.getSchedule('mod-routine-work-block')!;
     expect(block.enabled).toBe(false);                        // ships disabled
     expect(block.trigger).toEqual({ kind: 'cron', expr: '0 12 * * 0-4', tz: 'Asia/Jerusalem' });

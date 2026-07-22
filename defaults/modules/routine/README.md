@@ -17,6 +17,8 @@ Turns the agent into a self-driving daily operator: a rendered `routine` skill (
 | `workHours` | `08:00–18:00` | Working hours (prose) |
 | `tz` | `Asia/Jerusalem` | IANA timezone for schedules and hours |
 | `tickCron` | `0 8-17 * * 0-4` | Dispatcher tick cron — keep inside work hours |
+| `tickModel` | `haiku` | Model for the dispatcher tick — keeps ticks on a cheap model |
+| `maxSelfWakesPerDay` | `4` | Max agent-booked `self-wake-*` continuations per day |
 | `workBlockCron` | `0 12 * * 0-4` | Fallback work-block cron (schedule ships disabled) |
 | `okrSource` | `okrs/q3-2026-draft.md` | Data-relative OKR doc anchoring the priority function |
 | `channel` | `#agf-dev` | Primary comms channel once past pilot |
@@ -24,6 +26,8 @@ Turns the agent into a self-driving daily operator: a rendered `routine` skill (
 | `pilotMode` | `true` | `true` = no team tagging, everything to the owner; `false` = channel-first threaded comms |
 
 Changing config re-renders the skill and schedules (`PUT /api/modules/routine/config`).
+
+Note: adopted/managed schedules become `scope: system` — their sessions are visible to all whitelisted users (team-transparency doctrine).
 
 ## Offspring
 
