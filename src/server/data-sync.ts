@@ -24,6 +24,7 @@ export class DataSync {
   private pending = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private pushing = false;
+  private pulling = false;
   private ready = false;
   private warnedDisabled = false;
 
@@ -181,6 +182,22 @@ export class DataSync {
   }
 
   async pull(): Promise<void> {
+    // In-flight coalescing: a pull already running will incorporate the latest remote state, so an
+    // overlapping webhook trigger can safely SKIP rather than interleave stash/merge/pop on shared
+    // uncommitted state. finally clears the flag so a thrown pull can't wedge it permanently.
+    if (this.pulling) {
+      console.log(`${TAG} Pull already in progress, skipping (coalesced)`);
+      return;
+    }
+    this.pulling = true;
+    try {
+      await this._pull();
+    } finally {
+      this.pulling = false;
+    }
+  }
+
+  private async _pull(): Promise<void> {
     if (!this.isEnabled()) return;
     try {
       await this.git('fetch', 'origin', this.options.branch);

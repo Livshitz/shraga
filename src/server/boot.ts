@@ -12,6 +12,7 @@ process.on('unhandledRejection', (reason) => {
   console.error('[server] Unhandled rejection (kept alive):', msg);
 });
 import { createServer } from 'node:http';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -1002,10 +1003,33 @@ app.post('/internal/activate', async (req, res) => {
   res.json({ ok: true });
 });
 
+// Constant-time equality for two strings (avoids leaking length/content via timing).
+function safeStrEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a), bb = Buffer.from(b);
+  return ab.length === bb.length && timingSafeEqual(ab, bb);
+}
+
+// Verify GitHub's HMAC signature (x-hub-signature-256 = "sha256=" + HMAC-SHA256(secret, RAW BODY)).
+// Must run over the EXACT bytes GitHub sent, captured as req.rawBody by express.json's verify hook —
+// re-serializing req.body would change the bytes and never match.
+function validGithubSignature(req: express.Request, secret: string): boolean {
+  const header = req.headers['x-hub-signature-256'];
+  if (typeof header !== 'string') return false;
+  const raw = (req as any).rawBody as Buffer | undefined;
+  if (!raw) return false;
+  const expected = 'sha256=' + createHmac('sha256', secret).update(raw).digest('hex');
+  return safeStrEqual(header, expected);
+}
+
 app.post('/api/data-sync/webhook', async (req, res) => {
   if (!activated || !dataSync.isEnabled()) return res.sendStatus(404);
   const secret = process.env.DATA_SYNC_WEBHOOK_SECRET;
-  if (secret && req.headers['x-webhook-secret'] !== secret) return res.sendStatus(403);
+  if (secret) {
+    // Accept EITHER a valid GitHub HMAC signature OR the legacy plain header (backward-compat).
+    const plain = req.headers['x-webhook-secret'];
+    const ok = validGithubSignature(req, secret) || (typeof plain === 'string' && safeStrEqual(plain, secret));
+    if (!ok) return res.sendStatus(403);
+  }
   await dataSync.pull();
   res.sendStatus(200);
 });
