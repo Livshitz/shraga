@@ -27,7 +27,7 @@ Not a module: `*.ext.ts` extensions and `registerFeature` features are **server-
   },
   "skills": ["standup-notes.md.tmpl"],
   "schedules": [
-    { "id": "tick", "name": "standup-notes tick",
+    { "def": "tick", "name": "standup-notes tick",
       "trigger": { "kind": "cron", "expr": "30 9 * * 1-5", "tz": "{{tz}}" },
       "task": { "kind": "prompt", "prompt": "Run the standup-notes skill: collect today's note, post to {{channel}}, append to the log." } }
   ],
@@ -39,14 +39,16 @@ Not a module: `*.ext.ts` extensions and `registerFeature` features are **server-
 
 - `configSchema` — flat map of `{type, default, description}`. Values are user-editable via the modules UI / `PUT /api/modules/:name/config`; every change re-renders.
 - `skills` — `.md.tmpl` files rendered into `data/skills/<name>.md` with a `managed-by: <module>@<version>` frontmatter marker.
-- `schedules` — schedule defs using the scheduler's native `trigger`/`task` JSON (same shape as `POST /api/schedules` — see the scheduler skill), with `{{key}}` substitution in string values; created with deterministic ids and `managedBy`, survive reboots, stay user-editable (reconcile re-overwrites trigger/task).
+- `schedules` — schedule defs keyed by a stable `def` (→ schedule id `mod-<module>-<def>`), using the scheduler's native `trigger`/`task` JSON (same shape as `POST /api/schedules` — see the scheduler skill), with `{{key}}` substitution in string values; created with `managedBy`, survive reboots, stay user-editable (reconcile re-overwrites trigger/task but preserves enabled/runCount). `"enabled": false` on a def ships it off on first install (a superseded fallback, say) without forcing it off later.
 - `seeds` — files created data-root-relative if missing (e.g. `workspace/standup-log.md`).
 - `offspring.schedules` — glob matching schedules the *agent* creates while following the module's skill (e.g. self-booked follow-ups). Disabling the module also disables them.
 - `defaultSkills` — module skill names to add to the always-inject list (use sparingly; most skills are on-demand).
 
 ## `{{key}}` templating
 
-Any string in skill templates and schedule defs may reference a config key as `{{key}}`. Strings only, no logic, unknown keys warn. Rendering happens at install, config change, and upgrade.
+Any string in skill templates and schedule defs may reference a config key as `{{key}}`. Plain substitution only — **no conditionals or logic**, unknown keys warn. Rendering happens at install, config change, and upgrade.
+
+Branching on a boolean knob: since there are no template conditionals, interpolate the value into a doctrine line and let prose tell the agent how to behave for each value — e.g. `Pilot restriction active: **{{pilotMode}}**.` followed by "When `true`: … / When `false`: …" (see the `routine` builtin).
 
 ## Semantics — skills vs seeds vs offspring
 

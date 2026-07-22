@@ -15,7 +15,7 @@ Data-plane modules bundle skills + schedules + seed files, installed and reconci
 ## Knowing what's installed / enabled
 
 - **Source of truth**: read `data/modules/state.json` — installed modules with `enabled`, `version`, `config`. Only this file answers "is the module on."
-- **API**: `curl -s -H "x-internal-token: $INTERNAL_API_TOKEN" http://localhost:$PORT/api/modules | jq .` — installed + available built-ins.
+- **API**: `curl -s -H "x-internal-token: $INTERNAL_API_TOKEN" http://localhost:$PORT/api/modules | jq .` — installed + available built-ins (shipped in `defaults/modules/`, e.g. `routine`; install by `{"name":"routine"}`).
 - **Skill index**: module-rendered skills carry `managed-by: <module>@<version>` frontmatter — if you see it on a skill, a module owns that file.
 
 ## How lifecycle changes surface

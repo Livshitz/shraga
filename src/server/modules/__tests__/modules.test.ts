@@ -361,6 +361,31 @@ describe('uninstall + skills-defaults', () => {
     uninstallModule('m-rel');
   });
 
+  test('builtin "routine" installs by name: skill rendered with defaults, tick on, work-block off, agenda seeded', () => {
+    const rec = installModule({ name: 'routine' });
+    expect(rec.source).toBe('builtin');
+    expect(rec.config.pilotMode).toBe(true);
+
+    const skill = readFileSync(dataPath('skills', 'routine.md'), 'utf-8');
+    expect(skill).toContain('managed-by: routine@');
+    expect(skill).toContain('Sun–Thu');                       // workingDays default rendered
+    expect(skill).toContain('okrs/q3-2026-draft.md');         // okrSource default rendered
+    expect(skill).toContain('Pilot restriction active: **true**');
+    expect(skill).not.toContain('{{');                        // every placeholder resolved
+
+    const tick = scheduler.getSchedule('mod-routine-tick')!;
+    expect(tick.enabled).toBe(true);
+    expect(tick.trigger).toEqual({ kind: 'cron', expr: '0 8-17 * * 0-4', tz: 'Asia/Jerusalem' });
+    const block = scheduler.getSchedule('mod-routine-work-block')!;
+    expect(block.enabled).toBe(false);                        // ships disabled
+    expect(block.trigger).toEqual({ kind: 'cron', expr: '0 12 * * 0-4', tz: 'Asia/Jerusalem' });
+
+    const agenda = readFileSync(dataPath('workspace/agenda.md'), 'utf-8');
+    expect(agenda).toContain('## Queue');
+    uninstallModule('routine');
+    rmSync(dataPath('workspace/agenda.md'), { force: true });
+  });
+
   test('module-managed skill exposes managedBy via frontmatter parse', () => {
     makeModule('m-meta', { skill: 'body' });
     installModule({ path: path.join(FIXTURES, 'm-meta') });
