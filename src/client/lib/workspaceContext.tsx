@@ -11,6 +11,8 @@ export interface AgentConfig {
   systemPrompt?: string;
   thinking?: 'adaptive' | 'enabled' | 'disabled';
   effort?: 'low' | 'medium' | 'high' | 'max';
+  /** Derived server state (read-only, not persisted): claude-code credentials in use — see /api/config. */
+  claudeAuthSource?: 'subscription' | 'api-key';
 }
 
 /**
