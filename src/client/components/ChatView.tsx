@@ -409,6 +409,10 @@ function BlockRenderer({ block, isUser, onPermissionRespond, onQuestionRespond, 
     return <ThinkingBlock text={block.text} />;
   }
 
+  if (block.type === 'error') {
+    return <ErrorBlock text={block.text} />;
+  }
+
   if (block.type === 'text') {
     if (isUser) {
       return (
@@ -445,6 +449,16 @@ function BlockRenderer({ block, isUser, onPermissionRespond, onQuestionRespond, 
 
   // Non-core (extension) block type — the core renders nothing itself; an add-on slot may.
   return slots.extensionBlocks?.({ block, onImageClick }) ?? null;
+}
+
+/** A run that failed at the engine/adapter level — deliberately loud, never mistakable for a reply. */
+function ErrorBlock({ text }: { text: string }) {
+  return (
+    <div dir="auto" className="border border-destructive/40 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive break-words">
+      <span className="font-medium">⚠️ Run failed</span>
+      <div className="mt-1 text-xs opacity-90 whitespace-pre-wrap font-mono">{text}</div>
+    </div>
+  );
 }
 
 function ContextBlock({ label, text }: { label: string; text: string }) {

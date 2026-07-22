@@ -356,6 +356,10 @@ export type ConvBlock =
   | { type: 'tool_use'; tool: string; toolUseId: string; input: unknown }
   | { type: 'tool_result'; toolUseId: string; output: string }
   | { type: 'thinking'; text: string }
+  // A run that failed at the engine/adapter level. Persisted so the transcript records the failure
+  // durably — otherwise a dead session (esp. an unattended scheduled one) is indistinguishable from
+  // one still thinking, with the cause only in stderr.
+  | { type: 'error'; text: string }
   // Persisted block written by an add-on engine's background worker (e.g. EE's duplex voice brain).
   // The core stores/renders it but owns none of its semantics; name kept for stored-history back-compat.
   | { type: 'duplex_result'; label?: string; tier?: string; text?: string }
