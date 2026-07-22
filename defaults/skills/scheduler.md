@@ -156,7 +156,7 @@ For **vendor webhooks** that can't send shraga auth (Stripe, GitHub, …), add a
 
 The system emits these onto the bus automatically — use them as the `source` of an event trigger to react to the agent's own lifecycle:
 
-- **`schedule.finished`** — fired when any time/manual schedule run completes. Payload: `{ scheduleId, name, status, sessionId, error? }`. `status` is `ok` | `error` | `aborted`. Chain automations off it, e.g.:
+- **`schedule.finished`** — fired when any time/manual schedule run completes. Payload: `{ scheduleId, name, status, sessionId, sessionUrl?, error? }`. `status` is `ok` | `error` | `aborted`. Chain automations off it, e.g.:
   ```json
   { "trigger": { "kind": "event", "source": "schedule.finished", "match": { "status": "error" } },
     "task": { "kind": "prompt", "prompt": "A scheduled run failed — investigate and post a summary." } }
@@ -182,7 +182,8 @@ The dedup key is built from the named payload fields (dot-paths), string-normali
 
 1. Enable it (toggle the schedule).
 2. Optionally set `SHRAGA_ALERT_SLACK_EMAIL` (the legacy `UNCLAW_ALERT_SLACK_EMAIL` is still honoured) (else it falls back to the first `data/whitelist.json` entry).
-3. Optionally edit its `task.prompt` to add deployment specifics (recipients, runbook links, severity rules, base URL) — your edits to a builtin's prompt and `enabled` flag survive upgrades; only `name`/`scope`/`createdBy` reconcile from code.
+3. Set `PUBLIC_ORIGIN` (or `publicOrigin` in the data-dir config) so the alert can link to the failed run's session. It is the only source of a publicly-reachable origin — a scheduled run has no request to derive one from. Unset, the `sessionUrl` payload field is absent and the alert omits the link rather than emitting an unreachable `localhost` one.
+4. Optionally edit its `task.prompt` to add deployment specifics (recipients, runbook links, severity rules) — your edits to a builtin's prompt and `enabled` flag survive upgrades; only `name`/`scope`/`createdBy` reconcile from code. Because `task.prompt` is deliberately *not* reconciled, the alert's session link is supplied through the event payload (`sessionUrl`) instead, so it reaches deployments that already persisted the schedule.
 
 ## Notes
 

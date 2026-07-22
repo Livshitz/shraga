@@ -3,6 +3,7 @@ import { computeNextRun, computePrevRun, validateTrigger } from './timing.ts';
 import { runSchedule, type ResumeOptions, type EventContext } from './runner.ts';
 import { backfillScope, ensureBuiltinSchedules } from './builtins.ts';
 import { emitEvent } from '../events/bus.ts';
+import { getSessionUrl } from '../shraga-config.ts';
 import type { Schedule } from './types.ts';
 
 type Broadcast = (data: object) => void;
@@ -410,6 +411,11 @@ function startRun(s: Schedule, _firedAt: number, override?: string, resume?: Res
           name: s.name,
           status: summary.status,
           sessionId: summary.sessionId,
+          // Ready-made absolute link. Supplied here rather than left to the consuming prompt:
+          // reconcile never syncs a builtin's stored `task.prompt`, so a prompt-only fix would
+          // miss every deployment that already persisted the schedule. Omitted when no public
+          // origin is configured — better no link than a localhost one.
+          sessionUrl: getSessionUrl(summary.sessionId),
           error: summary.error,
         }, { id: summary.sessionId });
       }
