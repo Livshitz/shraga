@@ -1,7 +1,7 @@
 /** REST surface for data-plane modules. Reads: any authed user. Mutations: owner-gated
  *  (modules are system-scope, like schedule edits on records you don't own). */
 import type { Express, RequestHandler, Request, Response } from 'express';
-import { loadState, listAvailableModules, installModule, enableModule, disableModule, setModuleConfig, uninstallModule, readManifest } from './service.ts';
+import { loadState, listAvailableModules, installModule, enableModule, disableModule, setModuleConfig, uninstallModule, readManifest, readModuleReadme } from './service.ts';
 import { dataPath } from '../paths.ts';
 
 function ownerOnly(req: Request, res: Response): boolean {
@@ -16,10 +16,18 @@ export function registerModuleRoutes(app: Express, requireAuth: RequestHandler):
     const installed = loadState().installed.map((rec) => {
       let manifest = null;
       try { manifest = readManifest(dataPath('modules', rec.name)); } catch { /* folder missing */ }
-      return { ...rec, manifest };
+      return {
+        ...rec,
+        manifest,
+        readme: readModuleReadme(rec.name, 'installed'),
+        skillCount: manifest?.skills?.length ?? 0,
+        scheduleCount: manifest?.schedules?.length ?? 0,
+      };
     });
     const installedNames = new Set(installed.map((m) => m.name));
-    const available = listAvailableModules().filter((m) => !installedNames.has(m.name));
+    const available = listAvailableModules()
+      .filter((m) => !installedNames.has(m.name))
+      .map((m) => ({ ...m, readme: readModuleReadme(m.name, 'builtin') }));
     res.json({ installed, available });
   });
 

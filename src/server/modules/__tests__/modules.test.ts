@@ -152,8 +152,28 @@ describe('adoption', () => {
 
     // Skill overwritten with rendered content; original backed up
     expect(readFileSync(dataPath('skills', 'm-adopt.md'), 'utf-8')).toContain('rendered for elya');
-    const bak = readFileSync(dataPath('modules', 'm-adopt', 'adopted', 'm-adopt.md.orig'), 'utf-8');
+    const bak = readFileSync(dataPath('modules', '.backups', 'm-adopt', 'm-adopt.md.orig'), 'utf-8');
     expect(bak).toBe('# my hand-written skill\n');
+  });
+
+  test('adoption backup survives reinstall (v2 upgrade) AND uninstall', () => {
+    writeFileSync(dataPath('skills', 'm-keep.md'), '# precious user original\n');
+    makeModule('m-keep', { skill: 'rendered v1' });
+    installModule({ path: path.join(FIXTURES, 'm-keep') });
+    const bakFile = dataPath('modules', '.backups', 'm-keep', 'm-keep.md.orig');
+    expect(readFileSync(bakFile, 'utf-8')).toBe('# precious user original\n');
+
+    // Reinstall as v2 — copyDir wipes+recreates the module folder; backup must survive
+    makeModule('m-keep', { skill: 'rendered v2', version: '2.0.0' });
+    installModule({ path: path.join(FIXTURES, 'm-keep') });
+    expect(getInstalled('m-keep')!.version).toBe('2.0.0');
+    expect(readFileSync(bakFile, 'utf-8')).toBe('# precious user original\n');
+
+    // Uninstall removes the module folder; the backup is user data — it must survive
+    uninstallModule('m-keep');
+    expect(existsSync(dataPath('modules', 'm-keep'))).toBe(false);
+    expect(readFileSync(bakFile, 'utf-8')).toBe('# precious user original\n');
+    rmSync(dataPath('modules', '.backups', 'm-keep'), { recursive: true, force: true });
   });
 });
 
@@ -246,6 +266,28 @@ describe('uninstall + skills-defaults', () => {
     reconcileInstalledModules();
     expect(getDefaultSkills()).not.toContain('m-defs');
     uninstallModule('m-defs');
+  });
+
+  test('GET /api/modules carries readme + skillCount/scheduleCount', async () => {
+    makeModule('m-api', { skill: 'body', scheduleName: 'm-api tick' });
+    writeFileSync(path.join(FIXTURES, 'm-api', 'README.md'), '# m-api docs\n');
+    installModule({ path: path.join(FIXTURES, 'm-api') });
+
+    const { registerModuleRoutes } = await import('../routes.ts');
+    const handlers: Record<string, Function> = {};
+    const fakeApp = {
+      get: (p: string, _a: unknown, h: Function) => { handlers[p] = h; },
+      post: () => {}, put: () => {}, delete: () => {},
+    };
+    registerModuleRoutes(fakeApp as never, (() => {}) as never);
+    let body: any;
+    handlers['/api/modules']({}, { json: (b: unknown) => { body = b; } });
+
+    const entry = body.installed.find((m: any) => m.name === 'm-api');
+    expect(entry.readme).toBe('# m-api docs\n');
+    expect(entry.skillCount).toBe(1);
+    expect(entry.scheduleCount).toBe(1);
+    uninstallModule('m-api');
   });
 
   test('module-managed skill exposes managedBy via frontmatter parse', () => {
