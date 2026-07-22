@@ -57,6 +57,10 @@ export interface ShragaConfig {
   /** @deprecated Use `mcps` instead */
   vendorMcps?: Record<string, McpShorthandEntry>;
   mcps?: Record<string, McpEntry>;
+  /** Public origin this deployment is reachable at, e.g. `https://agent.example.com`.
+   *  Used to build absolute session links for out-of-band notifications (push, alerts)
+   *  that have no incoming request to derive it from. Falls back to `$PUBLIC_ORIGIN`. */
+  publicOrigin?: string;
 }
 
 export interface HttpSidecarSpec {
@@ -112,6 +116,21 @@ export async function loadShragaConfig(): Promise<ShragaConfig> {
 export function getShragaConfigSync(): ShragaConfig {
   if (!_cached) console.warn('[config] getShragaConfigSync called before loadShragaConfig — returning empty config');
   return _cached ?? {};
+}
+
+/** This deployment's public origin, without a trailing slash — data-dir config first, then
+ *  `$PUBLIC_ORIGIN`. Empty when unconfigured: callers MUST omit the link rather than fall back
+ *  to a locally-derived host, which is unreachable from wherever the notification is read. */
+export function getPublicOrigin(): string {
+  const origin = getShragaConfigSync().publicOrigin ?? process.env.PUBLIC_ORIGIN ?? '';
+  return origin.trim().replace(/\/+$/, '');
+}
+
+/** Absolute link to a session in the web UI, or `undefined` when no public origin is configured. */
+export function getSessionUrl(sessionId: string | undefined): string | undefined {
+  const origin = getPublicOrigin();
+  if (!origin || !sessionId) return undefined;
+  return `${origin}/?session=${encodeURIComponent(sessionId)}`;
 }
 
 /** Resolve global MCPs from the data-dir config (both shorthand vendor entries and full entries) */

@@ -24,6 +24,9 @@ export interface ShragaEventMap {
     name?: string;
     status?: string;
     sessionId?: string;
+    /** Absolute link to the run's session. Present only when a public origin is configured
+     *  (see getSessionUrl) — a scheduled run has no request to derive one from. */
+    sessionUrl?: string;
     error?: string;
   };
 }

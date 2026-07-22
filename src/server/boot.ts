@@ -47,7 +47,7 @@ import { lookupIdempotent, rememberIdempotent } from './idempotency.ts';
 import { createApiKey, deleteApiKey, listApiKeys } from './api-keys.ts';
 import { addUnread, markRead as markUnread, getUnreads } from './unread.ts';
 
-import { loadShragaConfig } from './shraga-config.ts';
+import { loadShragaConfig, getPublicOrigin } from './shraga-config.ts';
 import { startSidecars, stopSidecars } from './mcp-sidecar.ts';
 import { syncVendorRepos } from './vendor-sync.ts';
 import { initEngines, getAvailableEngines, getEngine } from './engine/index.ts';
@@ -945,7 +945,7 @@ initPolls({
 // Remote-push triggers: subscribe to schedule.finished and expose turn-done/question
 // hooks. isForeground reuses the existing presence tracking (see isUserViewingSession).
 initPushTriggers({
-  origin: process.env.PUBLIC_ORIGIN || '',
+  origin: getPublicOrigin(),
   isForeground: (uid, sessionId) => isUserViewingSession(uid, sessionId),
 });
 // Optional add-ons (voice, github, gmail, fleet, …) mount here through the feature seam.
