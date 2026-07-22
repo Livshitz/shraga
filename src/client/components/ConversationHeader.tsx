@@ -41,6 +41,29 @@ function InfoBadges({
   // distinguishable from a native runtime running the same model. Prefix such a model with the engine
   // name; native engines (claude-code, cursor) show the model plainly. Engine name comes from data.
   const model = !engineIsNative ? `${engine} · ${rawModel.replace('claude-', '')}` : rawModel.replace('claude-', '');
+  // Auth-mechanism indicator. The only verifiable distinction is claude.ai OAuth login vs a provider
+  // API key: the native claude-code engine can run on a login (no ANTHROPIC_API_KEY); every add-on
+  // engine / provider-prefixed model runs on that provider's key (ai.libx.js adapters throw without
+  // one). What that key COSTS is plan-dependent and NOT knowable here (Anthropic API is metered;
+  // a Cursor key may draw on a Cursor subscription) — so we label the mechanism, not the billing.
+  // Provider = the model's prefix (bare ⇒ anthropic).
+  const billingProvider = rawModel.includes('/') ? rawModel.split('/')[0] : 'anthropic';
+  const onSubscription = engine === 'claude-code' && config.claudeAuthSource === 'subscription';
+  // Tone: green = claude.ai login (no key); amber = provider key whose usage may be subscription-
+  // covered (Cursor); rose = provider key that is genuinely metered (Anthropic/OpenAI/etc.).
+  const billingTone = onSubscription ? 'sub' : billingProvider === 'cursor' ? 'plan' : 'metered';
+  const billingClass =
+    billingTone === 'sub'
+      ? 'bg-emerald-50 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-950/50 dark:text-emerald-300 dark:ring-emerald-400/30'
+      : billingTone === 'plan'
+        ? 'bg-amber-50 text-amber-700 ring-amber-600/20 dark:bg-amber-950/50 dark:text-amber-300 dark:ring-amber-400/30'
+        : 'bg-rose-50 text-rose-700 ring-rose-600/20 dark:bg-rose-950/50 dark:text-rose-300 dark:ring-rose-400/30';
+  const billingTitle =
+    billingTone === 'sub'
+      ? 'Claude.ai subscription (OAuth login) — no API key in use'
+      : billingTone === 'plan'
+        ? `Runs on your ${billingProvider} API key — usage may draw on your ${billingProvider} plan/subscription`
+        : `Runs on your ${billingProvider} API key — metered per-token billing`;
   const perms = config.permissionMode || 'acceptEdits';
   const permLabel =
     perms === 'bypassPermissions' ? 'bypass' : perms === 'plan' ? 'plan' : perms === 'default' ? 'prompt' : 'edits';
@@ -57,6 +80,12 @@ function InfoBadges({
     <div className="flex items-center gap-1.5 flex-wrap">
       <span className="inline-flex items-center rounded-md bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20 dark:bg-blue-950/50 dark:text-blue-300 dark:ring-blue-400/30">
         {model}
+      </span>
+      <span
+        title={billingTitle}
+        className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset ${billingClass}`}
+      >
+        {onSubscription ? 'sub' : `API·${billingProvider}`}
       </span>
       <span className="inline-flex items-center rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20 dark:bg-amber-950/50 dark:text-amber-300 dark:ring-amber-400/30">
         {permLabel}

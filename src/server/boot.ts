@@ -21,7 +21,7 @@ import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import { requireAuth, verifyBearer, AUTH_PROVIDER, localLogin, addLocalUser, localUserCount } from './auth.ts';
 import { getMcpConfig, getRawMcpConfig, getResolvedMcpConfig, getGlobalMcpConfig, saveMcpConfig, maskEnvValues, mergeWithOriginal, type McpConfig } from './mcp.ts';
-import { streamChat, consumeStream, getAgentConfig, saveAgentConfig, type AgentConfig, type PermissionHandler, type QuestionHandler, type QuestionAnswers, type AttachmentMeta, type WsEvent } from './claude.ts';
+import { streamChat, consumeStream, getAgentConfig, saveAgentConfig, getClaudeAuthSource, type AgentConfig, type PermissionHandler, type QuestionHandler, type QuestionAnswers, type AttachmentMeta, type WsEvent } from './claude.ts';
 import { mountFeatures, registerFeature, resumeFeatureSession, collectFeatureFlags, collectSidecarRoutes } from './features.ts';
 import { registerSpaCatchAll } from './spa-catchall.ts';
 import { slackFeature } from './slack/feature.ts';
@@ -299,11 +299,14 @@ app.put('/api/mcps', requireAuth, (req, res) => {
 });
 
 app.get('/api/config', requireAuth, (_req, res) => {
-  res.json(getAgentConfig());
+  // `claudeAuthSource` is derived server state (not persisted config) — the spread always overrides
+  // any stale value, so it can never round-trip into agent-config.json even if a client echoes it back.
+  res.json({ ...getAgentConfig(), claudeAuthSource: getClaudeAuthSource() });
 });
 
 app.put('/api/config', requireAuth, (req, res) => {
-  saveAgentConfig(req.body as AgentConfig);
+  const { claudeAuthSource: _drop, ...config } = (req.body ?? {}) as AgentConfig & { claudeAuthSource?: string };
+  saveAgentConfig(config);
   res.json({ ok: true });
 });
 
