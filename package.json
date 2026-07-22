@@ -1,6 +1,6 @@
 {
   "name": "shraga",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "The teammate you delegate coding to — a self-hostable, multi-user AI coding agent web UI (Claude Code, with a pluggable engine seam).",
   "type": "module",
   "main": "./src/index.ts",
