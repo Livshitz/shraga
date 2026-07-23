@@ -419,7 +419,10 @@ describe('uninstall + skills-defaults', () => {
     expect(skill).not.toContain('{{');                        // every placeholder resolved
     // Restored doctrine renders (F3)
     expect(skill).toContain('self-wake-<slug>');
-    expect(skill).toContain('max 4 self-wakes per day');      // maxSelfWakesPerDay default rendered
+    expect(skill).toContain('max 4 FUTURE-scheduled self-wakes per day'); // maxSelfWakesPerDay default rendered
+    // Pager doctrine (1.2.0): tick dispatches via immediate self-wake, never works
+    expect(skill).toContain('Dispatch, don\'t do');
+    expect(skill).toContain('NEVER does the work');
     expect(skill).toContain('rules out a previously stated theory');
     expect(skill).toContain('event-triggered reactions');
     expect(skill).toContain('Unsure which tier → digest');
