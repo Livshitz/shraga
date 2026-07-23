@@ -26,7 +26,7 @@ import { mountFeatures, registerFeature, resumeFeatureSession, collectFeatureFla
 import { registerSpaCatchAll } from './spa-catchall.ts';
 import { slackFeature } from './slack/feature.ts';
 import { dataPath } from './paths.ts';
-import { getAllSessions, getSession, getSessionHistory, upsertSession, appendMessage, saveConversation, loadConversation, setSessionDirectives, getAutoApprove, setAutoApprove, getSessionsByScheduleId, getSessionsVisibleTo, isSessionVisibleTo, setRunStatus, incrementRetryCount, resetRetryCount, getRunningSessions, updateScheduledSessionStatus, setShuttingDown, backfillSessionVisibility, writePartial, readPartial, clearPartial, registerLivePartial, unregisterLivePartial, readLivePartial, acquireSessionLock, releaseSessionLock, replaceSessionLock, isSessionLocked, getSessionAbortController, forkSession, generateSessionTitle, type ConvBlock, type ConvMessage, type SessionMeta } from './sessions.ts';
+import { getAllSessions, getSession, getSessionHistory, upsertSession, appendMessage, saveConversation, loadConversation, setSessionDirectives, getAutoApprove, setAutoApprove, getSessionsByScheduleId, getSessionsVisibleTo, isSessionVisibleTo, setRunStatus, incrementRetryCount, resetRetryCount, getRunningSessions, getActiveLockCount, updateScheduledSessionStatus, setShuttingDown, backfillSessionVisibility, writePartial, readPartial, clearPartial, registerLivePartial, unregisterLivePartial, readLivePartial, acquireSessionLock, releaseSessionLock, replaceSessionLock, isSessionLocked, getSessionAbortController, forkSession, generateSessionTitle, type ConvBlock, type ConvMessage, type SessionMeta } from './sessions.ts';
 import { setBroadcaster } from './session-bus.ts';
 import * as scheduler from './scheduler/index.ts';
 import { initPolls } from './polls.ts';
@@ -1808,16 +1808,19 @@ async function gracefulShutdown(signal: string, opts: { exit?: boolean } = {}) {
   // Agent turns routinely run for minutes; give in-flight streams time to finish before we force-kill
   // their Claude Code child processes (which would otherwise surface as `exited with code 143`).
   // Keep this under the service manager's stop timeout (e.g. systemd TimeoutStopSec) so the drain wins, not SIGKILL.
+  // Drain on the LIVE lock count, not the persisted index: setRunStatus freezes `running` in the
+  // index at shutdown (the crash-recovery marker), so index entries can never go idle mid-drain —
+  // polling the index made every restart with an active session (or a stale marker from a prior
+  // crash) sit out the full 90s.
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
-    const running = getRunningSessions();
-    if (running.length === 0) break;
-    console.log(`[server] waiting for ${running.length} active stream(s)…`);
+    const running = getActiveLockCount();
+    if (running === 0) break;
+    console.log(`[server] waiting for ${running} active stream(s)…`);
     await new Promise((r) => setTimeout(r, 2000));
   }
 
-  const remaining = getRunningSessions();
-  console.log(`[server] drain complete — ${remaining.length} stream(s) still active, closing`);
+  console.log(`[server] drain complete — ${getActiveLockCount()} stream(s) still active, closing`);
 
   for (const [ws, session] of activeConnections) {
     for (const ac of session.abortControllers.values()) ac.abort();
