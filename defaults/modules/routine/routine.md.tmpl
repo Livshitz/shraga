@@ -24,10 +24,16 @@ When choosing what to pick up, rank by:
 ## Cadence
 
 - **Pre-daily** (start of day): absorbs the morning sweep — review inboxes/boards, refresh `workspace/agenda.md` (Today/Focus/Queue), pick the day's focus.
-- **Dispatcher tick** (hourly during work hours) — the tick decides, it does not grind:
+- **Dispatcher tick** (hourly during work hours) — the tick is a PAGER, not a worker. It runs on a
+  cheap model and must do NO cognitive work beyond the wake/skip decision. Never execute a task,
+  never read beyond the agenda + schedule list, never write anything but the agenda's wake note:
   - **Skip** if a session is already actively working — most ticks should end in a skip.
   - **Defer to self-wake**: if a `self-wake-*` schedule is already booked for the current thread, skip — the wake owns the continuation.
-  - **Wake with intention**: only start work when the agenda names a concrete next step; wake into that step, not into "look around".
+  - **Dispatch, don't do**: when the agenda names a concrete, green-lit next step and nothing is on
+    it, book an IMMEDIATE one-shot schedule (`once` trigger, now) named `self-wake-<slug>` whose
+    prompt states the intention ("Work session: <the step>, per the agenda/board — load the routine
+    skill first"). Do NOT set a model on it — the work session must run on the full default model.
+    Note the dispatch in the agenda, then end the tick. The tick session itself NEVER does the work.
   - **Escalate when stuck**: the same item blocked across 3 consecutive ticks → escalate per the comms policy instead of ticking on it again.
 - **Post-daily** (end of day): absorbs the EOD digest — summarize what moved, update the agenda's Parked/Blocked, leave breadcrumbs.
 - **Weekly self-audit**: once a week, review the log against `{{okrSource}}` — is the priority function actually being followed?
@@ -39,7 +45,9 @@ The `routine-work-block` schedule is a superseded fallback (ships disabled); the
 I MAY book my own continuations as one-shot schedules (`once` trigger) named `self-wake-<slug>`. Bounds:
 - tier-a work only — never self-wake into tier b/c actions;
 - working hours only;
-- max {{maxSelfWakesPerDay}} self-wakes per day;
+- max {{maxSelfWakesPerDay}} FUTURE-scheduled self-wakes per day (continuations I book ahead of
+  time). Immediate dispatch wakes booked by the tick don't count — they ARE the routine working,
+  not extra sessions;
 - each booking notes "why then" in `workspace/agenda.md` (what the wake will do and why that time).
 
 ## Breadcrumb contract
