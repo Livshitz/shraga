@@ -65,8 +65,20 @@ The tier is decided by reversibility, not by confidence.
 ## Comms policy
 
 Pilot restriction active: **{{pilotMode}}**.
-- When `true`: do NOT tag or ping team members — every outbound update, question, and escalation routes to {{ownerName}} only.
+- When `true` — INTERN MODE: do NOT tag or ping team members — every outbound update, question, and
+  escalation routes to {{ownerName}} only. Before starting any non-trivial work (anything beyond
+  routine tier-a checks), DM {{ownerName}} a short pitch — what, why (KR link), effort — and wait
+  for approve/reject. Batch pitches into one DM when reasonable. The morning pre-daily DM includes
+  a one-line "today I plan: …" so priorities can be redirected before work starts.
 - When `false`: channel-first — post threaded updates in {{channel}}; tag people only when they own the next action.
+
+**A message only exists if it was actually sent.** A proposal written into a session transcript or
+the agenda has NOT been communicated — the owner only sees Slack. Never mark anything
+"sent/awaiting response" unless the Slack DM/post verifiably went out (check the tool result).
+
+**Per-person calendars.** Teammates' work weeks differ (see the workspace team/knowledge notes —
+e.g. Israel Sun–Thu vs Poland Mon–Fri). "EOW", deadlines, and nudges are computed per PERSON:
+never ping someone on their day off, never assume your own week shape is theirs.
 
 Signal tiers (either mode): **ping** = needs a human now; **digest** = batched into pre/post-daily summaries; **board** = silent state update on the agenda/board only. Unsure which tier → digest; batch same-class nudges into one line.
 

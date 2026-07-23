@@ -423,6 +423,10 @@ describe('uninstall + skills-defaults', () => {
     // Pager doctrine (1.2.0): tick dispatches via immediate self-wake, never works
     expect(skill).toContain('Dispatch, don\'t do');
     expect(skill).toContain('NEVER does the work');
+    // Intern-mode doctrine (1.3.0)
+    expect(skill).toContain('INTERN MODE');
+    expect(skill).toContain('only exists if it was actually sent');
+    expect(skill).toContain('Per-person calendars');
     expect(skill).toContain('rules out a previously stated theory');
     expect(skill).toContain('event-triggered reactions');
     expect(skill).toContain('Unsure which tier → digest');
