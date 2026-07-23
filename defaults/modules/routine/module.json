@@ -1,6 +1,6 @@
 {
   "name": "routine",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Daily operating contract — cadence (dispatcher ticks + work blocks), OKR-anchored priorities, autonomy tiers, comms policy, and an agenda seed.",
   "configSchema": {
     "workingDays":   { "type": "string",  "default": "Sun–Thu",              "description": "Working days, prose (shown in the skill)" },
@@ -21,7 +21,7 @@
       "def": "tick",
       "name": "routine-tick",
       "trigger": { "kind": "cron", "expr": "{{tickCron}}", "tz": "{{tz}}" },
-      "task": { "kind": "prompt", "prompt": "Dispatcher tick: load the routine skill (Dispatcher tick rules) and workspace/agenda.md, then follow the tick logic. Most ticks should end in a skip.", "model": "{{tickModel}}" }
+      "task": { "kind": "prompt", "prompt": "Dispatcher tick (pager only — no cognitive work): load the routine skill (Dispatcher tick rules) and workspace/agenda.md, then decide wake/skip per the tick logic. If work is due, book an immediate self-wake-* once-schedule with the intention (NO model override) and end — never do the work in this session. Most ticks should end in a skip.", "model": "{{tickModel}}" }
     },
     {
       "def": "work-block",
