@@ -1,6 +1,6 @@
 {
   "name": "routine",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Daily operating contract — cadence (dispatcher ticks + work blocks), OKR-anchored priorities, autonomy tiers, comms policy, and an agenda seed.",
   "configSchema": {
     "workingDays":   { "type": "string",  "default": "Sun–Thu",              "description": "Working days, prose (shown in the skill)" },
