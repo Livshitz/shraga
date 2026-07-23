@@ -326,6 +326,14 @@ export function isSessionLocked(sessionId: string): boolean {
   return globalSessionLocks.has(sessionId);
 }
 
+/** Count of queries streaming in THIS process right now. The drain loop must use this, not the
+ *  persisted index: setRunStatus freezes `running` at shutdown as the crash-recovery marker, so
+ *  index entries can't go idle mid-drain (and stale entries from a prior crash would stall the
+ *  drain for sessions that aren't streaming at all). */
+export function getActiveLockCount(): number {
+  return globalSessionLocks.size;
+}
+
 export function replaceSessionLock(sessionId: string, origin: SessionLock['origin'], abortController: AbortController): void {
   globalSessionLocks.set(sessionId, { origin, abortController, startedAt: Date.now() });
 }
