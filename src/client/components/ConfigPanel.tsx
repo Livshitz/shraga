@@ -32,7 +32,8 @@ interface EngineInfo {
 const FALLBACK_MODELS: EngineModel[] = [
   { value: '', label: 'Default (claude-sonnet-5)' },
   { value: 'claude-fable-5', label: 'Fable 5 — frontier, most capable' },
-  { value: 'claude-opus-4-8', label: 'Opus 4.8 — most capable, best for complex/agentic tasks' },
+  { value: 'claude-opus-5', label: 'Opus 5 — most capable, best for complex/agentic tasks' },
+  { value: 'claude-opus-4-8', label: 'Opus 4.8' },
   { value: 'claude-opus-4-7', label: 'Opus 4.7' },
   { value: 'claude-opus-4-6', label: 'Opus 4.6' },
   { value: 'claude-sonnet-5', label: 'Sonnet 5 — balanced speed & intelligence' },

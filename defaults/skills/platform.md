@@ -30,7 +30,7 @@ Users can prefix any message with `[directives]` to override settings. Parsed se
 
 | Position | What | Examples |
 |----------|------|----------|
-| 1st | Model alias | `fable`, `opus`, `sonnet`, `haiku`, `fable-5`, `opus-4-8`, `opus-4-7` |
+| 1st | Model alias | `fable`, `opus`, `sonnet`, `haiku`, `fable-5`, `opus-5`, `opus-4-8`, `opus-4-7` |
 | 2nd | Max turns (integer) | `5`, `20`, `100` |
 
 ### Named directives
