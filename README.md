@@ -253,3 +253,5 @@ Shraga is a set of ideas before it is a binary:
 
 Concepts, gaps, "why not X", use cases: [Discussions](https://github.com/Livshitz/shraga/discussions).
 Bugs and concrete proposals: [Issues](https://github.com/Livshitz/shraga/issues).
+
+
