@@ -255,3 +255,5 @@ Concepts, gaps, "why not X", use cases: [Discussions](https://github.com/Livshit
 Bugs and concrete proposals: [Issues](https://github.com/Livshitz/shraga/issues).
 
 
+
+
