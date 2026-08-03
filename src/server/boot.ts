@@ -842,26 +842,30 @@ function proxySidecarWebSocket(req: import('node:http').IncomingMessage, socket:
     const targetWs = new WebSocket(targetUrl);
     let opened = false;
 
+    // Bound IMMEDIATELY, not inside targetWs 'open': the BROWSER's socket is OPEN the moment
+    // handleUpgrade returns, so it reports "connected" and starts sending while we're still dialing the
+    // sidecar. Registering the listener on open discarded everything typed in that window — silently.
+    // Queue instead, and flush in order once upstream is up.
+    const pending: Array<{ data: import('ws').RawData; isBinary: boolean }> = [];
+    clientWs.on('message', (data, isBinary) => {
+      // App-level liveness probe (Layer 2): the client can't read protocol pongs from JS, so it sends
+      // `{type:'ping'}` and expects `{type:'pong'}`. We RELAY it — we must not answer it here. A
+      // proxy-local reply only proves THIS hop is alive: if the proxy→sidecar leg is half-open, or the
+      // sidecar has already dropped this client from its subscriber set, the browser still gets pongs,
+      // keeps `readyState === OPEN`, shows a green "connected" dot, and every keystroke disappears.
+      // The probe is only worth anything end-to-end, so the sidecar owns the reply (para-pty answers in
+      // its ws message handler); a sidecar that doesn't reply fails the probe, which is the honest
+      // outcome — the client then reconnects rather than trusting a dead pipe.
+      if (targetWs.readyState === WebSocket.OPEN) targetWs.send(data, { binary: isBinary });
+      else if (!opened && pending.length < 256) pending.push({ data, isBinary }); // bounded: never buffer unboundedly
+    });
+
     targetWs.on('open', () => {
       opened = true;
-      clientWs.on('message', (data, isBinary) => {
-        // App-level liveness probe (Layer 2): the client can't read protocol pongs from JS and the daemon
-        // doesn't speak ping, so answer `{type:'ping'}` here without forwarding. Lets the browser detect a
-        // half-open socket the server-side terminate can't reach (broken path) and force a reconnect.
-        // Cheap prefilter (small + contains "ping") so we don't JSON-parse every keystroke/paste frame.
-        if (!isBinary && (data as Buffer).length < 64) {
-          const s = data.toString();
-          if (s.includes('"ping"')) {
-            try {
-              if (JSON.parse(s).type === 'ping') {
-                if (clientWs.readyState === WebSocket.OPEN) clientWs.send(JSON.stringify({ type: 'pong' }));
-                return;
-              }
-            } catch { /* not JSON — fall through to relay */ }
-          }
-        }
-        if (targetWs.readyState === WebSocket.OPEN) targetWs.send(data, { binary: isBinary });
-      });
+      for (const m of pending) {
+        if (targetWs.readyState === WebSocket.OPEN) targetWs.send(m.data, { binary: m.isBinary });
+      }
+      pending.length = 0;
       targetWs.on('message', (data, isBinary) => {
         if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data, { binary: isBinary });
       });
