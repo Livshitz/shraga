@@ -11,7 +11,7 @@ process.on('unhandledRejection', (reason) => {
   if (SUPPRESSED_ERRORS.test(msg)) return;
   console.error('[server] Unhandled rejection (kept alive):', msg);
 });
-import { createServer } from 'node:http';
+import { createServer, STATUS_CODES } from 'node:http';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
@@ -19,7 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
-import { requireAuth, verifyBearer, AUTH_PROVIDER, localLogin, addLocalUser, localUserCount } from './auth.ts';
+import { requireAuth, verifyBearer, authenticateToken, AUTH_PROVIDER, localLogin, addLocalUser, localUserCount } from './auth.ts';
 import { getMcpConfig, getRawMcpConfig, getResolvedMcpConfig, getGlobalMcpConfig, saveMcpConfig, maskEnvValues, mergeWithOriginal, type McpConfig } from './mcp.ts';
 import { streamChat, consumeStream, getAgentConfig, saveAgentConfig, getClaudeAuthSource, type AgentConfig, type PermissionHandler, type QuestionHandler, type QuestionAnswers, type AttachmentMeta, type WsEvent } from './claude.ts';
 import { mountFeatures, registerFeature, resumeFeatureSession, collectFeatureFlags, collectSidecarRoutes } from './features.ts';
@@ -834,11 +834,58 @@ function resolveSidecarPort(urlPath: string): number | null {
   return prefix ? WS_PROXY_ROUTES[prefix] ?? null : null;
 }
 
-const sidecarWss = new WebSocketServer({ noServer: true });
+/** Handshake subprotocol marker carrying the caller's token: `[WS_AUTH_PROTOCOL, <token>]`.
+ * Keep in sync with `WS_AUTH_PROTOCOL` in src/client/lib/ws.ts (the client half). */
+const WS_AUTH_PROTOCOL = 'shraga.auth';
+
+// handleProtocols is explicit so the accepted subprotocol is always the marker — never the token
+// itself (ws's default picks the first offered, and echoing a credential back in a response header
+// would put it in any intermediary's log). Only consulted when the client offered protocols at all,
+// so a header-authenticated non-browser client is unaffected.
+const sidecarWss = new WebSocketServer({ noServer: true, handleProtocols: (protocols) => (protocols.has(WS_AUTH_PROTOCOL) ? WS_AUTH_PROTOCOL : false) });
+
+/** Authenticate a WS upgrade. Token comes from the subprotocol list (the only browser-settable
+ * handshake field), falling back to a bearer header for non-browser clients (curl/CLI/tests). */
+async function authenticateWsUpgrade(req: import('node:http').IncomingMessage): Promise<import('./auth.ts').AuthUser | null> {
+  const protocols = (req.headers['sec-websocket-protocol'] as string | undefined)?.split(',').map((s) => s.trim()) ?? [];
+  const token = protocols[0] === WS_AUTH_PROTOCOL && protocols[1]
+    ? protocols[1]
+    : req.headers.authorization?.replace('Bearer ', '');
+  return authenticateToken(token);
+}
+
+/** Reject a WS upgrade with a real HTTP response before destroying the socket — same shape as ws's own
+ * internal `abortHandshake`. A bare `socket.destroy()` writes ZERO bytes, so the client sees a generic
+ * "connection failed" and an expired token is indistinguishable from "server is down".
+ *
+ * CAVEAT, measured, do not assume this reaches the client today: under Bun (1.3.10, the runtime this
+ * server actually runs on) the socket handed to a `node:http` 'upgrade' listener is write-dead — it
+ * reports `writable: true` but has no `_handle`, and NOTHING written to it is ever delivered. Probed in
+ * an isolated two-runtime rig (plain `createServer` + 'upgrade' listener, raw TCP client): Node 24
+ * delivered the 401 for every variant (end / write / paused / unpaused); Bun 1.3.10 delivered zero bytes
+ * for all of them, including a direct `_handle.write`. ws's own `abortHandshake` would fail identically —
+ * it is the same `socket.end(...)`. So on Bun the observable behaviour is still a bare close.
+ * This is kept because it is the correct shape, costs nothing, still closes the socket, and starts
+ * working the moment Bun implements it (or the process runs under Node). Until then, do NOT build a
+ * client-side "auth error" affordance on top of it — the client cannot see this response. */
+function abortUpgrade(socket: import('node:stream').Duplex, code: number, message?: string) {
+  if (socket.destroyed || !socket.writable) return;
+  const body = message ?? STATUS_CODES[code] ?? '';
+  const headers = ['Connection: close', 'Content-Type: text/plain', `Content-Length: ${Buffer.byteLength(body)}`];
+  socket.once('finish', () => socket.destroy());
+  // The socket was paused for the auth gap; pause() only stops READS, so it is still writable here.
+  try { socket.end(`HTTP/1.1 ${code} ${STATUS_CODES[code] ?? 'Error'}\r\n${headers.join('\r\n')}\r\n\r\n${body}`); }
+  catch { socket.destroy(); }
+}
 
 function proxySidecarWebSocket(req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex, head: Buffer, port: number) {
   const targetUrl = `ws://127.0.0.1:${port}${req.url}`;
   sidecarWss.handleUpgrade(req, socket as any, head, (clientWs) => {
+    // The caller paused the socket for the async auth gap; ws has now attached its own 'data' listener
+    // (handleUpgrade → setSocket runs before this callback), so it's safe — and necessary — to resume:
+    // an EXPLICITLY paused socket does not re-enter flowing mode just because a listener was added, so
+    // without this every buffered byte and every subsequent keystroke would sit unread forever.
+    socket.resume();
     const targetWs = new WebSocket(targetUrl);
     let opened = false;
 
@@ -918,9 +965,50 @@ server.on('upgrade', (req, socket, head) => {
   } else {
     const port = req.url ? resolveSidecarPort(req.url) : null;
     if (port) {
-      proxySidecarWebSocket(req, socket, head, port);
+      // A sidecar socket is a LIVE ATTACHED SHELL (para-pty) — read/write on the user's terminals. It
+      // must be authenticated BEFORE we bridge it, like the HTTP routes (`requireAuth`) and the `/ws`
+      // control socket (its `auth` message). NOTE the limit of this gate: it is IDENTITY-ONLY. It proves
+      // the token belongs to a valid user; it does NOT check that the user owns (or may access) the
+      // `sessionId` in the URL, so it is weaker than routes that additionally authorize — e.g. the HTTP
+      // pty kill route, which checks group membership. Any authenticated user can currently attach to any
+      // session id. Unlike those, there's no place to put a bearer header:
+      // a browser can't set headers on a WebSocket handshake. The one field it CAN set is the
+      // subprotocol list, so the client sends `[WS_AUTH_PROTOCOL, <token>]` (see ptyWsUrl's consumer) and
+      // we verify entry 1 with the same token seam requireAuth uses. Works identically over the `.local`
+      // HTTPS origin and the cloudflared tunnel — Sec-WebSocket-Protocol is a standard handshake header
+      // both pass through, and unlike `?token=` it never lands in an access log or a Referer.
+      // Pause for the async gap. Node hands us the raw socket with its own parser detached, so nothing
+      // is reading it while we verify; pausing makes that explicit and guarantees bytes the client sends
+      // between the handshake and our decision are buffered, not dropped. proxySidecarWebSocket resumes
+      // it once ws owns the socket.
+      socket.pause();
+      // Fail CLOSED on anything: a rejected/thrown/slow auth must destroy the socket, never leave it
+      // dangling. Without the catch a throw in authenticateWsUpgrade (token store unavailable, malformed
+      // header) produced an unhandled rejection AND an open, unauthenticated, un-proxied socket; without
+      // the timeout a hung verifier held the socket and its fd open indefinitely.
+      // The catch sits on the auth promise itself rather than on the race, so a rejection that arrives
+      // AFTER the timeout already won is visibly logged instead of vanishing into the race's own
+      // (already-settled) internal handler.
+      const authed = authenticateWsUpgrade(req)
+        .catch((err) => { console.error('[ws-proxy] auth threw for upgrade:', (err as Error)?.message ?? err); return null; });
+      // Cleared on settle: an uncleared 5s timer pins this socket/req/head closure alive for 5s per
+      // upgrade even when auth resolved in milliseconds.
+      let authTimer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<null>((resolve) => { authTimer = setTimeout(() => resolve(null), WS_AUTH_TIMEOUT_MS); authTimer.unref?.(); });
+      void Promise.race([authed, timedOut])
+        .then((user) => {
+          if (authTimer) clearTimeout(authTimer);
+          if (socket.destroyed) return;
+          if (!user) {
+            console.warn(`[ws-proxy] rejected unauthenticated upgrade for ${req.url?.split('?')[0]}`);
+            abortUpgrade(socket, 401, 'Unauthorized: missing or invalid token');
+            return;
+          }
+          proxySidecarWebSocket(req, socket, head, port);
+        });
     } else {
-      socket.destroy();
+      // No sidecar registered for this path — a client error, not an auth failure.
+      abortUpgrade(socket, 400, 'Unknown upgrade path');
     }
   }
 });
@@ -931,6 +1019,7 @@ function send(ws: WebSocket, data: object) {
 
 const DESTRUCTIVE_PERMISSION_TTL = 10 * 60_000;
 const WS_PING_INTERVAL = 30_000;
+const WS_AUTH_TIMEOUT_MS = 5_000; // upper bound on sidecar-upgrade auth; past it the socket is destroyed
 const activeConnections = new Map<WebSocket, WsSession>();
 const globalPendingPermissions = new Map<string, { resolve: (r: { allow: boolean }) => void; sessionId: string; tool: string; input: unknown; uid: string }>();
 function isSessionBusy(sid: string): boolean {

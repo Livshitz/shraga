@@ -232,6 +232,20 @@ export async function verifyBearer(token: string): Promise<AuthUser> {
   return AUTH_PROVIDER === 'firebase' ? verifyToken(token) : verifyLocalToken(token);
 }
 
+/** Verify a raw token (api-key `uck_…`, scoped internal token, or provider bearer) → AuthUser, or null.
+ * The token-only half of `requireAuth`, for callers with no Express req/res — notably the WebSocket
+ * upgrade path, where the token arrives in the handshake instead of an Authorization header. */
+export async function authenticateToken(token: string | undefined | null): Promise<AuthUser | null> {
+  if (!token) return null;
+  if (token.startsWith('uck_')) {
+    const identity = validateApiKey(token);
+    return identity ? { uid: identity.uid, email: identity.email, isOwner: isOwnerEmail(identity.email) } : null;
+  }
+  const internal = verifyInternalToken(token);
+  if (internal) return { uid: internal.uid, email: internal.email, isOwner: isOwnerEmail(internal.email) };
+  try { return await verifyBearer(token); } catch { return null; }
+}
+
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   const internalToken = req.headers['x-internal-token'] as string | undefined;
   if (internalToken) {
