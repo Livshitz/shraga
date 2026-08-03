@@ -1,3 +1,9 @@
+/** Subprotocol marker used to carry a bearer token through a WebSocket handshake: open the socket as
+ * `new WebSocket(url, [WS_AUTH_PROTOCOL, token])`. Browsers can't set headers on a WS handshake, and the
+ * subprotocol list is the one field they can — used by the sidecar WS proxy (see authenticateWsUpgrade
+ * in src/server/boot.ts, which must stay in sync with this value). */
+export const WS_AUTH_PROTOCOL = 'shraga.auth';
+
 export type AskQuestion = {
   question: string;
   header: string;
