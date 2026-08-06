@@ -153,11 +153,18 @@ app.use(express.urlencoded({
   verify: (req, _res, buf) => { (req as any).rawBody = buf; },
 }));
 
+// High-frequency poll routes (pty cwd, list refreshes) are quiet on success — they'd otherwise
+// drown real request logs. Errors and everything else still logs unconditionally.
+const QUIET_POLL_RE = /\/(cwd|ptys|sessions|workspace\/(pty-owners|layout))(\?|$)/;
+
 app.use((req, _res, next) => {
   const start = Date.now();
   const orig = _res.end.bind(_res);
   (_res as any).end = (...args: any[]) => {
-    console.log(`[http] ${req.method} ${req.url} → ${_res.statusCode} (${Date.now() - start}ms)`);
+    const quiet = req.method === 'GET' && _res.statusCode < 400 && QUIET_POLL_RE.test(req.url);
+    if (!quiet) {
+      console.log(`[http] ${req.method} ${req.url} → ${_res.statusCode} (${Date.now() - start}ms)`);
+    }
     return orig(...args);
   };
   next();
