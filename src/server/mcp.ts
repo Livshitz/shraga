@@ -52,11 +52,52 @@ function isHttpConfig(s: McpServerConfig): s is McpHttpServerConfig {
   return s.type === 'http';
 }
 
+/** `$VAR` / `${VAR}` placeholders inside a string. Same dialect as stdio `env` values, but also
+ *  substitutes when EMBEDDED (`Bearer $TOKEN`) — a header value is never the bare variable. */
+const PLACEHOLDER_RE = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
+
+/** Expand placeholders; unset var → '' (same as stdio env resolution). `found` records each hit. */
+function expandPlaceholders(value: string, found: string[]): string {
+  return value.replace(PLACEHOLDER_RE, (_m, braced, bare) => {
+    const v = process.env[braced || bare] || '';
+    found.push(v);
+    return v;
+  });
+}
+
+/** Resolve `$VAR` placeholders in an http entry's headers and url.
+ *  Without this, an authenticated remote MCP can only be configured by INLINING the secret into
+ *  data/mcps/*.json — which shraga auto-commits and pushes to the data repo (see saveMcpConfig →
+ *  dataSync.trackWrite). Entries with no placeholders are returned untouched. */
+function resolveHttpConfig(name: string, server: McpHttpServerConfig): McpHttpServerConfig | null {
+  const found: string[] = [];
+  const out: McpHttpServerConfig = { ...server };
+  if (typeof server.url === 'string') out.url = expandPlaceholders(server.url, found);
+  if (server.headers) {
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries(server.headers)) {
+      headers[k] = typeof v === 'string' ? expandPlaceholders(v, found) : String(v ?? '');
+    }
+    out.headers = headers;
+  }
+  // Env-gate, mirroring stdio: an entry that DECLARES placeholders but resolves them all empty isn't
+  // configured for this deployment — skip it rather than mounting with a broken `Bearer ` credential.
+  if (found.length > 0 && found.every((v) => !v)) {
+    console.log(`[mcp] ${name}: skipped — required env placeholders not set in this deployment`);
+    return null;
+  }
+  return out;
+}
+
 /** Resolve env values: empty → process.env[same key], "$VAR" → process.env[VAR] */
 function resolveEnv(config: McpConfig): McpConfig {
   const resolved: McpConfig = {};
   for (const [name, server] of Object.entries(config)) {
-    if (isHttpConfig(server)) { resolved[name] = server; continue; }
+    if (isHttpConfig(server)) {
+      const http = resolveHttpConfig(name, server);
+      if (http) resolved[name] = http;
+      continue;
+    }
     if (!server.env) { resolved[name] = server; continue; }
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(server.env)) {
