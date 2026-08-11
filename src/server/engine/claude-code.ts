@@ -446,7 +446,9 @@ export class ClaudeCodeEngine implements AgentEngine {
               const output = contentArr.length > 0
                 ? contentArr.filter((c: any) => c.type === 'text').map((c: any) => c.text ?? '').join('')
                 : String(block.content ?? '');
-              yield { type: 'tool_result', toolUseId: String(block.tool_use_id), output };
+              // `is_error` is the ONLY signal that a tool failed — the text alone is indistinguishable
+              // from a successful result. Scheduled `bash` tasks rely on it to notice a non-zero exit.
+              yield { type: 'tool_result', toolUseId: String(block.tool_use_id), output, isError: block.is_error === true };
 
               let foundImage = false;
               for (const c of contentArr) {

@@ -74,7 +74,7 @@ export type WsEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'tool_use'; tool: string; toolUseId: string; input: unknown }
   | { type: 'tool_use_input'; toolUseId: string; input: unknown }
-  | { type: 'tool_result'; toolUseId: string; output: string }
+  | { type: 'tool_result'; toolUseId: string; output: string; isError?: boolean }
   | { type: 'tool_result_image'; toolUseId: string; dataUrl: string }
   | { type: 'permission_request'; id: string; tool: string; input: Record<string, unknown> }
   | { type: 'question_request'; id: string; questions: AskQuestion[] }
