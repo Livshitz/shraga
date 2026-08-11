@@ -14,6 +14,7 @@ import type { WsEvent, AskQuestion, QuestionAnswers, QuestionHandler } from '../
 import type { AgentEngine, EngineStreamOpts, EngineModel } from './types.ts';
 import { getPromptSuffix } from '../prompt-suffix.ts';
 import { APP_ROOT } from '../paths.ts';
+import { writeMcpConfigFile } from './mcp-config-file.ts';
 const IMMUTABLE_SYSTEM_PROMPT = readFileSync(path.resolve(import.meta.dirname, '../../../defaults/system-prompt.md'), 'utf-8');
 const DEFAULT_USER_PROMPT = `You are a helpful assistant with access to MCP tools.`;
 const DEFAULT_ALLOWED_TOOLS = ['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch'];
@@ -271,7 +272,14 @@ export class ClaudeCodeEngine implements AgentEngine {
     const addonSuffix = getPromptSuffix(opts.turnHints);
     options['systemPrompt'] = `${IMMUTABLE_SYSTEM_PROMPT}\n\n${userPrompt}${addonSuffix ? `\n\n${addonSuffix}` : ''}`;
     if (opts.abortController) options['abortController'] = opts.abortController;
-    if (opts.mcpServers && Object.keys(opts.mcpServers).length > 0) options['mcpServers'] = opts.mcpServers;
+    // Passed as a FILE, never as `options.mcpServers` — the SDK would put the whole config (every MCP
+    // server's credentials) on the CLI's argv, where `ps` / `/proc` / journald expose it. See
+    // writeMcpConfigFile. Setting both would re-add the argv copy, so it's one or the other.
+    let mcpConfigFile: { path: string; cleanup: () => void } | undefined;
+    if (opts.mcpServers && Object.keys(opts.mcpServers).length > 0) {
+      mcpConfigFile = writeMcpConfigFile(opts.mcpServers);
+      options['extraArgs'] = { ...(options['extraArgs'] as Record<string, string> | undefined), 'mcp-config': mcpConfigFile.path };
+    }
 
     const mcpNames = opts.mcpServers ? Object.keys(opts.mcpServers) : [];
     const activeModel = (options['model'] as string) || 'default';
@@ -517,6 +525,9 @@ export class ClaudeCodeEngine implements AgentEngine {
       return;
     } finally {
       clearBgTimer();
+      // The CLI has read the file by now (it loads MCP config at startup); holding it any longer just
+      // widens the window in which the credentials sit on disk.
+      mcpConfigFile?.cleanup();
     }
 
     const inferredReason = turnCount >= maxTurns ? 'max_turns_reached' : 'end_turn';
