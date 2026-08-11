@@ -338,14 +338,20 @@ async function runJobSchedule(
       blocks: [{ type: 'text', text: `✅ Job completed successfully.\n\n${prefix}${output.trim() || '(no output)'}\n\`\`\`` }],
     });
   } catch (err: any) {
-    status = abortController.signal.aborted ? 'aborted' : 'error';
+    // A job killed by a SIGNAL was INTERRUPTED, not failed — the usual cause is systemd stopping the
+    // service (a deploy/restart), which SIGTERMs the whole cgroup including in-flight job children.
+    // Reporting that as `error` fires the failure notifier with an alert nobody can act on, whose
+    // "error" is just the job's own progress output (the process never got to throw anything).
+    // `aborted` is the existing status for "ended without failing" and the notifier ignores it.
+    const killed = typeof err?.signal === 'string';
+    status = abortController.signal.aborted || killed ? 'aborted' : 'error';
     error = err?.message ?? String(err);
     appendMessage(sessionId, {
       id: crypto.randomUUID(),
       role: 'assistant',
-      blocks: [{ type: 'text', text: `❌ Job failed.\n\n${prefix}${error}\n\`\`\`` }],
+      blocks: [{ type: 'text', text: `${killed ? '⏹️ Job interrupted' : '❌ Job failed'}.\n\n${prefix}${error}\n\`\`\`` }],
     });
-    console.error(`[scheduler] job run error for ${schedule.id}:`, error);
+    console[killed ? 'warn' : 'error'](`[scheduler] job run ${killed ? 'interrupted' : 'error'} for ${schedule.id}:`, error);
   } finally {
     clearInterval(partialInterval);
     unregisterLivePartial(sessionId);
@@ -395,10 +401,19 @@ function runCommandWithMarker(command: string, abortController: AbortController,
 
     abortController.signal.addEventListener('abort', () => child.kill('SIGTERM'), { once: true });
     child.on('error', reject);
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       const trimmed = output.trim();
-      if (code === 0) resolve(trimmed);
-      else reject(new Error(trimmed || `Command failed with exit code ${code}`));
+      if (code === 0) return resolve(trimmed);
+      // Always state HOW it ended. The old form used the command's own output as the message whenever
+      // it had produced any, so a killed job reported its progress logs as "the error" and the actual
+      // cause (exit code / signal) was lost — the failure was captured, but not why.
+      const how = signal ? `killed by ${signal}` : `exit code ${code}`;
+      const err: NodeJS.ErrnoException & { signal?: string } = new Error(
+        trimmed ? `Command ${how}. Output:\n${trimmed}` : `Command ${how}`,
+      );
+      // Carried so callers can tell an interrupted run (deploy/restart) from a real failure.
+      if (signal) err.signal = signal;
+      reject(err);
     });
   });
 }
