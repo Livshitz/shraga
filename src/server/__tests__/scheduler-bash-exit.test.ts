@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, mock } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, mock } from 'bun:test';
 import type { Schedule, ScheduleRunSummary } from '../scheduler/types.ts';
 import type { ConvBlock } from '../sessions.ts';
 
@@ -12,8 +12,24 @@ type StreamEvent = { type: string; [k: string]: unknown };
 let script: StreamEvent[] = [];
 let calls = 0;
 
+// `mock.module` is process-global: it replaces claude.ts for EVERY importer for the rest of the run,
+// and there is no per-file teardown. So this replacement must be invisible to sibling test files on
+// both counts —
+//   1. spread the real namespace, or the other exports vanish and any file importing one fails to
+//      link ("Export named 'getAgentConfig' not found");
+//   2. delegate to the real streamChat unless OUR tests are running, or files that drive the genuine
+//      streamChat (turn-context.wiring) silently get this stub and their engine never runs.
+// Both failures land in unrelated files and depend on execution order, which is what makes them so
+// confusing to chase. bun runs test files sequentially, so the beforeAll/afterAll flag is sufficient.
+// SNAPSHOT the namespace before registering: `mock.module` MUTATES the live module object in place,
+// so a later `ns.streamChat` resolves to this very stub and delegating through it recurses until the
+// stack blows. Copy the real bindings out first and only ever touch the copy.
+const realClaude = { ...(await import('../claude.ts')) };
+let stubActive = false;
 mock.module('../claude.ts', () => ({
-  async *streamChat() {
+  ...realClaude,
+  async *streamChat(opts: Parameters<typeof realClaude.streamChat>[0]) {
+    if (!stubActive) { yield* realClaude.streamChat(opts); return; }
     calls++;
     for (const ev of script) yield ev;
   },
@@ -27,9 +43,11 @@ let runSchedule: (
 let loadConversation: (sessionId: string) => { role: string; blocks: ConvBlock[] }[];
 
 beforeAll(async () => {
+  stubActive = true;
   ({ runSchedule } = await import('../scheduler/runner.ts'));
   ({ loadConversation } = await import('../sessions.ts'));
 });
+afterAll(() => { stubActive = false; });
 
 const CMD = 'bun run data/scripts/daily-mrr-sheet.ts';
 

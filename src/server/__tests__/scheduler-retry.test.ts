@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, mock } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, mock } from 'bun:test';
 import type { Schedule, ScheduleRunSummary } from '../scheduler/types.ts';
 import type { ConvBlock } from '../sessions.ts';
 
@@ -13,8 +13,15 @@ type StreamEvent = { type: string; [k: string]: unknown };
 let attempts: (StreamEvent[] | Error)[] = [];
 let calls = 0;
 
+// Spread the real namespace AND delegate when our tests aren't running — `mock.module` is
+// process-global and permanent, so anything less leaks this stub into sibling files. The full
+// reasoning is in scheduler-bash-exit.test.ts.
+const realClaude = { ...(await import('../claude.ts')) };
+let stubActive = false;
 mock.module('../claude.ts', () => ({
-  async *streamChat() {
+  ...realClaude,
+  async *streamChat(opts: Parameters<typeof realClaude.streamChat>[0]) {
+    if (!stubActive) { yield* realClaude.streamChat(opts); return; }
     const script = attempts[calls++] ?? [{ type: 'done' }];
     if (script instanceof Error) throw script;
     for (const ev of script) yield ev;
@@ -29,9 +36,11 @@ let runSchedule: (
 let loadConversation: (sessionId: string) => { role: string; blocks: ConvBlock[] }[];
 
 beforeAll(async () => {
+  stubActive = true;
   ({ runSchedule } = await import('../scheduler/runner.ts'));
   ({ loadConversation } = await import('../sessions.ts'));
 });
+afterAll(() => { stubActive = false; });
 
 let n = 0;
 function makeSchedule(): Schedule {
