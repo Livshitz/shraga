@@ -156,7 +156,7 @@ For **vendor webhooks** that can't send shraga auth (Stripe, GitHub, …), add a
 
 The system emits these onto the bus automatically — use them as the `source` of an event trigger to react to the agent's own lifecycle:
 
-- **`schedule.finished`** — fired when any time/manual schedule run completes. Payload: `{ scheduleId, name, status, sessionId, sessionUrl?, error? }`. `status` is `ok` | `error` | `aborted`. Chain automations off it, e.g.:
+- **`schedule.finished`** — fired when any time/manual schedule run completes. Payload: `{ scheduleId, name, status, sessionId, sessionUrl?, error? }`. `status` is `ok` | `error` | `aborted` — `aborted` covers both a user cancel and a run killed by a signal (a deploy/restart SIGTERMs in-flight jobs), so alerts matching `error` don't fire on interrupted runs. Chain automations off it, e.g.:
   ```json
   { "trigger": { "kind": "event", "source": "schedule.finished", "match": { "status": "error" } },
     "task": { "kind": "prompt", "prompt": "A scheduled run failed — investigate and post a summary." } }
