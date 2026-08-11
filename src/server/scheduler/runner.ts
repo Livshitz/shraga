@@ -194,12 +194,21 @@ export async function runSchedule(
   let status: ScheduleRunSummary['status'] = 'ok';
   let error: string | undefined;
 
+  // A `bash` task is not exec'd — it's handed to the agent as a prompt, so the command's exit code
+  // reaches nobody: the agent reports the failure in prose, its own turn succeeds, the run is stored
+  // `ok`, and the failure notifier never fires. Track the tool_result of the task's OWN Bash call and
+  // fail the run with it, so a broken scheduled script alerts like a `job` does.
+  const taskBashToolUseIds = new Set<string>();
+  let bashFailure: string | undefined;
+
   onEvent({ type: 'schedule:run_started', scheduleId: schedule.id, sessionId, at: now });
 
   try {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       status = 'ok';
       error = undefined;
+      bashFailure = undefined;
+      taskBashToolUseIds.clear();
       try {
         for await (const ev of streamChat({
           prompt,
@@ -217,10 +226,12 @@ export async function runSchedule(
           } else if (ev.type === 'tool_use') {
             if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
             assistantBlocks.push({ type: 'tool_use', tool: ev.tool, toolUseId: ev.toolUseId, input: ev.input });
+            if (allowedCmd && ev.tool === 'Bash' && (ev.input as any)?.command === allowedCmd) taskBashToolUseIds.add(ev.toolUseId);
           } else if (ev.type === 'thinking_delta') {
             producedThinking = true;
           } else if (ev.type === 'tool_result') {
             assistantBlocks.push({ type: 'tool_result', toolUseId: ev.toolUseId, output: ev.output });
+            if (ev.isError && taskBashToolUseIds.has(ev.toolUseId)) bashFailure = ev.output;
           } else if (ev.type === 'done') {
             break;
           } else if (ev.type === 'error') {
@@ -236,6 +247,12 @@ export async function runSchedule(
           status = 'error';
           error = err?.message ?? String(err);
         }
+      }
+
+      // The agent turn can succeed while the command it was asked to run failed — that's the run failing.
+      if (status === 'ok' && bashFailure) {
+        status = 'error';
+        error = `Scheduled command failed:\n${bashFailure.slice(0, 4000)}`;
       }
 
       if (status !== 'error') break;
