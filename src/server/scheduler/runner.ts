@@ -198,7 +198,10 @@ export async function runSchedule(
   // reaches nobody: the agent reports the failure in prose, its own turn succeeds, the run is stored
   // `ok`, and the failure notifier never fires. Track the tool_result of the task's OWN Bash call and
   // fail the run with it, so a broken scheduled script alerts like a `job` does.
-  const taskBashToolUseIds = new Set<string>();
+  // Correlation is by toolUseId, decided at tool_result time: `tool_use` is yielded at
+  // content_block_start, when the input is still EMPTY (it streams in afterwards as `tool_use_input`),
+  // so matching the command there matches nothing.
+  const toolUses = new Map<string, { tool: string; input: unknown }>();
   let bashFailure: string | undefined;
 
   onEvent({ type: 'schedule:run_started', scheduleId: schedule.id, sessionId, at: now });
@@ -208,7 +211,7 @@ export async function runSchedule(
       status = 'ok';
       error = undefined;
       bashFailure = undefined;
-      taskBashToolUseIds.clear();
+      toolUses.clear();
       try {
         for await (const ev of streamChat({
           prompt,
@@ -226,12 +229,20 @@ export async function runSchedule(
           } else if (ev.type === 'tool_use') {
             if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
             assistantBlocks.push({ type: 'tool_use', tool: ev.tool, toolUseId: ev.toolUseId, input: ev.input });
-            if (allowedCmd && ev.tool === 'Bash' && (ev.input as any)?.command === allowedCmd) taskBashToolUseIds.add(ev.toolUseId);
+            toolUses.set(ev.toolUseId, { tool: ev.tool, input: ev.input });
+          } else if (ev.type === 'tool_use_input') {
+            // The tool's real input arrives here, after the block opened — keep both the persisted
+            // block and the correlation map in sync, else the transcript shows an empty `{}` call.
+            const entry = toolUses.get(ev.toolUseId);
+            if (entry) entry.input = ev.input;
+            const block = assistantBlocks.find((b) => b.type === 'tool_use' && b.toolUseId === ev.toolUseId) as any;
+            if (block) block.input = ev.input;
           } else if (ev.type === 'thinking_delta') {
             producedThinking = true;
           } else if (ev.type === 'tool_result') {
             assistantBlocks.push({ type: 'tool_result', toolUseId: ev.toolUseId, output: ev.output });
-            if (ev.isError && taskBashToolUseIds.has(ev.toolUseId)) bashFailure = ev.output;
+            const use = toolUses.get(ev.toolUseId);
+            if (ev.isError && allowedCmd && use?.tool === 'Bash' && (use.input as any)?.command === allowedCmd) bashFailure = ev.output;
           } else if (ev.type === 'done') {
             break;
           } else if (ev.type === 'error') {
