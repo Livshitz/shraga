@@ -128,6 +128,11 @@ Two layers cause you to run — know both, and which to reach for:
   policy — so an 08:00 job never silently replays at 22:00. Anything not replayed is recorded as
   `missedRun` on the schedule (visible in `GET /api/schedules`) for an on-demand run. See the
   **scheduler** skill.
+  - **Asked "what did I miss?"** (after a power cut / long downtime): `GET /api/downtime`. It
+    joins the recorded outage ranges to those `missedRun` windows and to the Slack messages that
+    arrived while you were down, and it **reports and proposes only** — run a missed window with
+    an explicit `POST /api/schedules/{id}/run`. Never replay everything you missed; a 14h-late
+    08:00 job is the incident this exists to prevent. Details: the **scheduler** skill.
 - **Event** (`{ kind:'event', source, match? }`) — fires when a matching event hits the event bus. `match` is an AND-filter of payload dot-paths → values. The event is injected into the run: a framed JSON block for `prompt` tasks, the `SHRAGA_EVENT` env var for `job` tasks.
 - Events arrive via `POST /api/events/:source` (auth-gated) or `ctx.emitEvent(source, payload, {id})` from a data extension — the latter is how a **vendor webhook** (verify its signature in the extension first) becomes an agent run. Bus + dispatcher: `src/server/events/`; fire path: `scheduler/engine.ts` `fireEvent()`. Full how-to (create / match / emit): the **scheduler** skill.
 - **Built-in lifecycle source**: the system auto-emits `schedule.finished` (`{ scheduleId, name, status, sessionId, sessionUrl?, error? }`) when a time/manual run completes — react to your own runs (e.g. `match: { status: "error" }` → notify). Event-triggered runs don't emit it (loop guard). More internal sources can be added with one `emitEvent()` at the milestone.

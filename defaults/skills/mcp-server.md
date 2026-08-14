@@ -56,6 +56,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (uses s
 | `put_skills_write` | Create/update a skill |
 | `get_schedules` | List scheduled jobs |
 | `post_schedules_run` | Trigger a schedule run |
+| `get_downtime` | "What did I miss?" — outage ranges + missed schedule windows + Slack backfill (reports/proposes only, fires nothing) |
 | `post_chat` | Talk to the agent — conversational, multi-turn via sessionId |
 | `get_config` | Read agent configuration |
 
