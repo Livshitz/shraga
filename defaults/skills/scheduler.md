@@ -134,8 +134,41 @@ Task:
   { kind: "prompt", prompt: "<text>" }
   { kind: "bash", command: "<cmd>" }
 
-Schedule: { id, name, enabled, trigger, task, scope, createdBy, nextRun?, lastRun?, runCount }
+Schedule: { id, name, enabled, trigger, task, scope, createdBy, nextRun?, lastRun?, runCount,
+            onMissed?, missedRun? }
 ```
+
+## Missed windows (`onMissed` / `missedRun`)
+
+If the process is down when a window should have fired (deploy, crash, power cut), the scheduler
+decides at the next boot whether to replay it. `onMissed` is settable on `POST`/`PUT`:
+
+| `onMissed` | Behaviour |
+|---|---|
+| `run` (default) | Replay the missed window — the pre-existing behaviour. |
+| `skip` | Never replay. The window is simply lost. |
+| `offer` | Don't auto-fire, but **record** it so a human/agent can run it on demand. |
+
+```bash
+curl -s -X PUT -H "Content-Type: application/json" -H "x-internal-token: $INTERNAL_API_TOKEN" \
+  http://localhost:$PORT/api/schedules/{id} -d '{ "onMissed": "offer" }' | jq .
+```
+
+- **A staleness ceiling overrides every policy, `run` included**: a window more than
+  `SCHEDULER_MAX_MISSED_AGE_MS` (default **6h**) late is never replayed. Finishing an 08:00 report
+  at 22:00 is not the job the schedule describes.
+- This applies to **both** paths that could replay a window: the boot catch-up (cron), and the
+  in-place resume of a run interrupted mid-flight (every trigger kind — `interval`/`once`/`event`
+  have no catch-up, so resume is their only gate; their window is the one the interrupted run
+  recorded when it started).
+- Whenever a window is not replayed, the schedule gets
+  `missedRun: { at, reason: "skip"|"offer"|"stale", noticedAt }` — visible on
+  `GET /api/schedules` and `GET /api/schedules/{id}`. **That is the `offer` affordance**: read it,
+  then `POST /api/schedules/{id}/run` to run the missed work on demand. It clears the moment the
+  schedule next starts a run.
+- `POST /api/schedules/{id}/run` returns **409** `{ error, reason }` when a run can't start
+  (`locked` — a run is already in flight, incl. one held across a restart; `already-completed` /
+  `already-attempted`). A `404` there really does mean the schedule doesn't exist.
 
 ## Emitting events (to fire event-triggered schedules)
 

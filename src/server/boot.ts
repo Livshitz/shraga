@@ -414,6 +414,7 @@ app.post('/api/schedules', requireAuth, (req, res) => {
     enabled: body.enabled ?? true,
     trigger: body.trigger as Schedule['trigger'],
     task: body.task as Schedule['task'],
+    onMissed: body.onMissed,
     scope: 'user',
     createdBy: { uid: user.uid, email: user.email },
     createdAt: now,
@@ -438,6 +439,7 @@ app.put('/api/schedules/:id', requireAuth, (req, res) => {
     enabled: body.enabled ?? existing.enabled,
     trigger: (body.trigger ?? existing.trigger) as Schedule['trigger'],
     task: (body.task ?? existing.task) as Schedule['task'],
+    onMissed: body.onMissed ?? existing.onMissed,
   };
   const result = scheduler.upsertSchedule(updated);
   if (!result.ok) return res.status(400).json({ error: result.error });
@@ -469,9 +471,15 @@ app.post('/api/schedules/:id/run', requireAuth, (req, res) => {
   const id = String(req.params.id);
   if (!scheduleIfVisible(id, user.uid, user.isOwner)) return res.status(404).json({ error: 'Not found' });
   const override = typeof req.body?.override === 'string' ? req.body.override.trim() || undefined : undefined;
-  const sessionId = scheduler.runNow(id, override);
-  if (!sessionId) return res.status(404).json({ error: 'Not found' });
-  res.json({ sessionId });
+  const outcome = scheduler.runNow(id, override);
+  // A refusal here is a CONFLICT with the schedule's current state (a run already holds the
+  // cross-restart lock, the period is already done), not a missing resource — 404 sent operators
+  // hunting for a schedule that plainly exists.
+  if (!outcome.ok) {
+    if (outcome.reason === 'unknown-schedule') return res.status(404).json({ error: 'Not found' });
+    return res.status(409).json({ error: outcome.message, reason: outcome.reason });
+  }
+  res.json({ sessionId: outcome.sessionId, queued: outcome.queued ?? false });
 });
 
 app.post('/api/schedules/:id/cancel', requireAuth, (req, res) => {
@@ -1806,7 +1814,22 @@ async function recoverInterruptedSessions() {
       });
       const resumePrompt = 'Your previous response was cut off by a server restart. The partial response has been preserved above. Continue from where you left off, and avoid repeating any side-effects (e.g. messages already sent) that may have completed before the interruption.';
       setRunStatus(s.sessionId, 'idle');
-      scheduler.resumeRun(s.scheduleId!, s.sessionId, resumePrompt);
+      const outcome = scheduler.resumeRun(s.scheduleId!, s.sessionId, resumePrompt);
+      if (!outcome.ok) {
+        // The refusal is now the EXPECTED outcome after a long outage (stale window / onMissed).
+        // Close the session out exactly like the not-resumable branch above — otherwise
+        // scheduleRunStatus stays 'running', the sidebar shows it busy forever, and it can never
+        // self-heal because getRunningSessions() filters on runStatus, which is already idle.
+        appendMessage(s.sessionId, {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          blocks: [{ type: 'error', text: `Not resumed after the server restart — ${outcome.message} (${outcome.reason}).` }],
+        });
+        updateScheduledSessionStatus(s.sessionId, 'error');
+        scheduler.clearRunningMarker(s.scheduleId!);
+        console.log(`[recovery] scheduler session ${s.sessionId.slice(0, 8)} (${s.scheduleId}) — resume refused (${outcome.reason}): ${outcome.message}`);
+        continue;
+      }
       console.log(`[recovery] resuming scheduler session ${s.sessionId.slice(0, 8)} (${s.scheduleId}) in-place`);
       continue;
     }
