@@ -6,7 +6,7 @@ import { streamChat, type PermissionHandler } from '../claude.ts';
 import { getMcpConfig } from '../mcp.ts';
 import { appendMessage, createScheduledSession, updateScheduledSessionStatus, setRunStatus, registerLivePartial, unregisterLivePartial, writePartial, clearPartial, acquireSessionLock, releaseSessionLock, type ConvBlock } from '../sessions.ts';
 import type { Schedule, ScheduleRunSummary } from './types.ts';
-import { writeRunningMarker, clearRunningMarker } from './storage.ts';
+import { updateRunLockPid, clearRunningMarker } from './storage.ts';
 import { addUnread } from '../unread.ts';
 
 export interface RunContext {
@@ -114,8 +114,8 @@ export async function runSchedule(
   acquireSessionLock(sessionId, 'scheduler', abortController);
   setRunStatus(sessionId, 'running', 'scheduler');
   onEvent({ type: 'session_busy', sessionId, busy: true });
-  // Mark this period as running with the live pid so startup catch-up won't double-fire it.
-  writeRunningMarker({ pid: process.pid, startedAt: now, scheduleId: schedule.id });
+  // The run lock (running marker) is acquired by the engine BEFORE this point — see
+  // engine.startRun. Writing it here too would let a direct runSchedule() call bypass the lock.
 
   const task = schedule.task;
   if (task.kind === 'job') {
@@ -414,9 +414,9 @@ function runCommandWithMarker(command: string, abortController: AbortController,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    if (child.pid) {
-      writeRunningMarker({ pid: child.pid, startedAt: Date.now(), scheduleId });
-    }
+    // Re-point the held lock at the child: the job outlives nothing here, but if the server dies
+    // the child may still be alive, and a live pid must keep the schedule locked.
+    if (child.pid) updateRunLockPid(scheduleId, child.pid);
 
     let output = '';
     const handleData = (chunk: Buffer) => {

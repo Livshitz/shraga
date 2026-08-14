@@ -247,8 +247,9 @@ export function createShragaMcp(deps: McpServerDeps) {
       if (!id) return json({ error: 'id required' }, { status: 400 });
       const schedule = scheduler.getSchedule(id);
       if (!schedule) return json({ error: 'Schedule not found' }, { status: 404 });
-      scheduler.runNow(id);
-      return json({ ok: true, id });
+      const outcome = scheduler.runNow(id);
+      if (!outcome.ok) return json({ error: outcome.message, reason: outcome.reason }, { status: 409 });
+      return json({ ok: true, id, sessionId: outcome.sessionId, queued: outcome.queued ?? false });
     } catch (e) { return json({ error: errMessage(e) }, { status: 500 }); }
   });
 

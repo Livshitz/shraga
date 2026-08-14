@@ -96,3 +96,77 @@ export function clearRunningMarker(scheduleId: string): void {
 export function isProcessAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
+
+/** How long a held run lock is believed, before it is treated as abandoned regardless of whether
+ *  its pid answers. Bounds the blast radius of pid reuse: after a power cut the OS restarts pid
+ *  allocation low, so a persisted pid can plausibly be live again under the same uid — and a
+ *  liveness check alone would then wedge the schedule forever. Generous vs any real run (agent
+ *  runs are minutes, not hours) while capping the wedge at one window's worth of a daily job. */
+const runLockMaxAgeMs = () => Number(process.env.SCHEDULER_RUN_LOCK_MAX_AGE_MS ?? 6 * 60 * 60 * 1000);
+
+/**
+ * Claim the single live-run slot for a schedule.
+ *
+ * The lock IS the running marker — same file, same conventions — so it survives a process
+ * restart: after a crash the marker is still on disk but its pid is dead, and a dead pid is
+ * reclaimable (otherwise a power cut would wedge the schedule forever). A LIVE pid, ours or
+ * another instance's, means someone is already running this schedule: the caller must back off —
+ * UNLESS the claim is older than `runLockMaxAgeMs`, which is the escape hatch for a lock wedged
+ * by pid reuse. A live, in-ceiling claim is never stolen, not even by a manual run: on this
+ * single-active-instance design that pid is a real run (an agent session, or a spawned job the
+ * lock was re-pointed at), and starting a second one is the duplicate-fire we are preventing.
+ *
+ * Single-writer by design (only the DATA_SYNC_SCHEDULER_ACTIVE instance fires), so this is a
+ * read-then-write, not an atomic CAS.
+ */
+export function acquireRunLock(scheduleId: string, window: number): RunningMarker | null {
+  const existing = readRunningMarker(scheduleId);
+  if (existing) {
+    const alive = isProcessAlive(existing.pid);
+    const age = Date.now() - (Number.isFinite(existing.startedAt) ? existing.startedAt : 0);
+    const maxAge = runLockMaxAgeMs();
+    if (alive && age <= maxAge) return null;
+    const why = !alive
+      ? `dead pid ${existing.pid}`
+      : `held ${Math.round(age / 60_000)}m by live pid ${existing.pid}, past the ${Math.round(maxAge / 60_000)}m lock ceiling — assuming pid reuse`;
+    console.log(`[scheduler] reclaiming run lock for ${scheduleId} — ${why} (window ${new Date(existing.window ?? existing.startedAt).toISOString()})`);
+  }
+  const marker: RunningMarker = { pid: process.pid, startedAt: Date.now(), scheduleId, window };
+  writeRunningMarker(marker);
+  return marker;
+}
+
+/** Re-point a held lock at a spawned child process. Only ever touches a lock THIS process holds,
+ *  and preserves `startedAt` so re-pointing can't refresh the age ceiling above. */
+export function updateRunLockPid(scheduleId: string, pid: number): void {
+  const existing = readRunningMarker(scheduleId);
+  if (!existing) {
+    console.warn(`[scheduler] updateRunLockPid(${scheduleId}): no lock held — not creating one`);
+    return;
+  }
+  if (existing.pid !== process.pid) {
+    console.warn(`[scheduler] updateRunLockPid(${scheduleId}): lock is held by pid ${existing.pid}, not us — leaving it alone`);
+    return;
+  }
+  writeRunningMarker({ ...existing, scheduleId, pid });
+}
+
+/**
+ * Record that a run STARTED for `window`, before it can succeed or fail.
+ *
+ * Without this a run that errors or is killed leaves no trace on disk, so the next boot sees an
+ * un-completed window and replays it — the double-fire this ledger exists to prevent. The
+ * successful-completion timestamp is preserved untouched so "started" stays distinguishable
+ * from "completed ok".
+ */
+export function markRunStarted(scheduleId: string, window: number, triggeredBy: CompletionMarker['triggeredBy'] = 'scheduler'): void {
+  const prev = readCompletionMarker(scheduleId);
+  writeCompletionMarker({
+    completedAt: prev?.completedAt ?? 0,
+    triggeredBy,
+    scheduleId,
+    lastAttemptAt: Date.now(),
+    attemptWindow: window,
+    status: 'started',
+  });
+}
