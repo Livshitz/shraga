@@ -41,6 +41,7 @@ import { registerModuleRoutes, reconcileInstalledModules } from './modules/index
 import { hydrateSlackUserToken } from './slack/oauth.ts';
 import { registerMcpOAuthRoutes } from './mcp-oauth.ts';
 import { registerEventRoutes } from './events/routes.ts';
+import { startHeartbeat, recordBootGap, buildReport } from './downtime.ts';
 import { registerWebhook } from './events/webhook.ts';
 import { startEventDispatcher } from './events/dispatcher.ts';
 import { seedOperators } from './contacts.ts';
@@ -389,6 +390,20 @@ function scheduleIfVisible(id: string, uid: string, isOwner = false): Schedule |
   if (isOwner || s.scope === 'system' || s.createdBy.uid === uid) return s;
   return undefined;
 }
+
+// "What did I miss?" — the on-demand downtime report. Read-only and INERT: it returns outage
+// ranges, the windows phase 1 deliberately did not replay (`missedRun`), and the Slack messages
+// that arrived while we were down, each with a PROPOSAL. Running any of it is a separate,
+// explicit call (POST /api/schedules/:id/run). `?slack=0` skips the Slack read.
+app.get('/api/downtime', requireAuth, async (req, res) => {
+  try {
+    const slack = String(req.query.slack ?? '1') !== '0';
+    res.json(await buildReport({ slack }));
+  } catch (err) {
+    console.error('[downtime] report failed:', err);
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
 
 app.get('/api/schedules', requireAuth, (req, res) => {
   const user = (req as any).user;
@@ -1050,6 +1065,13 @@ setBroadcaster(broadcast); // let session-bus push async events (e.g. an add-on'
 ensureWorkspaceDir();
 watchWorkspace((event) => broadcast({ type: 'workspace_change', ...event }));
 if (!PASSIVE) {
+  // BEFORE anything that could take time: the gap is measured as (now - last heartbeat), so it must
+  // be read and re-stamped while "now" still means boot — a slow start would otherwise inflate the
+  // gap, or (once startHeartbeat is running) erase it. Order vs the scheduler's catch-up doesn't
+  // matter for the join: missedSchedules() reads the two files independently, at report time.
+  // Passive twins never write here — single-active-writer, same rule as the scheduler.
+  recordBootGap();
+  startHeartbeat();
   scheduler.start(broadcast);
   startEventDispatcher();
   // Modules reconcile MUST follow scheduler.start(): upsertSchedule mutates the engine's
@@ -1110,6 +1132,8 @@ async function activateConsumers() {
   console.log('[server] ACTIVATING — starting consumers and background writers');
   await dataSync.init();
   syncVendorRepos().catch(err => console.warn('[vendor-sync] error:', (err as Error).message));
+  recordBootGap();
+  startHeartbeat();
   scheduler.start(broadcast);
   startEventDispatcher();
   mountFeatures({ app, requireAuth, broadcast, passive: false });

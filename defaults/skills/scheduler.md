@@ -170,6 +170,42 @@ curl -s -X PUT -H "Content-Type: application/json" -H "x-internal-token: $INTERN
   (`locked` — a run is already in flight, incl. one held across a restart; `already-completed` /
   `already-attempted`). A `404` there really does mean the schedule doesn't exist.
 
+## "What did I miss?" — downtime recovery (`GET /api/downtime`)
+
+This box is deliberately not always-on. The server heartbeats to `data/state/heartbeat.json` every
+`HEARTBEAT_INTERVAL_MS` (default **60s**); at boot, a gap larger than `DOWNTIME_THRESHOLD_MS`
+(default **3 intervals = 3m**) is appended to `data/state/downtime.json` as
+`{ from, to, ms, slackCursors }` (last **20** kept). A clean restart records nothing.
+
+```bash
+curl -s -H "x-internal-token: $INTERNAL_API_TOKEN" "http://localhost:$PORT/api/downtime" | jq .
+curl -s -H "x-internal-token: $INTERNAL_API_TOKEN" "http://localhost:$PORT/api/downtime?slack=0" | jq .   # skip the Slack read
+```
+
+Returns `{ heartbeat, downtime[], lastDowntime, missedSchedules[], slack }`:
+
+- **`missedSchedules[]`** — the `missedRun` records above, joined to the outage that covers them,
+  each with a `proposal` string. It does **not** re-derive which windows were missed; the
+  scheduler owns that.
+- **`slack`** — messages that arrived during the last outage, fetched **on demand only** (never at
+  boot) via `conversations.history`, deduped by `client_msg_id`. History, not event replay: Slack's
+  Events API retries a dropped delivery for only ~30 minutes then discards it forever, while
+  `conversations.history` stays readable for days.
+  - **Where it starts:** the outage's `from`, raised only by the last-seen cursor **as
+    snapshotted into the downtime entry at boot** (`slackCursors`). The live cursors in
+    `data/state/slack-cursors.json` are a tail pointer — one message after recovery pushes them
+    past the whole backlog — so they are never used as the floor.
+  - **Which channels:** every channel with a cursor (at the time of the outage or since), plus
+    `SLACK_AGENT_CHANNEL` — so a first deploy, or a channel quiet before the outage, is not
+    invisible.
+  - **`channels[].truncated: true`** means the page cap (5 × 200 per channel) was hit with more
+    still waiting. `conversations.history` returns newest-first, so what's missing is the
+    **start** of the outage. The report's `note` also says `INCOMPLETE` — treat it as such.
+
+**It reports and proposes — nothing auto-fires.** Acting on an item is always an explicit second
+call: `POST /api/schedules/{id}/run` (409 + `reason` if it can't start). Same data is exposed as
+the MCP `get_downtime` tool when `MCP_ALL_TOOLS=true`.
+
 ## Emitting events (to fire event-triggered schedules)
 
 Any caller that can present shraga auth can push an event onto the bus:

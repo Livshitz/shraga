@@ -21,6 +21,7 @@ import { pipeAgentReply, type AgentEvent, type IngressMessage } from 'mcp-slack-
 import { makeSlackQuestionHandler } from './questions.ts';
 import * as contacts from '../contacts.ts';
 import { getChannelContext, invalidateChannelContext } from './context-cache.ts';
+import { noteSlackSeen } from '../downtime.ts';
 import { getOrCreateSession, registerThreadAlias, setLastMessageTs, setUseUserToken, findSlackSessionBySessionId, getProactiveOrigin, hasSessionForThread, isSlackBotPlaceholderEmail } from './sessions.ts';
 
 const MAX_DOWNLOAD_SIZE = 25 * 1024 * 1024;
@@ -45,6 +46,10 @@ const mdText = (b: ConvBlock): b is { type: 'text'; text: string } => b.type ===
 // half: agent-channel summon rules + threads the agent already owns. Referenced app session state
 // (proactive origins, known threads) is why it can't live in the package.
 export function shouldRespond(msg: IngressMessage): boolean {
+  // Advance the per-channel last-seen cursor for EVERY message we're handed, answered or not:
+  // "seen" is the honest baseline for downtime backfill, and it is also how we learn which
+  // channels exist at all. Purely a bookkeeping write — it never affects the gate below.
+  noteSlackSeen(msg.channel, msg.ts);
   const isAgentChannel = msg.channel === AGENT_CHANNEL;
   const isAgentOriginatedThread = msg.isThreadReply && !!(msg.rawThreadTs && getProactiveOrigin(msg.channel, msg.rawThreadTs));
   const isKnownAgentChannelThread = isAgentChannel && msg.isThreadReply && !!(msg.rawThreadTs && hasSessionForThread(msg.channel, msg.rawThreadTs));

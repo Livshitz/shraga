@@ -9,6 +9,7 @@ import { listWorkspaceTree, readWorkspaceFile, safeResolve, searchWorkspace } fr
 import { listSkills, getSkill, saveSkill } from './skills.ts';
 import { getAllSessions, loadConversation, isSessionLocked } from './sessions.ts';
 import * as scheduler from './scheduler/index.ts';
+import { buildReport } from './downtime.ts';
 import { getAgentConfig } from './claude.ts';
 import { validateApiKey } from './api-keys.ts';
 import { verifyMcpToken } from './auth.ts';
@@ -250,6 +251,21 @@ export function createShragaMcp(deps: McpServerDeps) {
       const outcome = scheduler.runNow(id);
       if (!outcome.ok) return json({ error: outcome.message, reason: outcome.reason }, { status: 409 });
       return json({ ok: true, id, sessionId: outcome.sessionId, queued: outcome.queued ?? false });
+    } catch (e) { return json({ error: errMessage(e) }, { status: 500 }); }
+  });
+
+  // ── Downtime ─────────────────────────────────────────────────────────────
+
+  base.describeMCP('/downtime', 'GET', {
+    description: 'Answer "what did I miss while I was down?". Returns recorded downtime ranges, the schedule windows that were deliberately NOT replayed (missedRun), and the Slack messages that arrived during the last outage. Reports and proposes only — it never runs, replays, or answers anything; act on an item with the schedules/run tool.',
+    params: {
+      slack: { description: 'Set "0" to skip the Slack history read (no network).', type: 'string' },
+    },
+    annotations: { readOnlyHint: true },
+  });
+  router.get('/downtime', async (req: any) => {
+    try {
+      return json(await buildReport({ slack: str(req.query.slack) !== '0' }));
     } catch (e) { return json({ error: errMessage(e) }, { status: 500 }); }
   });
 
