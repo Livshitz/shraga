@@ -111,22 +111,10 @@ export function start(broadcast: Broadcast): void {
       continue;
     }
 
-    const policy = missedPolicy(s);
-    if (policy === 'skip') {
-      console.log(`[scheduler] missed window ${new Date(prev).toISOString()} for ${s.id} — onMissed=skip, not replaying`);
-      noteMissed(s, prev, 'skip');
-      continue;
-    }
-    if (policy === 'offer') {
-      console.log(`[scheduler] missed window ${new Date(prev).toISOString()} for ${s.id} — onMissed=offer, recorded for on-demand run`);
-      noteMissed(s, prev, 'offer');
-      continue;
-    }
-    const age = Date.now() - prev;
-    const grace = maxMissedAgeMs();
-    if (age > grace) {
-      console.log(`[scheduler] missed window ${new Date(prev).toISOString()} for ${s.id} is ${Math.round(age / 60_000)}m stale (grace ${Math.round(grace / 60_000)}m) — not replaying`);
-      noteMissed(s, prev, 'stale');
+    const verdict = judgeMissed(s, prev);
+    if (!verdict.replay) {
+      console.log(`[scheduler] not replaying ${s.id} — ${verdict.message}`);
+      noteMissed(s, prev, verdict.reason);
       continue;
     }
     catchUps.push({ id: s.id, window: prev });
@@ -347,20 +335,11 @@ export function resumeRun(scheduleId: string, sessionId: string, prompt: string)
       console.log(`[scheduler] not resuming ${scheduleId} — ${msg}`);
       return refuse('already-completed', msg);
     }
-    const policy = missedPolicy(s);
-    if (policy !== 'run') {
-      const msg = `window ${new Date(window).toISOString()} was missed and onMissed=${policy}`;
-      console.log(`[scheduler] not resuming ${scheduleId} — ${msg}`);
-      noteMissed(s, window, policy);
-      return refuse(policy === 'skip' ? 'policy-skip' : 'policy-offer', msg);
-    }
-    const age = Date.now() - window;
-    const grace = maxMissedAgeMs();
-    if (age > grace) {
-      const msg = `window ${new Date(window).toISOString()} is ${Math.round(age / 60_000)}m stale (ceiling ${Math.round(grace / 60_000)}m)`;
-      console.log(`[scheduler] not resuming ${scheduleId} — ${msg}`);
-      noteMissed(s, window, 'stale');
-      return refuse('stale', msg);
+    const verdict = judgeMissed(s, window);
+    if (!verdict.replay) {
+      console.log(`[scheduler] not resuming ${scheduleId} — ${verdict.message}`);
+      noteMissed(s, window, verdict.reason);
+      return refuse(verdict.refusal, verdict.message);
     }
   }
   console.log(`[scheduler] resuming ${scheduleId} in-place on session ${sessionId.slice(0, 30)}…`);
@@ -423,6 +402,32 @@ function missedPolicy(s: Schedule): MissedPolicy {
   return s.onMissed ?? 'run';
 }
 
+type MissedVerdict =
+  | { replay: true }
+  | { replay: false; reason: 'skip' | 'offer' | 'stale'; refusal: 'policy-skip' | 'policy-offer' | 'stale'; message: string };
+
+/**
+ * The one decision behind "this window already elapsed — may it still run?", shared by all three
+ * replay paths: the boot catch-up scan, the in-place resume, and the late timer fire.
+ *
+ * `onMissed` first (an explicit skip/offer is a standing instruction, not an age question), then
+ * the absolute staleness ceiling, which overrides even `run`. Callers do the recording, because
+ * only they know how to refuse (a return value, or `continue`).
+ */
+function judgeMissed(s: Schedule, window: number, now: number = Date.now()): MissedVerdict {
+  const when = new Date(window).toISOString();
+  const policy = missedPolicy(s);
+  if (policy !== 'run') {
+    return { replay: false, reason: policy, refusal: policy === 'skip' ? 'policy-skip' : 'policy-offer', message: `window ${when} was missed and onMissed=${policy}` };
+  }
+  const age = now - window;
+  const grace = maxMissedAgeMs();
+  if (age > grace) {
+    return { replay: false, reason: 'stale', refusal: 'stale', message: `window ${when} is ${Math.round(age / 60_000)}m stale (ceiling ${Math.round(grace / 60_000)}m)` };
+  }
+  return { replay: true };
+}
+
 function noteMissed(s: Schedule, at: number, reason: 'skip' | 'offer' | 'stale'): void {
   s.missedRun = { at, reason, noticedAt: Date.now() };
   saveSchedules(state.schedules);
@@ -455,7 +460,24 @@ function fireDue(): void {
   const now = Date.now();
   for (const s of state.schedules) {
     if (!s.enabled || s.nextRun === undefined) continue;
-    if (s.nextRun <= now) enqueueFire(s, s.nextRun);
+    if (s.nextRun > now) continue;
+    // A timer fire is normally punctual, so it is NOT treated as a missed window — `onMissed`
+    // must never gate healthy operation. But a setTimeout does not survive a wall-clock jump:
+    // when the host sleeps (lid closed) or NTP steps the clock, the process is FROZEN, not
+    // killed — no restart, so the boot catch-up scan never runs — and the overdue timer fires
+    // the elapsed window the moment the machine wakes. Firing an 08:00 job at 21:36 is exactly
+    // what the catch-up ceiling exists to prevent, reached by the one path it didn't cover.
+    // Past the ceiling we hand the window to the same judgement the other two paths use.
+    // Past the ceiling `judgeMissed` can only refuse (it replays a `run` window only while it is
+    // within the ceiling), so there is no replay branch here — the shared decision is used for WHAT
+    // to record, not whether to fire.
+    if (now - s.nextRun > maxMissedAgeMs()) {
+      const verdict = judgeMissed(s, s.nextRun, now) as Extract<MissedVerdict, { replay: false }>;
+      console.log(`[scheduler] not firing ${s.id} — ${verdict.message} (timer fired late; host suspended or clock jumped)`);
+      noteMissed(s, s.nextRun, verdict.reason);
+      continue; // the advance loop below still re-arms / retires this schedule
+    }
+    enqueueFire(s, s.nextRun);
   }
   // Advance nextRun for recurring triggers; disable fired `once` triggers
   for (const s of state.schedules) {

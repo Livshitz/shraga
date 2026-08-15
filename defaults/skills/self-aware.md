@@ -123,12 +123,14 @@ Schedules sync across all envs but only **execute** where `DATA_SYNC_SCHEDULER_A
 Two layers cause you to run — know both, and which to reach for:
 
 **Schedules (`schedules.json`)** — a schedule is `trigger` + `task` (`prompt`/`bash`/`job`). One execution path, two trigger families:
-- **Time**: `cron` / `interval` / `once`. A window missed while you were down obeys `onMissed`
+- **Time**: `cron` / `interval` / `once`. A window missed while you were down — or while the host
+  was **suspended** and you were merely frozen — obeys `onMissed`
   (`run` default / `skip` / `offer`) plus a hard 6h staleness ceiling that overrides *every*
   policy — so an 08:00 job never silently replays at 22:00. Anything not replayed is recorded as
   `missedRun` on the schedule (visible in `GET /api/schedules`) for an on-demand run. See the
   **scheduler** skill.
-  - **Asked "what did I miss?"** (after a power cut / long downtime): `GET /api/downtime`. It
+  - **Asked "what did I miss?"** (after a power cut, or a laptop **suspend** — a slept host is
+    caught too, by a late heartbeat tick, `cause: 'suspend'`): `GET /api/downtime`. It
     joins the recorded outage ranges to those `missedRun` windows and to the Slack messages that
     arrived while you were down, and it **reports and proposes only** — run a missed window with
     an explicit `POST /api/schedules/{id}/run`. Never replay everything you missed; a 14h-late

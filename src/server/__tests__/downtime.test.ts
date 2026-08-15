@@ -70,7 +70,7 @@ describe('heartbeat + gap detection', () => {
     downtime.writeHeartbeat(last);
     const boot = Date.now();
     const entry = downtime.recordBootGap(boot);
-    expect(entry).toEqual({ from: last, to: boot, ms: boot - last });
+    expect(entry).toEqual({ from: last, to: boot, ms: boot - last, cause: 'boot' });
     expect(downtime.listDowntime()).toEqual([entry!]);
   });
 
@@ -109,6 +109,158 @@ describe('heartbeat + gap detection', () => {
   });
 });
 
+// The failure a boot-time check cannot see: the host slept, the process was FROZEN (never
+// restarted), so the only surviving signal is a heartbeat tick that comes back late.
+describe('suspend detection (late heartbeat tick)', () => {
+  test('an on-time tick records nothing', () => {
+    const now = Date.now();
+    downtime.writeHeartbeat(now - downtime.HEARTBEAT_INTERVAL_MS);
+    expect(downtime.recordTickGap(now)).toBeNull();
+    expect(downtime.listDowntime()).toEqual([]);
+    expect(downtime.readHeartbeat()).toBe(now); // …but liveness still advanced
+  });
+
+  test('scheduling jitter just under the threshold is not an outage', () => {
+    const now = Date.now();
+    downtime.writeHeartbeat(now - (downtime.DOWNTIME_THRESHOLD_MS - 1_000));
+    expect(downtime.recordTickGap(now)).toBeNull();
+    expect(downtime.listDowntime()).toEqual([]);
+  });
+
+  test('a tick late past the threshold records ONE suspend entry', () => {
+    const now = Date.now();
+    const last = now - (downtime.DOWNTIME_THRESHOLD_MS + 60_000);
+    downtime.writeHeartbeat(last);
+    const entry = downtime.recordTickGap(now);
+    expect(entry).toEqual({ from: last, to: now, ms: now - last, cause: 'suspend' });
+    expect(downtime.listDowntime()).toEqual([entry!]);
+  });
+
+  test('the real 2h33m clamshell suspend: one entry, not one per missed interval', () => {
+    // 19:02 → 21:35, the incident that was invisible: pid alive the whole time, no restart.
+    const slept = Date.now() - 153 * MIN;
+    downtime.writeHeartbeat(slept);
+    const wake = Date.now();
+    const entry = downtime.recordTickGap(wake)!;
+    expect(entry.cause).toBe('suspend');
+    expect(entry.ms).toBe(wake - slept);
+
+    // Every tick after the wake is on time again — the gap must not re-record once per interval.
+    for (let i = 1; i <= 5; i++) downtime.recordTickGap(wake + i * downtime.HEARTBEAT_INTERVAL_MS);
+    expect(downtime.listDowntime().length).toBe(1);
+  });
+
+  test('boot and suspend never double-record the same outage', () => {
+    const last = Date.now() - 120 * MIN;
+    downtime.writeHeartbeat(last);
+    const wake = Date.now();
+    // The tick notices it first…
+    expect(downtime.recordTickGap(wake)!.cause).toBe('suspend');
+    // …and a restart right afterwards (e.g. the user bounces the service on waking) sees a
+    // heartbeat that is already current, so it adds nothing.
+    expect(downtime.recordBootGap(wake + 1_000)).toBeNull();
+    expect(downtime.listDowntime().length).toBe(1);
+
+    // And the other order: a boot gap advances the stamp, so the first tick after it is on time.
+    downtime.writeHeartbeat(Date.now() - 200 * MIN);
+    const boot = Date.now();
+    expect(downtime.recordBootGap(boot)!.cause).toBe('boot');
+    expect(downtime.recordTickGap(boot + downtime.HEARTBEAT_INTERVAL_MS)).toBeNull();
+    expect(downtime.listDowntime().length).toBe(2);
+  });
+
+  test('the running heartbeat timer itself notices a freeze', async () => {
+    const stop = downtime.startHeartbeat(20);
+    try {
+      // Simulate the freeze: rewind the on-disk stamp past the threshold, as a slept host would.
+      const frozenAt = Date.now() - (downtime.DOWNTIME_THRESHOLD_MS + 60_000);
+      downtime.writeHeartbeat(frozenAt);
+      const deadline = Date.now() + 2_000;
+      while (!downtime.listDowntime().length && Date.now() < deadline) await new Promise(r => setTimeout(r, 10));
+      const entries = downtime.listDowntime();
+      expect(entries.length).toBe(1);
+      expect(entries[0]).toMatchObject({ from: frozenAt, cause: 'suspend' });
+      // Subsequent (on-time) ticks keep it at exactly one.
+      await new Promise(r => setTimeout(r, 200));
+      expect(downtime.listDowntime().length).toBe(1);
+    } finally {
+      stop();
+    }
+  });
+
+  test('recording a suspend fires NOTHING — no run, no schedule mutation', () => {
+    schedStorage.saveSchedules([makeSchedule({ lastRun: undefined })]);
+    const before = readFileSync(path.join(DATA_DIR, 'schedules.json'), 'utf-8');
+
+    downtime.writeHeartbeat(Date.now() - 180 * MIN);
+    expect(downtime.recordTickGap()!.cause).toBe('suspend');
+
+    expect(readFileSync(path.join(DATA_DIR, 'schedules.json'), 'utf-8')).toBe(before);
+    const s = schedStorage.loadSchedules()[0];
+    expect(s.lastRun).toBeUndefined();
+    expect(s.runCount).toBe(0);
+  });
+
+  test('the report says missedSchedules is INCOMPLETE after a suspend — not that it is empty', async () => {
+    // The late timer fire DOES write missedRun for windows it refuses, at a ts inside the gap —
+    // which missedSchedules() then joins. A note claiming such windows are "NOT listed" is false.
+    const wake = Date.now();
+    const from = wake - 153 * MIN;
+    downtime.writeHeartbeat(from);
+    downtime.recordTickGap(wake);
+    schedStorage.saveSchedules([makeSchedule({ missedRun: { at: wake - 100 * MIN, reason: 'stale', noticedAt: wake } })]);
+
+    const report = await downtime.buildReport({ slack: false });
+    expect(report.lastDowntime?.cause).toBe('suspend');
+    expect(report.missedSchedules.map(m => [m.id, !!m.downtime])).toEqual([['dt-1', true]]);
+    expect(report.note).toContain('SUSPEND');
+    expect(report.note).toContain('INCOMPLETE');
+    expect(report.note).not.toContain('NOT listed in missedSchedules');
+  });
+
+  test('a later restart does NOT erase the suspend warning', async () => {
+    // Lid closed overnight; the next morning the service is bounced (deploy, reboot) more than the
+    // downtime threshold after the wake — that appends a `boot` entry AFTER the suspend one.
+    const wake = Date.now() - 60 * MIN;
+    downtime.writeHeartbeat(wake - 153 * MIN);
+    downtime.recordTickGap(wake);
+    downtime.writeHeartbeat(wake + 5 * MIN);
+    const boot = wake + 5 * MIN + downtime.DOWNTIME_THRESHOLD_MS + MIN;
+    expect(downtime.recordBootGap(boot)!.cause).toBe('boot');
+
+    const report = await downtime.buildReport({ slack: false });
+    expect(report.downtime.map(e => e.cause)).toEqual(['suspend', 'boot']);
+    expect(report.lastDowntime?.cause).toBe('boot'); // the newest entry is NOT the suspend…
+    expect(report.note).toContain('SUSPEND');       // …but the unscanned gap is still flagged
+  });
+
+  test('a suspend older than the note window stops being flagged', async () => {
+    const wake = Date.now() - (downtime.SUSPEND_NOTE_MAX_AGE_MS + 60 * MIN);
+    downtime.writeHeartbeat(wake - 153 * MIN);
+    downtime.recordTickGap(wake);
+    const report = await downtime.buildReport({ slack: false });
+    expect(report.note).not.toContain('SUSPEND');
+  });
+
+  test('a suspend gap does NOT snapshot the live Slack cursors', async () => {
+    // The snapshot only holds its invariant at boot (taken before the Slack socket mounts). On the
+    // suspend path it runs up to a heartbeat interval after the wake — by then the reconnected
+    // socket may already have delivered the backlog and pushed the cursor past the whole outage.
+    downtime.noteSlackSeen('C1', '100.000000');       // last seen before the lid closed
+    const wake = Date.now();
+    downtime.writeHeartbeat(wake - 153 * MIN);
+    downtime.noteSlackSeen('C1', '999.000000');       // backlog delivered on wake, before the tick
+    const entry = downtime.recordTickGap(wake)!;
+    expect(entry.slackCursors).toBeUndefined();
+
+    // …so the backfill floors at the outage start, not at the leapfrogged cursor.
+    const report = await downtime.buildReport({
+      backfill: { history: async () => ({ ok: true, messages: [] }), maxPages: 1 },
+    });
+    expect(report.slack!.channels).toEqual([{ channel: 'C1', from: String(entry.from / 1000), fetched: 0 }]);
+  });
+});
+
 describe('bounded history', () => {
   test('keeps only the last DOWNTIME_HISTORY_MAX entries, newest last', () => {
     const n = downtime.DOWNTIME_HISTORY_MAX + 7;
@@ -144,7 +296,7 @@ describe('missed-window join (phase 1 owns the decision)', () => {
     expect(missed[0].id).toBe('dt-1');
     // Taken verbatim from the schedule — NOT recomputed here.
     expect(missed[0].missedRun).toEqual({ at: missedAt, reason: 'offer', noticedAt: boot });
-    expect(missed[0].downtime).toEqual({ from, to: boot, ms: boot - from });
+    expect(missed[0].downtime).toEqual({ from, to: boot, ms: boot - from, cause: 'boot' });
     expect(missed[0].proposal).toContain('POST /api/schedules/dt-1/run');
   });
 
@@ -359,7 +511,7 @@ describe('nothing fires without an explicit request', () => {
       },
     });
 
-    expect(report.lastDowntime).toEqual({ from, to: boot, ms: boot - from });
+    expect(report.lastDowntime).toEqual({ from, to: boot, ms: boot - from, cause: 'boot' });
     expect(report.missedSchedules.length).toBe(1);
     expect(report.missedSchedules[0].proposal).toContain('POST /api/schedules/dt-1/run');
     expect(report.slack!.messages.length).toBe(1);

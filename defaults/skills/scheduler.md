@@ -140,8 +140,9 @@ Schedule: { id, name, enabled, trigger, task, scope, createdBy, nextRun?, lastRu
 
 ## Missed windows (`onMissed` / `missedRun`)
 
-If the process is down when a window should have fired (deploy, crash, power cut), the scheduler
-decides at the next boot whether to replay it. `onMissed` is settable on `POST`/`PUT`:
+If a window elapses with nothing running (deploy, crash, power cut — or the host **suspending**
+with the process frozen), the scheduler decides whether to replay it. `onMissed` is settable on
+`POST`/`PUT`:
 
 | `onMissed` | Behaviour |
 |---|---|
@@ -157,10 +158,20 @@ curl -s -X PUT -H "Content-Type: application/json" -H "x-internal-token: $INTERN
 - **A staleness ceiling overrides every policy, `run` included**: a window more than
   `SCHEDULER_MAX_MISSED_AGE_MS` (default **6h**) late is never replayed. Finishing an 08:00 report
   at 22:00 is not the job the schedule describes.
-- This applies to **both** paths that could replay a window: the boot catch-up (cron), and the
-  in-place resume of a run interrupted mid-flight (every trigger kind — `interval`/`once`/`event`
-  have no catch-up, so resume is their only gate; their window is the one the interrupted run
-  recorded when it started).
+- One decision (`judgeMissed` in `scheduler/engine.ts`) governs **all three** paths that could
+  replay a window:
+  1. **Boot catch-up** (cron only) — the process was down when the window passed.
+  2. **In-place resume** of a run interrupted mid-flight — every trigger kind
+     (`interval`/`once`/`event` have no catch-up, so resume is their only gate; their window is
+     the one the interrupted run recorded when it started).
+  3. **A late timer fire** — the process was *frozen*, not killed (laptop lid/standby, NTP step,
+     VM pause): same pid, no restart, so catch-up never ran, and the overdue `setTimeout` fires on
+     wake. The window is the schedule's `nextRun` (when it *should* have fired), not the wake time.
+     A punctual fire is untouched — `onMissed` is a missed-window policy, never a mute — the gate
+     engages only once the fire is past the ceiling.
+- After a refusal the schedule is still re-armed normally: an `interval` job loses exactly one
+  cycle and fires again next period; a `once` is retired (disabled, `nextRun` cleared) with its
+  `missedRun` left for an on-demand run. Nothing is left enabled-but-never-firing.
 - Whenever a window is not replayed, the schedule gets
   `missedRun: { at, reason: "skip"|"offer"|"stale", noticedAt }` — visible on
   `GET /api/schedules` and `GET /api/schedules/{id}`. **That is the `offer` affordance**: read it,
@@ -173,9 +184,32 @@ curl -s -X PUT -H "Content-Type: application/json" -H "x-internal-token: $INTERN
 ## "What did I miss?" — downtime recovery (`GET /api/downtime`)
 
 This box is deliberately not always-on. The server heartbeats to `data/state/heartbeat.json` every
-`HEARTBEAT_INTERVAL_MS` (default **60s**); at boot, a gap larger than `DOWNTIME_THRESHOLD_MS`
-(default **3 intervals = 3m**) is appended to `data/state/downtime.json` as
-`{ from, to, ms, slackCursors }` (last **20** kept). A clean restart records nothing.
+`HEARTBEAT_INTERVAL_MS` (default **60s**). A gap larger than `DOWNTIME_THRESHOLD_MS` (default
+**3 intervals = 3m**) is appended to `data/state/downtime.json` as
+`{ from, to, ms, cause, slackCursors? }` (last **20** kept). A clean restart records nothing.
+
+Two `cause`s, one code path:
+
+- **`cause: 'boot'`** — the process died (crash, power cut). The gap is measured at startup, from
+  the last persisted heartbeat.
+- **`cause: 'suspend'`** — the process never died: the **host slept** (lid closed, standby) and the
+  process was *frozen*. Nothing restarts, so a boot check would never see it — instead the next
+  heartbeat tick comes back late by more than the threshold and records the gap itself. One entry
+  per outage, however long (the tick writes the heartbeat forward before the next one compares).
+Two consequences of a `suspend` gap, both flagged in the report's `note`:
+
+- **`missedSchedules[]` is INCOMPLETE, not empty** — the boot-time catch-up scan never ran (nothing
+  restarted), so the only records are the ones the **late timer fire** wrote itself (see "Missed
+  windows" above: a fire past the ceiling is refused and recorded as `missedRun`, at a timestamp
+  *inside* the gap, which the report then joins). Windows still inside the ceiling on wake simply
+  ran; anything else that elapsed in the gap left **no record at all** — check those by hand. The
+  note is emitted for any suspend in the last `SUSPEND_NOTE_MAX_AGE_MS` (**24h**), not just the
+  newest entry: a restart afterwards appends a `boot` entry but rescans nothing.
+- **No `slackCursors` snapshot** — the snapshot is only taken on the `boot` path, where it is
+  provably older than any post-recovery traffic. A suspend gap is recorded from a heartbeat tick up
+  to 60s *after* the wake, by which time the reconnected socket may already have pushed the cursor
+  past the whole backlog. So the entry carries none and the backfill floors at the gap's `from` —
+  it may re-report a few already-seen messages, never skip unseen ones.
 
 ```bash
 curl -s -H "x-internal-token: $INTERNAL_API_TOKEN" "http://localhost:$PORT/api/downtime" | jq .
@@ -192,7 +226,8 @@ Returns `{ heartbeat, downtime[], lastDowntime, missedSchedules[], slack }`:
   Events API retries a dropped delivery for only ~30 minutes then discards it forever, while
   `conversations.history` stays readable for days.
   - **Where it starts:** the outage's `from`, raised only by the last-seen cursor **as
-    snapshotted into the downtime entry at boot** (`slackCursors`). The live cursors in
+    snapshotted into the downtime entry at boot** (`slackCursors`, `cause: 'boot'` only — a
+    `suspend` entry has none, so it starts at `from`). The live cursors in
     `data/state/slack-cursors.json` are a tail pointer — one message after recovery pushes them
     past the whole backlog — so they are never used as the floor.
   - **Which channels:** every channel with a cursor (at the time of the outage or since), plus

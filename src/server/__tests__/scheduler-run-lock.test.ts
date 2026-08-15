@@ -479,6 +479,171 @@ describe('non-cron: the staleness ceiling and onMissed apply to every trigger ki
   });
 });
 
+// ── The timer path: a frozen-and-resumed process ─────────────────────────────────────────────
+// The box is a laptop. When the lid closes the process is FROZEN, not killed — same pid, no
+// restart, so start()'s catch-up scan never runs. On wake the overdue setTimeout fires and the
+// elapsed window ran immediately and late, consulting neither onMissed nor the ceiling. Same
+// shape for any wall-clock jump (NTP step, VM pause).
+
+/** The state a suspend leaves behind: an armed fire whose time has passed while the process was
+ *  frozen. Mutating the live `nextRun` is precisely what a wall-clock jump does to an already
+ *  armed timer. Re-arming happens through a replan triggered by an unrelated delete, so the fire
+ *  goes through the REAL timer path (replan → setTimeout → fireDue), not a test-only entry. */
+function fireLate(s: Schedule, hoursLate: number, fillerId: string): number {
+  const live = engine.getSchedule(s.id)!;
+  const window = Date.now() - hoursLate * 60 * 60 * 1000;
+  live.nextRun = window;
+  if (live.trigger.kind === 'once') live.trigger = { kind: 'once', at: window };
+  engine.deleteSchedule(fillerId);   // → replan() → an already-overdue timer → fireDue()
+  return window;
+}
+
+/** Boot `s` alongside a never-firing filler whose deletion is our replan trigger. */
+function bootWithFiller(s: Schedule): string {
+  const filler = makeSchedule({ trigger: { kind: 'cron', expr: '0 0 1 1 *', tz: 'UTC' } });
+  rmSync(path.join(DATA_DIR, 'scheduler/completions', `${s.id}.json`), { force: true });
+  storage.clearRunningMarker(s.id);
+  boot([s, filler]);
+  return filler.id;
+}
+
+describe('timer path: a fire that arrives late because the host was suspended', () => {
+  test('a punctual fire still fires — normal operation is untouched', async () => {
+    const s = makeSchedule();
+    const filler = bootWithFiller(s);
+    fireLate(s, 0, filler);
+    await sleep(80);
+
+    expect(started.map((r) => r.scheduleId)).toEqual([s.id]);
+    expect(engine.getSchedule(s.id)!.missedRun).toBeUndefined();
+  });
+
+  test('onMissed=skip does NOT gate a punctual fire — it is a missed-window policy, not a mute', async () => {
+    const s = makeSchedule({ onMissed: 'skip' });
+    const filler = bootWithFiller(s);
+    fireLate(s, 0, filler);
+    await sleep(80);
+
+    expect(started).toHaveLength(1);
+    expect(engine.getSchedule(s.id)!.missedRun).toBeUndefined();
+  });
+
+  test('a 14h-stale fire is refused and recorded as missedRun (the incident)', async () => {
+    const s = makeSchedule();
+    const filler = bootWithFiller(s);
+    const window = fireLate(s, 14, filler);
+    await sleep(80);
+
+    expect(started).toHaveLength(0);
+    expect(engine.getSchedule(s.id)!.missedRun).toEqual({ at: window, reason: 'stale', noticedAt: expect.any(Number) });
+  });
+
+  test("the recorded window is the SCHEDULED fire time, not the wake-up time", async () => {
+    const s = makeSchedule();
+    const filler = bootWithFiller(s);
+    const window = fireLate(s, 14, filler);
+    await sleep(80);
+
+    const missed = engine.getSchedule(s.id)!.missedRun!;
+    expect(missed.at).toBe(window);              // when it should have run
+    expect(missed.noticedAt).toBeGreaterThan(window);  // when we noticed, kept separate
+  });
+
+  test('onMissed=skip on a stale fire records skip, not stale', async () => {
+    const s = makeSchedule({ onMissed: 'skip' });
+    const filler = bootWithFiller(s);
+    fireLate(s, 14, filler);
+    await sleep(80);
+
+    expect(started).toHaveLength(0);
+    expect(engine.getSchedule(s.id)!.missedRun?.reason).toBe('skip');
+  });
+
+  test('onMissed=offer on a stale fire records offer for an on-demand run', async () => {
+    const s = makeSchedule({ onMissed: 'offer' });
+    const filler = bootWithFiller(s);
+    fireLate(s, 14, filler);
+    await sleep(80);
+
+    expect(started).toHaveLength(0);
+    expect(engine.getSchedule(s.id)!.missedRun?.reason).toBe('offer');
+    // `offer` is a read-path affordance: the missed window must survive onto the API's output.
+    expect(engine.listSchedules().find((x) => x.id === s.id)?.missedRun?.reason).toBe('offer');
+    expect(engine.runNow(s.id).ok).toBe(true);   // …and can still be run on demand
+    await sleep(80);
+    expect(started).toHaveLength(1);
+  });
+
+  test('a refused fire writes NO attempt/completion marker — nothing to double-record', async () => {
+    const s = makeSchedule();
+    const filler = bootWithFiller(s);
+    fireLate(s, 14, filler);
+    await sleep(80);
+
+    expect(markerFor(s.id)).toBeNull();          // the window was never attempted
+    expect(lockFor(s.id)).toBeNull();
+    // …and a later boot catch-up doesn't re-record it either: the attempt-free window is
+    // re-judged by the same rule and lands on the same single missedRun record.
+    const before = engine.getSchedule(s.id)!.missedRun!;
+    boot([{ ...engine.getSchedule(s.id)! }]);
+    await sleep(120);
+    expect(started).toHaveLength(0);
+    expect(engine.getSchedule(s.id)!.missedRun?.at).toBe(before.at);
+  });
+
+  test('an interval job after a 2.5h suspend still fires once, and re-arms normally', async () => {
+    const s = makeSchedule({ trigger: { kind: 'interval', everyMs: 5 * 60_000 } });
+    const filler = bootWithFiller(s);
+    fireLate(s, 2.5, filler);                    // 2.5h < 6h ceiling
+    await sleep(80);
+
+    expect(started).toHaveLength(1);             // ONE fire, not one per elapsed period
+    const live = engine.getSchedule(s.id)!;
+    expect(live.nextRun).toBeGreaterThan(Date.now());
+    expect(live.missedRun).toBeUndefined();
+  });
+
+  test('an interval job past the ceiling is refused, then resumes on its next period', async () => {
+    const s = makeSchedule({ trigger: { kind: 'interval', everyMs: 5 * 60_000 } });
+    const filler = bootWithFiller(s);
+    fireLate(s, 14, filler);
+    await sleep(80);
+
+    expect(started).toHaveLength(0);
+    const live = engine.getSchedule(s.id)!;
+    expect(live.missedRun?.reason).toBe('stale');
+    // Not stranded: still enabled with a fresh future fire ~one period out. The cost of the
+    // refusal is a single skipped cycle, which is the honest outcome for a 5-minute job that
+    // is 14h late — there is nothing left to catch up.
+    expect(live.enabled).toBe(true);
+    expect(live.nextRun).toBeGreaterThan(Date.now());
+    expect(live.nextRun! - Date.now()).toBeLessThanOrEqual(5 * 60_000);
+  });
+
+  test('a `once` that elapsed during the suspend is refused AND retired — never left armed', async () => {
+    const s = makeSchedule({ trigger: { kind: 'once', at: Date.now() + DAY } });
+    const filler = bootWithFiller(s);
+    const window = fireLate(s, 14, filler);
+    await sleep(80);
+
+    expect(started).toHaveLength(0);
+    const live = engine.getSchedule(s.id)!;
+    expect(live.enabled).toBe(false);            // retired, not enabled-but-never-firing
+    expect(live.nextRun).toBeUndefined();
+    expect(live.missedRun).toEqual({ at: window, reason: 'stale', noticedAt: expect.any(Number) });
+  });
+
+  test('a `once` inside the ceiling fires and is auto-deleted as before', async () => {
+    const s = makeSchedule({ trigger: { kind: 'once', at: Date.now() + DAY } });
+    const filler = bootWithFiller(s);
+    fireLate(s, 1, filler);
+    await sleep(120);
+
+    expect(started).toHaveLength(1);
+    expect(engine.getSchedule(s.id)).toBeUndefined();   // once-schedules self-delete on success
+  });
+});
+
 describe('onMissed is validated at the write surface', () => {
   test('upsertSchedule rejects a bogus policy rather than persisting it', () => {
     const s = makeSchedule({ onMissed: 'sometimes' as never });
