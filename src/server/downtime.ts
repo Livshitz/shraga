@@ -7,7 +7,8 @@
  * 22:00; this module supplies the other half — the ledger and the on-demand report.
  *
  * Deliberately inert: nothing here starts a run, answers a Slack message, or mutates a schedule.
- * The only writers are the heartbeat, the boot gap record, and the Slack last-seen cursor.
+ * The only writers are the heartbeat, the gap ledger (boot gap + late-tick/suspend gap), and the
+ * Slack last-seen cursor.
  * Acting on a finding is always an explicit follow-up (`POST /api/schedules/:id/run`).
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
@@ -42,6 +43,18 @@ export const DOWNTIME_THRESHOLD_MS = Number(process.env.DOWNTIME_THRESHOLD_MS ??
  */
 export const DOWNTIME_HISTORY_MAX = 20;
 
+/**
+ * How long a `suspend` gap keeps colouring the report's `note`.
+ *
+ * A suspend is never retroactively scanned — no restart happens, so no catch-up ever covers it, and
+ * a later `boot` entry does not make it honest. The warning therefore cannot be tied to "is the
+ * newest entry a suspend?"; it has to age out on its own. 24h is the horizon of the manual check
+ * the note asks for ("which schedule windows fell in the gap?"): nearly every schedule here is
+ * daily or tighter, so after a day the same window has come round again and run normally, and the
+ * gap is no longer the thing to look at.
+ */
+export const SUSPEND_NOTE_MAX_AGE_MS = Number(process.env.SUSPEND_NOTE_MAX_AGE_MS ?? 24 * 60 * 60 * 1000);
+
 export interface DowntimeEntry {
   /** Last proven-alive moment (the final heartbeat before the gap). */
   from: number;
@@ -49,10 +62,26 @@ export interface DowntimeEntry {
   to: number;
   ms: number;
   /**
-   * channelId → last Slack ts we had seen when this outage was recorded, snapshotted at boot
-   * BEFORE any live traffic can move the cursors. The live cursor is a tail pointer: one normal
-   * message after recovery pushes it past the entire backlog. This frozen copy is the only thing
-   * that still knows where the outage's unseen history begins.
+   * How the gap was noticed. `boot` = the process died (crash, power cut, deploy) and the gap was
+   * measured at startup. `suspend` = the process never died — the host slept (lid closed, standby)
+   * and a heartbeat tick came back late by more than the threshold. Both are real outages; the
+   * distinction matters to the reader, because a `suspend` gap means the process was FROZEN, so
+   * nothing at all ran at boot afterwards (no scheduler catch-up scan — see `missedSchedules`).
+   * Absent on entries written before this field existed.
+   */
+  cause?: 'boot' | 'suspend';
+  /**
+   * channelId → last Slack ts we had seen when this outage was recorded. Present on `boot` entries
+   * ONLY, where it is snapshotted before any live traffic can move the cursors (`recordBootGap()`
+   * runs before the Slack ingress mounts — see boot.ts). The live cursor is a tail pointer: one
+   * normal message after recovery pushes it past the entire backlog, so a snapshot taken after
+   * traffic resumed would hide the outage rather than bound it.
+   *
+   * Absent on `suspend` entries by design: that gap is recorded from a heartbeat tick, up to
+   * HEARTBEAT_INTERVAL_MS after the wake — exactly when the reconnected socket delivers the
+   * backlog — so the cursor is no longer provably pre-gap. With no snapshot the backfill floors at
+   * the outage start (`from`), which can re-report a few already-seen messages but can never skip
+   * unseen ones.
    */
   slackCursors?: Record<string, string>;
 }
@@ -90,11 +119,19 @@ export function writeHeartbeat(at = Date.now()): void {
   writeJsonAtomic(HEARTBEAT_FILE, { at, pid: process.pid });
 }
 
-/** Stamp liveness every interval. Unref'd — a heartbeat must never hold the process open. */
+/**
+ * Stamp liveness every interval, and NOTICE when a tick comes back late.
+ *
+ * A boot-time check only catches an outage that killed the process. The common failure on this box
+ * is the opposite: a MacBook that sleeps with the lid closed. The process is frozen, not killed —
+ * it never restarts, so `recordBootGap()` never runs, and a 2.5h outage was completely invisible.
+ * A late tick is the one signal that survives a suspend, because the timer resumes on wake and the
+ * wall clock has moved on. Unref'd — a heartbeat must never hold the process open.
+ */
 export function startHeartbeat(intervalMs = HEARTBEAT_INTERVAL_MS): () => void {
   writeHeartbeat();
   const timer = setInterval(() => {
-    try { writeHeartbeat(); } catch (err) { console.error('[downtime] heartbeat write failed:', err); }
+    try { recordTickGap(); } catch (err) { console.error('[downtime] heartbeat write failed:', err); }
   }, intervalMs);
   timer.unref?.();
   return () => clearInterval(timer);
@@ -107,6 +144,37 @@ export function listDowntime(): DowntimeEntry[] {
 }
 
 /**
+ * The one gap-recording path, shared by the boot check and the late-tick check.
+ *
+ * Both ask the same question — "the last proven-alive moment is `last`, it is now `now`, is that a
+ * hole?" — so they share the same threshold, the same bounds, and the same Slack-cursor snapshot.
+ * Writing the heartbeat forward is the caller's job and happens either way (this process is alive
+ * NOW regardless of the verdict), which is also what makes an outage record exactly ONCE: the next
+ * comparison starts from `now`, not from the stale pre-gap stamp.
+ *
+ * Never fires anything. It appends a row to a JSON file and logs — that is the whole contract.
+ */
+function recordGap(last: number, now: number, cause: 'boot' | 'suspend'): DowntimeEntry | null {
+  const ms = now - last;
+  // `<=` also covers a backwards clock jump (negative ms): degrade to "no outage", never invent one.
+  if (ms <= DOWNTIME_THRESHOLD_MS) return null;
+
+  // Freeze the Slack cursors into the entry — but only on the boot path, where they are still
+  // provably pre-gap (recordBootGap runs before the Slack ingress mounts). On the suspend path the
+  // socket has been back for up to a heartbeat interval and may already have pushed the cursor past
+  // the whole backlog; recording that would be worse than recording nothing, so the entry carries
+  // no snapshot and the backfill floors at the gap start instead. See DowntimeEntry.slackCursors.
+  const snapshot: Record<string, string> = {};
+  if (cause === 'boot') for (const [channel, cursor] of Object.entries(listSlackCursors())) snapshot[channel] = cursor.ts;
+
+  const entry: DowntimeEntry = { from: last, to: now, ms, cause, ...(Object.keys(snapshot).length ? { slackCursors: snapshot } : {}) };
+  const entries = [...listDowntime(), entry].slice(-DOWNTIME_HISTORY_MAX);
+  writeJsonAtomic(DOWNTIME_FILE, { entries } satisfies DowntimeFile);
+  console.log(`[downtime] ${cause} gap of ${Math.round(ms / 60_000)}m recorded — down from ${new Date(last).toISOString()} to ${new Date(now).toISOString()}`);
+  return entry;
+}
+
+/**
  * Compare the last heartbeat against boot time and, if the gap is real, record it. Returns the
  * entry it recorded, or null — a clean restart (and a first-ever boot, which has no heartbeat to
  * measure from) records NOTHING, so the ledger only ever contains genuine outages.
@@ -116,19 +184,26 @@ export function recordBootGap(bootTime = Date.now()): DowntimeEntry | null {
   // Write the new heartbeat regardless: whatever we conclude, this process is alive now.
   writeHeartbeat(bootTime);
   if (last === null) return null;
-  const ms = bootTime - last;
-  if (ms <= DOWNTIME_THRESHOLD_MS) return null;
+  return recordGap(last, bootTime, 'boot');
+}
 
-  // Freeze the Slack cursors into the entry now, at boot, before the first inbound message can
-  // advance them past the backlog this outage left behind.
-  const snapshot: Record<string, string> = {};
-  for (const [channel, cursor] of Object.entries(listSlackCursors())) snapshot[channel] = cursor.ts;
-
-  const entry: DowntimeEntry = { from: last, to: bootTime, ms, ...(Object.keys(snapshot).length ? { slackCursors: snapshot } : {}) };
-  const entries = [...listDowntime(), entry].slice(-DOWNTIME_HISTORY_MAX);
-  writeJsonAtomic(DOWNTIME_FILE, { entries } satisfies DowntimeFile);
-  console.log(`[downtime] gap of ${Math.round(ms / 60_000)}m recorded — down from ${new Date(last).toISOString()} to ${new Date(bootTime).toISOString()}`);
-  return entry;
+/**
+ * One heartbeat tick: stamp liveness, and record an outage if the tick is late past the threshold.
+ *
+ * The reference point is the PERSISTED heartbeat — the same value `recordBootGap()` measures from,
+ * so boot and suspend can never disagree about where the last proven-alive moment was, and can
+ * never double-record one outage: whichever check sees the gap first advances the stamp, and the
+ * other then measures from the new one.
+ *
+ * A long suspend yields ONE entry, not one per missed interval, because a frozen process fires no
+ * timers while it sleeps — `setInterval` does not accumulate a backlog of missed ticks — and even
+ * if it did, this writes the heartbeat forward before the next tick can compare.
+ */
+export function recordTickGap(now = Date.now()): DowntimeEntry | null {
+  const last = readHeartbeat();
+  writeHeartbeat(now);
+  if (last === null) return null;
+  return recordGap(last, now, 'suspend');
 }
 
 // ── Slack last-seen cursors ───────────────────────────────────────────────────────────────────
@@ -354,6 +429,16 @@ export async function buildReport(opts: { slack?: boolean; backfill?: BackfillOp
     missedSchedules: missedSchedules(entries),
     note: 'Report only — nothing here has been run, answered, or replayed. Act on an item explicitly.',
   };
+  // A suspend gap froze the process instead of killing it, so the scheduler's boot-time catch-up
+  // scan never ran. The late timer fire on wake DOES record the windows it refuses, so the list is
+  // not empty — it is INCOMPLETE: it holds only what that fire judged. Say that, and say it for
+  // every recent suspend, not just the newest entry: a restart afterwards appends a `boot` entry
+  // but scans nothing retroactively, so gating on `last` would silently drop the warning.
+  const suspends = entries.filter(e => e.cause === 'suspend' && now - e.to <= SUSPEND_NOTE_MAX_AGE_MS);
+  if (suspends.length) {
+    const when = suspends.map(e => `${new Date(e.from).toISOString()}→${new Date(e.to).toISOString()}`).join(', ');
+    report.note += ` NOTE: a recent outage was a host SUSPEND (the process was frozen, not restarted: ${when}), so no scheduler catch-up scan ran. missedSchedules is INCOMPLETE for that gap — it lists only the windows the late timer fire itself judged on wake; any other window that elapsed inside the gap left no record at all. Check schedules whose window falls in the gap by hand.`;
+  }
   if (opts.slack !== false) {
     report.slack = last
       // The snapshot frozen at boot, not the live cursors — see DowntimeEntry.slackCursors.
