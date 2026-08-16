@@ -10,7 +10,7 @@
 // entry point. Deployments that want it scheduled can point a schedule at that route, which keeps
 // the "should I upgrade tonight?" policy out of the mechanism.
 import { existsSync, lstatSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { APP_ROOT, PACKAGE_ROOT, dataPath } from '../paths.ts';
 import { emitEvent } from '../events/bus.ts';
@@ -79,6 +79,18 @@ export class SelfUpgrade {
       reasons.push('no restart command configured (RESTART_CMD / SHRAGA_RESTART_CMD) — an installed version could never be started');
     }
 
+    // The supervisor is detached with stdio ignored, so a missing script fails INVISIBLY: nothing
+    // happens, no report is ever written, and the in-flight marker sits there until it ages out.
+    if (!existsSync(this.o.supervisorScript)) {
+      reasons.push(`upgrade supervisor missing at ${this.o.supervisorScript}`);
+    }
+
+    // The supervisor needs python3 to edit package.json. Better to say so now than to find out
+    // mid-upgrade, with the pin already rewritten.
+    if (!this.o.hasPython3()) {
+      reasons.push('python3 not found on PATH — the upgrade supervisor needs it to edit package.json');
+    }
+
     const active = this.inFlight();
     if (active) reasons.push(`an upgrade to ${active.target} is already in flight (started ${active.startedAt})`);
 
@@ -111,27 +123,34 @@ export class SelfUpgrade {
     mkdirSync(path.dirname(this.o.reportFile), { recursive: true });
     writeFileSync(this.o.lockFile, JSON.stringify({ target, startedAt: new Date().toISOString(), at: Date.now() }));
 
-    // detached + ignored stdio: the supervisor must outlive us, and it will — we are its first
-    // casualty. It logs to a file of its own (see supervisor.sh).
-    const child = spawn('bash', [this.o.supervisorScript], {
-      cwd: this.o.appRoot,
-      detached: true,
-      stdio: 'ignore',
-      env: {
-        ...process.env,
-        APP_ROOT: this.o.appRoot,
-        PKG: this.o.pkg,
-        TARGET: target,
-        FROM: from ?? '',
-        RESTART_CMD: this.o.restartCmd,
-        HEALTH_URL: this.o.healthUrl,
-        REPORT: this.o.reportFile,
-        BUN: this.o.bun,
-        BOOT_TIMEOUT: String(this.o.bootTimeoutSec),
-        SOAK: String(this.o.soakSec),
-      },
-    });
-    child.unref();
+    let child;
+    try {
+      // detached + ignored stdio: the supervisor must outlive us, and it will — we are its first
+      // casualty. It logs to a file of its own (see supervisor.sh).
+      child = spawn('bash', [this.o.supervisorScript], {
+        cwd: this.o.appRoot,
+        detached: true,
+        stdio: 'ignore',
+        env: {
+          ...process.env,
+          APP_ROOT: this.o.appRoot,
+          PKG: this.o.pkg,
+          TARGET: target,
+          FROM: from ?? '',
+          RESTART_CMD: this.o.restartCmd,
+          HEALTH_URL: this.o.healthUrl,
+          REPORT: this.o.reportFile,
+          BUN: this.o.bun,
+          BOOT_TIMEOUT: String(this.o.bootTimeoutSec),
+          SOAK: String(this.o.soakSec),
+        },
+      });
+      child.unref();
+    } catch (err) {
+      // Nothing was started, so the marker would otherwise block every retry until it ages out.
+      try { unlinkSync(this.o.lockFile); } catch { /* best effort */ }
+      return { started: false, from, target, reason: `could not start the upgrade supervisor: ${(err as Error).message}` };
+    }
 
     console.log(`${TAG} handed off ${this.o.pkg} ${from} -> ${target} to supervisor pid ${child.pid}`);
     return { started: true, from, target, reason: `upgrading to ${target}; the result will be reported when the server comes back` };
@@ -178,6 +197,11 @@ export class SelfUpgradeOptions {
   public soakSec: number = 60;
   /** After this, an in-flight marker is treated as abandoned (supervisor killed by a reboot). */
   public maxRunMs: number = 30 * 60 * 1000;
+  /** Injectable so the preflight is testable without depending on the test host's PATH. */
+  public hasPython3: () => boolean = () => {
+    try { return spawnSync('python3', ['--version'], { stdio: 'ignore' }).status === 0; }
+    catch { return false; }
+  };
 }
 
 export interface UpgradePlan {
