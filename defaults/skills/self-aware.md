@@ -81,6 +81,26 @@ bun install && bun run build && sudo systemctl restart "$APP_NAME"
 ```
 List checkpoints with `git -C "$APP_DIR" log --oneline`; reset to any of them.
 
+## Upgrading yourself (npm deployments)
+
+When the deployment consumes `shraga` as an npm dependency, you can move your own pinned version.
+**Only when the user asks** — there is no timer on this.
+
+```bash
+curl -s $ORIGIN/api/self-upgrade                                  # current, latest, blockers
+curl -s -XPOST $ORIGIN/api/self-upgrade -d '{"version":"latest"}'  # or a specific "0.1.35"
+```
+
+- **Owner only.** Both routes 403 for anyone else.
+- **Check `blockers` first and relay them.** A source checkout (upgrade with git instead) and a
+  local dev symlink at `node_modules/shraga` are both refused on purpose — do not work around either.
+- **202 means started, not succeeded.** The upgrade restarts the server, so the POST cannot report
+  the outcome. A detached supervisor installs, restarts, waits for `/api/version` to report the new
+  version, soaks it, and **reverts to the previous version automatically** if it doesn't hold.
+- **The result reaches you after the restart**, as a `self-upgrade.finished` event carrying
+  `status` (`ok` / `reverted` / `failed` / `revert-failed`) and a `log` path. Tell the owner what
+  happened — especially `revert-failed`, which means the box needs a human.
+
 ## Key paths (in source)
 
 - `src/server/` — Express + WebSocket server, Claude agent SDK integration
