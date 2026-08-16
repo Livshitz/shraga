@@ -12,6 +12,25 @@ You are performing structural maintenance on the workspace knowledge base — de
 
 **Approval goes to owners.** Look up contacts tagged `owner` (i.e. `isOwner: true`) in `<known_contacts>` and send the report to their Slack DMs.
 
+## Mode check — do this FIRST, before Phase 1
+
+Read `selfImprovement` from `data/agent-config.json` and honor it. Garden only ever edits **team-scope** files — `context.md`, `knowledge/*.md`, `marketing/*.md` — so a single key, `selfImprovement.teamKnowledge`, governs the whole run.
+
+- **`"auto"`** — run Phase 1 → 2 → 3 → **4 (apply)**, then DM a **past-tense** report of what was *done*. Still write the full report file first: it is the audit trail and the revert map. Always include the revert commit SHA in the DM.
+- **`"approval"`** (default) — propose only. Write the report, send the DM with numbered proposals, and stop.
+
+### Escalation exception — applies in `auto` too
+
+`auto` means "don't make me approve routine hygiene." It does **not** mean "silently rewrite live claims." Stop and ask the owner when the change:
+
+- **Deletes content that exists nowhere else.** Always relocate verbatim instead; if it can't be relocated, ask.
+- **Picks a winner between two conflicting facts** without a grounded source. That's a data question — pull the real source or flag it. Never pick a side silently.
+- **Touches a live status claim** — fundraising figures, campaign performance reads, open incident status — rather than structure.
+- Is a **large refactor** (splitting a 250+ line file, restructuring the knowledge index wholesale).
+- Is **security-related**, or touches auth/permissions/credentials, or lives in `users/{id}/`.
+
+The bar: *"would a reasonable person be annoyed if I did this without asking?"* No → do it and report. Yes → ask. Routine dedup / compress / cross-ref / stale-collapse / new-facts is always "do it".
+
 ## Phase 1: Snapshot & Checkpoint
 
 Create a git checkpoint so any changes can be reverted with `cd data && git revert HEAD`.
@@ -133,7 +152,9 @@ The full report is the audit trail. Raw agent reports let you verify the diagnos
 
 ### Send Slack DM to owners
 
-Send a DM to each owner (from `<known_contacts>` with Slack IDs) using `post_slack_message`:
+Send a DM to each owner (from `<known_contacts>` with Slack IDs) using `post_slack_message`.
+
+**In `approval` mode**, send the proposal DM:
 
 ```
 🌱 Knowledge Garden — {date}
@@ -155,25 +176,43 @@ Skipped {N} lower-priority findings (see report).
 Reply with numbers to approve (e.g. "1,3") or "all".
 ```
 
-**STOP here. Do not apply changes. Wait for user approval.**
+**In `approval` mode: STOP here. Do not apply changes. Wait for user approval.**
 
-## Phase 4: Apply (only when user approves)
+**In `auto` mode: do not stop.** Go to Phase 4 and apply first, then send a **past-tense** report of what was done:
 
-When the user replies with numbers (e.g. "1,3") or "all":
+```
+🌱 Knowledge Garden — {date} (auto-applied)
+
+{N} raw findings → {N} changes applied.
+Full audit trail: data/workspace/garden-reports/{date}.md
+Revert: cd data && git revert {commit-sha}
+
+1. [{operation}] {what changed} — {file}
+2. [{operation}] {what changed} — {file}
+
+Skipped {N} lower-priority findings (see report).
+{Escalated: {anything hitting the escalation exception, as a numbered proposal} — or omit this line}
+```
+
+## Phase 4: Apply (auto mode, or when user approves)
+
+In `auto` mode, apply the proposed changes straight after writing the report. In `approval` mode, apply when the user replies with numbers (e.g. "1,3") or "all":
 
 1. Load the report from `data/workspace/garden-reports/{date}.md`
-2. Apply only the approved changes using Edit tool
+2. Apply the changes using Edit tool — in `auto` mode all of them except anything hitting the escalation exception; in `approval` mode only the approved ones
 3. Commit:
 
 ```bash
-cd data && git add -A && git commit -m "garden: $(date +%Y-%m-%d) — <brief summary of applied changes>"
+cd data && git add -A && git commit -m "garden: $(date +%Y-%m-%d) — <brief summary of applied changes>" && git rev-parse --short HEAD
 ```
+
+In `auto` mode, put that SHA in the DM as the revert handle.
 
 **Recovery:** `cd data && git revert HEAD`
 
 ## Guidelines
 
-- **Propose, don't act** — never edit workspace files without explicit approval
+- **Honor the mode** — in `approval`, propose and never edit workspace files without explicit approval; in `auto`, apply and report past-tense, escalating only what hits the escalation exception
 - **Max 3 changes** — gardening is incremental; run again tomorrow
 - **Preserve voice** — match existing tone of each file
 - **context.md is the hot index** — keep it under 100 lines of actual content; push detail to knowledge/
