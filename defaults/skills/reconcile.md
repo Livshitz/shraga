@@ -112,7 +112,12 @@ For each file you audit, note:
 
 ## Phase 4: Classify & Report
 
-**CRITICAL: This is your FINAL phase. Do NOT proceed to Phase 5 (Apply) unless the user explicitly replies with approval numbers.** Write the report, send the DM, and STOP. The reconcile job ends here — application happens in a separate conversation when the user responds.
+**Whether this is your final phase depends on the mode** — see the mode check in Phase 5, and read `selfImprovement` from `data/agent-config.json` before you decide.
+
+- **`"approval"`** (default) — this IS your final phase. Write the report, send the DM, and STOP. Application happens in a separate conversation when the user responds.
+- **`"auto"`** — write the report first (it is the audit trail and the revert map), then proceed to Phase 5, apply, and send a **past-tense** DM with the revert commit SHA.
+
+Areas map **per proposal**, so a single run can be mixed: apply the proposals whose area is `auto`, and leave the `approval`-area proposals as numbered items to approve in the same DM. The escalation exception in Phase 5 also stays a numbered proposal even when its area is `auto`.
 
 Compile findings into a timestamped reconciliation report. Create the reports folder if needed:
 
@@ -195,6 +200,8 @@ User-scope:
 Reply with numbers to approve (e.g. "1,3,5") or "all" to apply everything.
 ```
 
+In `auto` mode, write the same items in the **past tense** ("{N} changes applied"), add `Revert: cd data && git revert {commit-sha}`, and keep the "reply with numbers" line only if some proposals are still awaiting approval (`approval`-area items, or anything escalated).
+
 **User-scope proposals must show the actual content inline with context** — for each correction or pattern, show what you'd write AND the story behind it (which session, what happened, why you think it's a durable learning). The user needs to judge: "yes, that's how I always work" vs "that was a one-off, don't generalize." Format:
 
 ```
@@ -211,11 +218,22 @@ A 1-liner like "Populate user context" is useless — show what you'd write and 
 
 **Use numbered lists for all proposed changes** — both in the Slack message and the report file — so the user can reply with numbers to approve specific items.
 
-## Phase 5: Apply Approved Changes (only when asked)
+## Phase 5: Apply Changes (auto areas, or when the user approves)
 
-When the user replies with approvals (e.g. "1,3,5" or "all"), load the specific report file from `data/workspace/reconcile-reports/` and process only the approved items.
+**Mode check:** Read `selfImprovement` from `data/agent-config.json`. Map proposal types to areas: new skills → `skillCreation`, skill patches → `skillPatching`, user context → `userContext`, knowledge/context → `teamKnowledge`. If the area is `"auto"`, apply without waiting for approval and notify via Slack past-tense. If `"approval"` (default), wait for explicit approval numbers — when the user replies (e.g. "1,3,5" or "all"), load the specific report file from `data/workspace/reconcile-reports/` and process only the approved items.
 
-**Mode check:** Read `selfImprovement` from `data/agent-config.json`. Map proposal types to areas: new skills → `skillCreation`, skill patches → `skillPatching`, user context → `userContext`, knowledge/context → `teamKnowledge`. If the area is `"auto"`, apply without waiting for approval and notify via Slack. If `"approval"` (default), wait for explicit approval numbers.
+### Escalation exception — applies in `auto` too
+
+`auto` means "don't make me approve routine hygiene." It does **not** mean "silently rewrite live claims." Stop and ask the owner when the change:
+
+- **Deletes content that exists nowhere else.** Always relocate verbatim instead; if it can't be relocated, ask.
+- **Picks a winner between two conflicting facts** without a grounded source. That's a data question — pull the real source or flag it. Never pick a side silently.
+- **Touches a live status claim** — fundraising figures, campaign performance reads, open incident status — rather than structure.
+- Is a **large refactor** (splitting a 250+ line file, restructuring the knowledge index wholesale).
+- Is **security-related**, or touches auth/permissions/credentials, or lives in `users/{id}/` scope.
+- Would turn a **single one-off into a permanent user-scope Correction.** Corrections are hard rules; weak evidence deserves a question.
+
+The bar: *"would a reasonable person be annoyed if I did this without asking?"* No → do it and report. Yes → ask. Routine dedup / compress / cross-ref / stale-collapse / new-facts-from-conversations is always "do it".
 
 Create a git checkpoint first:
 
@@ -223,17 +241,19 @@ Create a git checkpoint first:
 cd data && git add -A && git commit -m "reconcile: pre-checkpoint $(date +%Y-%m-%d)" --allow-empty
 ```
 
-Apply the approved edits, then commit:
+Apply the edits, then commit:
 
 ```bash
-cd data && git add -A && git commit -m "reconcile: $(date +%Y-%m-%d) — <brief summary>"
+cd data && git add -A && git commit -m "reconcile: $(date +%Y-%m-%d) — <brief summary>" && git rev-parse --short HEAD
 ```
+
+In `auto` mode, put that SHA in the DM as the revert handle.
 
 If the user provides feedback or corrections alongside approvals, treat those as learnings — update the relevant workspace files to reflect the correction.
 
 ## Guidelines
 
-- **Report, don't act** — never edit workspace files without explicit approval
+- **Honor the mode** — in `approval`, report and never edit workspace files without explicit approval; in `auto`, apply that area and report past-tense, escalating only what hits the escalation exception
 - **Stay lean** — under 30 tool calls; skim don't deep-read
 - **Summaries first** — always check `.summary.md` before touching raw JSONL
 - **Be conservative** — when unsure, flag as "verify?" rather than proposing deletion
