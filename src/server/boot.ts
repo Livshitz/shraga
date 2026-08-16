@@ -2016,6 +2016,20 @@ try {
 
 const PORT = Number(process.env.PORT) || 3032;
 await new Promise<void>((resolve) => {
+  // A listen failure MUST kill the process. Without this the error reaches the `uncaughtException`
+  // handler above, which by design keeps us alive — so the promise never settles and we sit there
+  // forever: process running, port unbound, nothing served. The service manager sees a healthy job
+  // and a port watchdog sees a dead one, so it kickstarts on a loop and shreds in-flight runs.
+  // EADDRINUSE is the common case: `kickstart -k` starts the replacement while the old process is
+  // still draining (up to 90s). Exiting non-zero is the correct answer — the manager restarts us,
+  // and by then the port is free.
+  server.once('error', (err: NodeJS.ErrnoException) => {
+    const why = err.code === 'EADDRINUSE'
+      ? `port ${PORT} is already in use (previous instance still draining?)`
+      : (err.message ?? String(err));
+    console.error(`[server] FATAL: cannot listen on ${PORT} — ${why}. Exiting so the service manager restarts us.`);
+    process.exit(1);
+  });
   server.listen(PORT, () => {
     console.log(`[server] Running on http://0.0.0.0:${PORT}`);
     resolve();
