@@ -379,7 +379,12 @@ export function resumeRun(scheduleId: string, sessionId: string, prompt: string)
 function oneShotAlreadyRan(s: Schedule): string | null {
   if (s.trigger.kind !== 'once') return null;
   const marker = readCompletionMarker(s.id);
-  if (marker) return `it completed at ${new Date(marker.completedAt).toISOString()} (${marker.triggeredBy})`;
+  // `completedAt` is the last SUCCESSFUL completion, and 0 when there has never been one. A
+  // marker is also written at fire time (`markRunStarted`) and on failure
+  // (`recordAttemptOutcome`), so its mere existence proves only an attempt. A future-dated
+  // one-off whose manual test-run errored has a marker but has never sent — retiring it would
+  // cancel a send that never happened, and report it as completed at epoch 0.
+  if (marker && marker.completedAt > 0) return `it completed at ${new Date(marker.completedAt).toISOString()} (${marker.triggeredBy})`;
   if (s.lastRun?.status === 'ok') return `its own lastRun records a successful run at ${new Date(s.lastRun.at).toISOString()}`;
   return null;
 }

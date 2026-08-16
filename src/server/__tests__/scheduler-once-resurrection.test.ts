@@ -122,3 +122,23 @@ describe('resurrected one-off schedules', () => {
     expect(engine.getSchedule(s.id)?.enabled).toBe(false);
   });
 });
+
+describe('a one-off that has NOT successfully run is left alone', () => {
+  test('a failed manual attempt does not cancel the still-pending scheduled send', async () => {
+    // `markRunStarted`/`recordAttemptOutcome` write a completion marker at FIRE time, with
+    // `completedAt: 0` while the schedule has never completed. So a future-dated one-off that a
+    // user test-ran manually — and whose run errored — carries a marker without ever having
+    // sent. Treating "a marker exists" as "it already ran" retires that schedule, silently
+    // cancelling a send that never happened (and reporting it as completed at epoch 0).
+    const s = onceSchedule(Date.now() + 120);
+    storage.writeCompletionMarker({
+      completedAt: 0, triggeredBy: 'manual', scheduleId: s.id,
+      lastAttemptAt: Date.now() - HOUR, attemptWindow: Date.now() - HOUR, status: 'error',
+    });
+    boot([s]);
+    await sleep(300);
+    expect(started).toEqual([s.id]);
+    // And having now genuinely sent, it retires the normal way — deleted, not left armed.
+    expect(engine.getSchedule(s.id)).toBeUndefined();
+  });
+});
