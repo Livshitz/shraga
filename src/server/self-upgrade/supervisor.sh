@@ -32,6 +32,15 @@ BACKUP="$(mktemp -d)"
 LOG="${REPORT%.json}.log"
 exec >>"$LOG" 2>&1
 
+# python3 edits package.json and escapes the report. Check it BEFORE anything is touched: discovering
+# it missing halfway through means a rewritten pin we can no longer safely put back. SelfUpgrade
+# .blockers() checks this too, so a deployment normally learns about it at request time, not here.
+if ! command -v python3 >/dev/null 2>&1; then
+  printf '{"status":"failed","detail":"python3 not found on PATH — nothing was changed","from":"%s","target":"%s","installed":"%s","package":"%s","log":"%s","finishedAt":"%s"}\n' \
+    "$FROM" "$TARGET" "$FROM" "$PKG" "$LOG" "$(date -u '+%FT%TZ')" > "$REPORT"
+  exit 1
+fi
+
 ts() { date '+%F %T'; }
 say() { echo "[upgrade] $(ts) $*"; }
 
@@ -67,15 +76,25 @@ restore() {
   return 0
 }
 
-pin() { # version — rewrite only this dep's pin, leaving the rest of package.json byte-identical
-  PKG="$PKG" V="$1" python3 - <<'PY'
-import json, os, re
-pkg, ver = os.environ['PKG'], os.environ['V']
+# Rewrite ONLY this dep's pin, leaving the rest of package.json byte-identical (a JSON round-trip
+# would reformat a file the deployment owns). Text editing a structured file is only safe if it is
+# unambiguous, so this refuses unless exactly ONE "<pkg>": "<version>" pair exists AND its current
+# value is the one we expect — a package.json that also names the package under overrides/
+# resolutions/peerDependencies must not be edited by guesswork.
+pin() { # new-version expected-current-version
+  PKG="$PKG" NEW="$1" EXPECT="$2" python3 - <<'PY'
+import os, re, sys
+pkg, new, expect = os.environ['PKG'], os.environ['NEW'], os.environ['EXPECT']
 src = open('package.json').read()
-pat = re.compile(r'("%s"\s*:\s*")[^"]*(")' % re.escape(pkg))
-if not pat.search(src):
-    raise SystemExit(f'{pkg} not found in package.json')
-open('package.json', 'w').write(pat.sub(lambda m: m.group(1) + ver + m.group(2), src, count=1))
+pat = re.compile(r'("%s"\s*:\s*")([^"]*)(")' % re.escape(pkg))
+hits = list(pat.finditer(src))
+if len(hits) != 1:
+    sys.exit(f'expected exactly one "{pkg}" version entry in package.json, found {len(hits)}')
+current = hits[0].group(2).lstrip('^~')
+if expect and current != expect:
+    sys.exit(f'package.json has {pkg}@{hits[0].group(2)}, expected {expect} — refusing to edit')
+m = hits[0]
+open('package.json', 'w').write(src[:m.start()] + m.group(1) + new + m.group(3) + src[m.end():])
 PY
 }
 
@@ -108,9 +127,9 @@ soak() { # version seconds
   return 0
 }
 
-install_and_restart() { # version label
-  say "installing $PKG@$1 ($2)"
-  if ! pin "$1"; then say "pin failed"; return 1; fi
+install_and_restart() { # version expected-current label
+  say "installing $PKG@$1 ($3)"
+  if ! pin "$1" "$2"; then say "pin failed"; return 1; fi
   if ! "$BUN" install; then say "bun install failed"; return 1; fi
   say "restarting via: $RESTART_CMD"
   eval "$RESTART_CMD" || say "restart command returned non-zero (continuing — some managers do)"
@@ -124,7 +143,7 @@ if ! snapshot; then
   exit 1
 fi
 
-if ! install_and_restart "$TARGET" upgrade; then
+if ! install_and_restart "$TARGET" "$FROM" upgrade; then
   restore && "$BUN" install >/dev/null 2>&1
   write_report failed "install of $PKG@$TARGET failed; package.json restored, service untouched" "$FROM"
   exit 1
@@ -142,7 +161,7 @@ if ! restore; then
   write_report revert-failed "upgrade to $TARGET failed AND the backup could not be restored — MANUAL FIX NEEDED. Backup: $BACKUP" unknown
   exit 1
 fi
-if ! install_and_restart "$FROM" revert; then
+if ! install_and_restart "$FROM" "" revert; then
   write_report revert-failed "upgrade to $TARGET failed and reinstalling $FROM ALSO failed — MANUAL FIX NEEDED. Backup: $BACKUP" unknown
   exit 1
 fi

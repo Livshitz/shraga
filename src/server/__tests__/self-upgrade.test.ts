@@ -75,6 +75,18 @@ describe('SelfUpgrade preflight', () => {
     expect(subject(root, { lockFile }).blockers()).toEqual([]);
   });
 
+  test('refuses when the supervisor script is missing — a detached spawn fails invisibly', () => {
+    const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
+    const blockers = subject(root, { supervisorScript: path.join(root, 'nope.sh') }).blockers();
+    expect(blockers.join()).toContain('supervisor missing');
+  });
+
+  test('refuses when python3 is unavailable — the supervisor edits package.json with it', () => {
+    const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
+    const blockers = subject(root, { hasPython3: () => false }).blockers();
+    expect(blockers.join()).toContain('python3');
+  });
+
   test('start() refuses a blocked deployment without spawning anything', async () => {
     const root = deployment({ dependencies: { shraga: '0.1.33' } }, { link: true });
     const s = subject(root);
@@ -157,6 +169,40 @@ describe('supervisor.sh', () => {
     const r = JSON.parse(readFileSync(report, 'utf8'));
     expect(r.status).toBe('ok');
     expect(r.installed).toBe('0.1.99');
+  }, 30_000);
+
+  test('refuses to edit an ambiguous package.json rather than guessing which pin is the dep', async () => {
+    // The same name under both dependencies and overrides: a first-match text edit would silently
+    // rewrite whichever came first. Nothing may be touched, and nothing may be restarted.
+    const root = deployment({
+      dependencies: { shraga: '0.1.33' },
+      overrides: { shraga: '0.1.33' },
+    }, { nodeModules: true });
+    const report = path.join(root, 'report.json');
+    const restartMarker = path.join(root, 'restarted');
+    const before = readFileSync(path.join(root, 'package.json'), 'utf8');
+
+    await runSupervisor({
+      APP_ROOT: root, PKG: 'shraga', TARGET: '0.1.99', FROM: '0.1.33',
+      RESTART_CMD: `touch ${restartMarker}`, REPORT: report, BUN: 'true', BOOT_TIMEOUT: '5', SOAK: '1',
+    }, () => '0.1.33');
+
+    expect(readFileSync(path.join(root, 'package.json'), 'utf8')).toBe(before);
+    expect(existsSync(restartMarker)).toBe(false);
+    expect(JSON.parse(readFileSync(report, 'utf8')).status).toBe('failed');
+  }, 30_000);
+
+  test('refuses when package.json does not hold the version it was told to expect', async () => {
+    // Guards a stale plan: something else moved the pin between the preflight and the hand-off.
+    const root = deployment({ dependencies: { shraga: '0.1.40' } }, { nodeModules: true });
+    const report = path.join(root, 'report.json');
+    await runSupervisor({
+      APP_ROOT: root, PKG: 'shraga', TARGET: '0.1.99', FROM: '0.1.33',
+      RESTART_CMD: 'true', REPORT: report, BUN: 'true', BOOT_TIMEOUT: '5', SOAK: '1',
+    }, () => '0.1.40');
+
+    expect(JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).dependencies.shraga).toBe('0.1.40');
+    expect(JSON.parse(readFileSync(report, 'utf8')).status).toBe('failed');
   }, 30_000);
 
   test('a failed install reverts and never restarts a half-installed tree', async () => {
