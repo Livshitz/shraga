@@ -54,6 +54,7 @@ import { addUnread, markRead as markUnread, getUnreads } from './unread.ts';
 import { loadShragaConfig, getPublicOrigin } from './shraga-config.ts';
 import { startSidecars, stopSidecars } from './mcp-sidecar.ts';
 import { syncVendorRepos } from './vendor-sync.ts';
+import { SelfUpgrade } from './self-upgrade/index.ts';
 import { initEngines, getAvailableEngines, getEngine } from './engine/index.ts';
 import { statsSampler } from './stats.ts';
 import { getAll as getAllContacts } from './contacts.ts';
@@ -116,6 +117,7 @@ for (const e of __reg.engines ?? []) registerEngine(e);
 for (const s of __reg.eventSubs ?? []) subscribeEvent(s.source, s.handler);
 await initEngines();
 if (!PASSIVE) syncVendorRepos().catch(err => console.warn('[vendor-sync] error:', (err as Error).message));
+const selfUpgrade = new SelfUpgrade();
 seedDefaults();
 const purged = purgeExpiredSkills();
 if (purged.length) console.log(`[skills] Purged ${purged.length} expired skill(s): ${purged.join(', ')}`);
@@ -180,6 +182,41 @@ app.get('/api/version', (_req, res) => {
     const pkg = JSON.parse(readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8'));
     res.json({ version: pkg.version });
   } catch { res.json({ version: 'unknown' }); }
+});
+
+// ── Self-upgrade (owner only) ────────────────────────────────────────────────
+// Upgrading replaces the code serving this request and restarts the process, so it is strictly an
+// owner action, and the response can only ever be "started" — the OUTCOME arrives after the restart,
+// via the self-upgrade.finished event (see deliverPendingReport) and GET /api/self-upgrade.
+
+app.get('/api/self-upgrade', requireAuth, async (req, res) => {
+  if (!(req as any).user?.isOwner) return void res.status(403).json({ error: 'Only the owner can manage upgrades' });
+  const current = selfUpgrade.currentVersion();
+  let latest: string | null = null;
+  let latestError: string | undefined;
+  try { latest = await selfUpgrade.latestVersion(); }
+  catch (err) { latestError = (err as Error).message; }
+  res.json({
+    current,
+    latest,
+    latestError,
+    upToDate: !!latest && latest === current,
+    blockers: selfUpgrade.blockers(),
+    inFlight: selfUpgrade.inFlight(),
+    lastReport: selfUpgrade.lastReport(),
+  });
+});
+
+app.post('/api/self-upgrade', requireAuth, async (req, res) => {
+  if (!(req as any).user?.isOwner) return void res.status(403).json({ error: 'Only the owner can manage upgrades' });
+  try {
+    const plan = await selfUpgrade.start({ version: req.body?.version });
+    // 409, not 500: a refusal is a well-formed answer about the deployment's state, and the caller
+    // (often the agent, relaying to a human) needs the reason, not a stack trace.
+    res.status(plan.started ? 202 : 409).json(plan);
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
 });
 
 // Cached host stats — returns the in-memory ring buffer (does NOT sample on request).
@@ -2034,6 +2071,11 @@ await new Promise<void>((resolve) => {
     console.log(`[server] Running on http://0.0.0.0:${PORT}`);
     resolve();
     if (PASSIVE) return; // no sidecars, recovery, or MCP warmers in passive mode
+    // Deliver here, not earlier in boot: an upgrade's outcome is only knowable once we are the
+    // process that came back, and the event has to land after the dispatcher is subscribed or the
+    // owner never hears how it went.
+    try { selfUpgrade.deliverPendingReport(); }
+    catch (err) { console.warn('[self-upgrade] could not deliver report:', (err as Error).message); }
     startSidecars().catch(err => console.error('[sidecar] startup error:', err));
     recoverInterruptedSessions().catch(err => console.error('[recovery] failed:', err));
     // The disk MCP catalog is warmed off the turn path by whichever engine consumes it — the CE default
