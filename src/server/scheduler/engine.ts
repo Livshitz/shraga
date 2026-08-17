@@ -22,6 +22,9 @@ interface RuntimeState {
   queues: Map<string, QueuedFire[]>;
   /** Schedules currently running (id → AbortController for the live run). */
   running: Map<string, AbortController>;
+  /** Pending re-arms of a window whose run failed before producing anything (id → timer). One
+   *  per schedule: a schedule can only be retrying one window at a time. */
+  retries: Map<string, { timer: ReturnType<typeof setTimeout>; window: number; attempt: number }>;
   broadcast: Broadcast;
 }
 
@@ -50,6 +53,7 @@ const state: RuntimeState = {
   timer: null,
   queues: new Map(),
   running: new Map(),
+  retries: new Map(),
   broadcast: () => {},
 };
 
@@ -182,6 +186,7 @@ export function deleteSchedule(id: string): boolean {
   if (idx < 0) return false;
   state.schedules.splice(idx, 1);
   state.queues.delete(id);
+  clearRearm(id);
   const ac = state.running.get(id);
   if (ac) ac.abort();
   saveSchedules(state.schedules);
@@ -205,6 +210,8 @@ export function toggleSchedule(id: string, enabled: boolean): Schedule | null {
     }
   } else {
     s.nextRun = undefined;
+    // A disabled schedule must not come back to life via a pending retry.
+    clearRearm(id);
   }
   saveSchedules(state.schedules);
   replan();
@@ -428,6 +435,62 @@ function judgeMissed(s: Schedule, window: number, now: number = Date.now()): Mis
   return { replay: true };
 }
 
+/** Backoff between re-arms of a side-effect-free failed window. Deliberately minutes, not the
+ *  sub-second ladder the in-process retry uses: that one exists for a flaky engine, this one for an
+ *  outage — a capped API key or a dead upstream is not coming back in 2 seconds. The last entry
+ *  repeats; the real bound is the staleness ceiling, which stops replay well before the ladder does. */
+const REARM_BACKOFF_MS = [5 * 60_000, 15 * 60_000, 30 * 60_000, 60 * 60_000];
+
+/** Cancel any pending re-arm for a schedule (disabled, deleted, or superseded by a newer window). */
+function clearRearm(id: string): void {
+  const pending = state.retries.get(id);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  state.retries.delete(id);
+}
+
+/**
+ * Re-arm a window whose run failed before producing any output. Returns true when a retry is
+ * pending — the caller must then NOT record an attempt outcome, because an attempt marker is
+ * exactly what makes the window un-replayable.
+ *
+ * Refuses (returns false, caller falls through to the normal failure path) when the retry would
+ * land outside what `judgeMissed` permits: past the staleness ceiling, or against an explicit
+ * `onMissed` of `skip`/`offer`. Those are standing instructions about unattended replay and this
+ * is unattended replay, so it answers to them rather than routing around them.
+ */
+function rearmWindow(s: Schedule, window: number): boolean {
+  if (!schedulerActive) return false;
+  const live = getSchedule(s.id);
+  if (!live?.enabled) return false;
+
+  const pending = state.retries.get(s.id);
+  const attempt = pending?.window === window ? pending.attempt + 1 : 1;
+  clearRearm(s.id);
+
+  const delay = REARM_BACKOFF_MS[Math.min(attempt - 1, REARM_BACKOFF_MS.length - 1)]!;
+  // Judge the window as of WHEN THE RETRY WOULD FIRE, not now — arming a timer that is already
+  // doomed to be refused just burns the ceiling in silence.
+  const verdict = judgeMissed(live, window, Date.now() + delay);
+  if (!verdict.replay) {
+    console.log(`[scheduler] not re-arming ${s.id} — ${verdict.message}`);
+    if (verdict.reason !== 'skip') noteMissed(live, window, verdict.reason);
+    return false;
+  }
+
+  console.warn(`[scheduler] ${s.id} failed before producing any output — re-arming window ${new Date(window).toISOString()} in ${Math.round(delay / 60_000)}m (retry ${attempt})`);
+  const timer = setTimeout(() => {
+    state.retries.delete(s.id);
+    const cur = getSchedule(s.id);
+    if (!cur?.enabled) return;
+    console.log(`[scheduler] retrying window ${new Date(window).toISOString()} for ${s.id}`);
+    enqueueFire(cur, window);
+  }, delay);
+  timer.unref?.();
+  state.retries.set(s.id, { timer, window, attempt });
+  return true;
+}
+
 function noteMissed(s: Schedule, at: number, reason: 'skip' | 'offer' | 'stale'): void {
   s.missedRun = { at, reason, noticedAt: Date.now() };
   saveSchedules(state.schedules);
@@ -497,6 +560,13 @@ function fireDue(): void {
 }
 
 function enqueueFire(s: Schedule, firedAt: number, override?: string, manual = false, eventCtx?: EventContext): RunOutcome {
+  // A newer window supersedes a pending retry of an older one: today's 08:00 report is the job,
+  // not yesterday's. Retrying both would double-post.
+  const pendingRetry = state.retries.get(s.id);
+  if (pendingRetry && firedAt > pendingRetry.window) {
+    console.log(`[scheduler] dropping pending retry of ${new Date(pendingRetry.window).toISOString()} for ${s.id} — superseded by a newer window`);
+    clearRearm(s.id);
+  }
   // Skip if this cron period was already completed/attempted. Manual runs (runNow from UI/API)
   // always proceed past the period guard — but never past the run lock in startRun().
   if (!manual && s.trigger.kind === 'cron') {
@@ -588,6 +658,13 @@ function startRun(s: Schedule, firedAt: number, override?: string, resume?: Resu
         saveSchedules(state.schedules);
         state.broadcast({ type: 'schedule:updated', schedule: live });
       }
+      // A run that failed WITHOUT producing anything has not spent its window: the work provably
+      // never started, so re-running cannot double-apply a side effect. Re-arm instead of burning
+      // the window — otherwise a multi-hour upstream outage (an API spend cap, a dead engine)
+      // silently costs the day's run, which is exactly how a morning report goes missing with
+      // every marker reading "attempted". Recording the attempt is deferred to the give-up path,
+      // because an attempt marker is precisely what blocks the replay we want.
+      if (summary.status === 'error' && summary.sideEffectFree && rearmWindow(s, firedAt)) return;
       if (summary.status !== 'ok') {
         // Keep the attempt on record with its real outcome — the next boot must see that this
         // window was tried and failed, not that it never ran.
