@@ -131,9 +131,16 @@ Write to `data/workspace/garden-reports/{YYYY-MM-DD}.md`:
 
 The full report is the audit trail. Raw agent reports let you verify the diagnosis. Diff previews let you verify the prescription. Skipped findings let you verify the triage.
 
+### Check auto-apply preference
+
+Read `data/workspace/preferences/garden.json` (if present). This is the owner's standing instruction and **overrides the default approval gate** — check it before deciding whether to stop and wait.
+
+- `{"autoApply": true, ...}` → **Phase 4 applies automatically**, no waiting. Only proposals whose `Risk` is `none` or `low` auto-apply; anything `medium`/`high`, or involving conflicting sources / a judgment call, still goes to DM-and-wait regardless of the flag (per the file's own `note` on what still needs Elya).
+- Missing file, or `autoApply` absent/false → default gate applies: propose, DM, and **STOP** (below).
+
 ### Send Slack DM to owners
 
-Send a DM to each owner (from `<known_contacts>` with Slack IDs) using `post_slack_message`:
+Send a DM to each owner (from `<known_contacts>` with Slack IDs) using `post_slack_message`. Adjust wording based on the auto-apply check above:
 
 ```
 🌱 Knowledge Garden — {date}
@@ -152,17 +159,21 @@ Full audit trail: data/workspace/garden-reports/{date}.md
    Diff: -{removed summary} +{added summary}
 
 Skipped {N} lower-priority findings (see report).
-Reply with numbers to approve (e.g. "1,3") or "all".
 ```
 
-**STOP here. Do not apply changes. Wait for user approval.**
+If autoApply: append `Auto-applying #1, #2 (risk: none/low). Nothing needs your review this run.` — or, if something is held back — `Applied #1 automatically. #2 needs your call (risk: medium / conflicting sources) — reply with the number to approve.`
+If not autoApply: append `Reply with numbers to approve (e.g. "1,3") or "all".` and **STOP here. Do not apply changes. Wait for user approval.**
 
-## Phase 4: Apply (only when user approves)
+## Phase 4: Apply
 
-When the user replies with numbers (e.g. "1,3") or "all":
+**If autoApply (per the check above):** apply every proposed change with `Risk: none` or `Risk: low` immediately, in the same run — no waiting. Hold back anything `medium`/`high` risk and DM as described above.
+
+**If not autoApply:** apply only when the user replies with numbers (e.g. "1,3") or "all".
+
+Either way:
 
 1. Load the report from `data/workspace/garden-reports/{date}.md`
-2. Apply only the approved changes using Edit tool
+2. Apply the approved/qualifying changes using Edit tool
 3. Commit:
 
 ```bash
