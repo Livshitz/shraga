@@ -32,6 +32,11 @@ export interface ScheduleRunSummary {
   sessionId: string;
   status: 'running' | 'ok' | 'error' | 'aborted';
   error?: string;
+  /** Set on an errored run that produced NO output at all (no tool_use, no text, no thinking) —
+   *  the same side-effect boundary the in-process retry uses. It means the window's work provably
+   *  did not start, so the window has not really been spent and re-running cannot double-apply
+   *  anything. The engine uses it to re-arm the window instead of burning it. */
+  sideEffectFree?: boolean;
 }
 
 /** What the scheduler did about a window it found already elapsed at boot.
