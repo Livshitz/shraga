@@ -170,3 +170,21 @@ export function markRunStarted(scheduleId: string, window: number, triggeredBy: 
     status: 'started',
   });
 }
+
+/** Undo the at-start attempt stamp for a window whose run turned out to have done nothing.
+ *  `markRunStarted` records `attemptWindow` BEFORE the work happens — right for a crash (the run
+ *  had its shot), wrong for a run that provably never started, because that stamp is precisely
+ *  what makes a window un-replayable. `completedAt` is untouched: a period that genuinely
+ *  completed must stay guarded no matter what a later attempt does. */
+export function releaseAttemptWindow(scheduleId: string, window: number): void {
+  const prev = readCompletionMarker(scheduleId);
+  if (!prev || prev.attemptWindow !== window) return;
+  writeCompletionMarker({
+    completedAt: prev.completedAt,
+    triggeredBy: prev.triggeredBy,
+    scheduleId,
+    lastAttemptAt: prev.lastAttemptAt,
+    attemptWindow: undefined,
+    status: prev.status,
+  });
+}
