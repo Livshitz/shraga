@@ -1,4 +1,4 @@
-import { loadSchedules, saveSchedules, readCompletionMarker, writeCompletionMarker, readRunningMarker, isProcessAlive, loadThrottleState, saveThrottleState, acquireRunLock, clearRunningMarker, markRunStarted } from './storage.ts';
+import { loadSchedules, saveSchedules, readCompletionMarker, writeCompletionMarker, readRunningMarker, isProcessAlive, loadThrottleState, saveThrottleState, acquireRunLock, clearRunningMarker, markRunStarted, releaseAttemptWindow } from './storage.ts';
 import { computeNextRun, computePrevRun, validateTrigger } from './timing.ts';
 import { runSchedule, type ResumeOptions, type EventContext } from './runner.ts';
 import { backfillScope, ensureBuiltinSchedules } from './builtins.ts';
@@ -94,7 +94,13 @@ export function start(broadcast: Broadcast): void {
     if (prev === null) continue;
     const lastAt = s.lastRun?.at;
     if (lastAt === undefined) continue; // never ran — nothing to catch up
-    if (lastAt >= prev) continue;
+    // A run that errored WITHOUT producing anything did not spend its window (see rearmWindow):
+    // its work provably never started, so the window is still owed even though `lastRun.at` is
+    // newer than it. The in-memory re-arm timer does NOT survive a restart — and on a box whose
+    // watchdog restarts the service, that is the common case, not the exotic one — so boot must
+    // recognise the same condition or the retry silently dies with the process.
+    const owedByFailure = s.lastRun?.status === 'error' && s.lastRun.sideEffectFree === true;
+    if (lastAt >= prev && !owedByFailure) continue;
 
     const marker = readCompletionMarker(s.id);
     if (marker && marker.completedAt >= prev) {
@@ -438,8 +444,14 @@ function judgeMissed(s: Schedule, window: number, now: number = Date.now()): Mis
 /** Backoff between re-arms of a side-effect-free failed window. Deliberately minutes, not the
  *  sub-second ladder the in-process retry uses: that one exists for a flaky engine, this one for an
  *  outage — a capped API key or a dead upstream is not coming back in 2 seconds. The last entry
- *  repeats; the real bound is the staleness ceiling, which stops replay well before the ladder does. */
-const REARM_BACKOFF_MS = [5 * 60_000, 15 * 60_000, 30 * 60_000, 60 * 60_000];
+ *  repeats; the real bound is the staleness ceiling, which stops replay well before the ladder does.
+ *  Read per call (like `catchupDelayMs`) so tests — and an operator — can shorten it. */
+const rearmBackoffMs = (): number[] => {
+  const override = process.env.SCHEDULER_REARM_BACKOFF_MS;
+  if (!override) return [5 * 60_000, 15 * 60_000, 30 * 60_000, 60 * 60_000];
+  const parsed = override.split(',').map((v) => Number(v.trim())).filter((v) => Number.isFinite(v) && v >= 0);
+  return parsed.length ? parsed : [5 * 60_000];
+};
 
 /** Cancel any pending re-arm for a schedule (disabled, deleted, or superseded by a newer window). */
 function clearRearm(id: string): void {
@@ -468,7 +480,8 @@ function rearmWindow(s: Schedule, window: number): boolean {
   const attempt = pending?.window === window ? pending.attempt + 1 : 1;
   clearRearm(s.id);
 
-  const delay = REARM_BACKOFF_MS[Math.min(attempt - 1, REARM_BACKOFF_MS.length - 1)]!;
+  const ladder = rearmBackoffMs();
+  const delay = ladder[Math.min(attempt - 1, ladder.length - 1)]!;
   // Judge the window as of WHEN THE RETRY WOULD FIRE, not now — arming a timer that is already
   // doomed to be refused just burns the ceiling in silence.
   const verdict = judgeMissed(live, window, Date.now() + delay);
@@ -478,9 +491,15 @@ function rearmWindow(s: Schedule, window: number): boolean {
     return false;
   }
 
+  // The at-start marker already stamped this window as attempted; that stamp is what would make
+  // the replay a no-op, so drop it. Nothing else about the marker moves.
+  releaseAttemptWindow(s.id, window);
   console.warn(`[scheduler] ${s.id} failed before producing any output — re-arming window ${new Date(window).toISOString()} in ${Math.round(delay / 60_000)}m (retry ${attempt})`);
   const timer = setTimeout(() => {
-    state.retries.delete(s.id);
+    // Deliberately NOT deleting the entry: it carries the attempt count, and the retry we are
+    // about to fire may fail again. Dropping it here would restart the ladder at 5m on every
+    // round — a fixed 5m poll wearing the shape of a backoff. It is cleared on success, on a
+    // superseding window, and on disable/delete.
     const cur = getSchedule(s.id);
     if (!cur?.enabled) return;
     console.log(`[scheduler] retrying window ${new Date(window).toISOString()} for ${s.id}`);
@@ -671,6 +690,8 @@ function startRun(s: Schedule, firedAt: number, override?: string, resume?: Resu
         recordAttemptOutcome(s.id, firedAt, summary.at, summary.status === 'running' ? 'started' : summary.status);
       }
       if (summary.status === 'ok') {
+        // The window landed — drop any retry bookkeeping so the next failure starts a fresh ladder.
+        clearRearm(s.id);
         writeCompletionMarker({ completedAt: summary.at, triggeredBy: 'scheduler', scheduleId: s.id, lastAttemptAt: summary.at, attemptWindow: firedAt, status: 'ok' });
         if (live && live.trigger.kind === 'once') {
           console.log(`[scheduler] auto-deleting completed once-schedule ${s.id}`);
