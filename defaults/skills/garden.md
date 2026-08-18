@@ -179,6 +179,8 @@ Full audit trail: data/workspace/garden-reports/{date}.md
    Diff: -{removed summary} +{added summary}
 
 Skipped {N} lower-priority findings (see report).
+
+Reply with numbers to approve (e.g. "1,3") or "all".
 ```
 
 **In `approval` mode: STOP here. Do not apply changes. Wait for user approval.**
