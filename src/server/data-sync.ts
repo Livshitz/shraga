@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'no
 import path from 'node:path';
 import { DATA_DIR } from './paths.ts';
 import { emitEvent } from './events/bus.ts';
+import { runTextQuery } from './sdk-utils.ts';
 
 const TAG = '[data-sync]';
 const DEPLOYMENT_ID_FILE = '.deployment-id';
@@ -340,7 +341,7 @@ export class DataSync {
       const msg = await this.askClaude(
         'Write a concise git commit message (max 72 chars, no quotes, no prefix like "feat:" or "sync:") for this change to an AI agent\'s behavioral config.\n' +
         `Files: ${files.join(', ')}\nStats: ${diff}\n\nDiff:\n${truncated}`,
-        'claude-haiku-4-5-20251001', 100,
+        'haiku',
       );
       const line = msg.split('\n')[0].trim().slice(0, 72);
       return line || fallback;
@@ -382,7 +383,7 @@ export class DataSync {
         'Output format:\n' +
         '<file path="<path>" complexity="trivial|ambiguous" reason="short explanation">\n<resolved content>\n</file>\n' +
         'Output ONLY the resolved files in this format.\n\n' + sections,
-        'claude-opus-4-6',
+        'opus',
       );
 
       const parsed = this.parseResolvedFiles(resolved);
@@ -462,7 +463,7 @@ export class DataSync {
         'Output format:\n' +
         '<file path="<path>" complexity="trivial|ambiguous" reason="short explanation">\n<resolved content>\n</file>\n' +
         'Output ONLY the resolved files.\n\n' + sections,
-        'claude-opus-4-6',
+        'opus',
       );
 
       const parsed = this.parseResolvedFiles(resolved);
@@ -564,24 +565,15 @@ export class DataSync {
     emitEvent('data-sync', { kind: 'deploy', owners, text });
   }
 
-  private async askClaude(prompt: string, model = 'claude-sonnet-5', maxTokens = 8192): Promise<string> {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model, max_tokens: maxTokens,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
-    if (!resp.ok) throw new Error(`Anthropic API ${resp.status}: ${await resp.text()}`);
-    const data = await resp.json() as { content: { type: string; text: string }[] };
-    return data.content.find(b => b.type === 'text')?.text || '';
+  /**
+   * Routed through the Claude Code SDK (runTextQuery), same as the rest of the platform —
+   * authenticates via the CC subscription, no ANTHROPIC_API_KEY required. Past incident:
+   * this used to hit the raw Anthropic Messages API directly with process.env.ANTHROPIC_API_KEY,
+   * which is unset on subscription-auth deployments — every merge-conflict resolution failed and
+   * spammed owners via notifyOwners().
+   */
+  private async askClaude(prompt: string, model: 'haiku' | 'sonnet' | 'opus' = 'sonnet'): Promise<string> {
+    return runTextQuery({ prompt, model, maxTurns: 1 });
   }
 
   private async getConflictedFiles(): Promise<string[]> {
