@@ -78,6 +78,18 @@ export function start(broadcast: Broadcast): void {
       s.lastRun.error = 'interrupted by server restart';
     }
     if (!s.enabled) { s.nextRun = undefined; continue; }
+    // A one-off that already ran must never be armed again. It is normally DELETED on success,
+    // but schedules.json is a whole-file JSON array shared by this process and by humans over
+    // git — a conflicting rebase, or data-sync's union-merge conflict resolver, can bring the
+    // deleted entry back. If its `at` is still in the future the past-due guard below cannot
+    // see it, and a completed campaign send would go out twice. Refuse it here instead.
+    const ranBefore = oneShotAlreadyRan(s);
+    if (ranBefore) {
+      console.warn(`[scheduler] ⚠️ refusing to re-arm completed one-off ${s.id} ("${s.name}") — ${ranBefore}. Disabled; delete it or create a new schedule.`);
+      s.enabled = false;
+      s.nextRun = undefined;
+      continue;
+    }
     const next = computeNextRun(s.trigger);
     if (next === null) {
       if (s.trigger.kind === 'once') s.enabled = false;
@@ -164,6 +176,10 @@ export function getSchedule(id: string): Schedule | undefined {
 export function upsertSchedule(s: Schedule): { ok: true; schedule: Schedule } | { ok: false; error: string } {
   const err = validateTrigger(s.trigger);
   if (err) return { ok: false, error: err };
+  // Same guard as boot: re-adding a spent one-off under its old id is a resurrection, not an
+  // edit. A genuinely new job gets a new id.
+  const ranBefore = oneShotAlreadyRan(s);
+  if (ranBefore) return { ok: false, error: `This one-off schedule already ran — ${ranBefore}. Create a new schedule instead of re-adding this one.` };
   if (s.onMissed !== undefined && !MISSED_POLICIES.includes(s.onMissed)) {
     return { ok: false, error: `Invalid onMissed "${s.onMissed}" (expected ${MISSED_POLICIES.join(' | ')})` };
   }
@@ -360,6 +376,31 @@ export function resumeRun(scheduleId: string, sessionId: string, prompt: string)
 }
 
 // ── Internals ───────────────────────────────────────────────────────────────
+
+/**
+ * Evidence that a `once` schedule has ALREADY had its single run — i.e. this entry is a
+ * resurrection of one the engine deleted on success, not a new job. Returns a human-readable
+ * reason, or null when the schedule is not a spent one-off.
+ *
+ * Two independent witnesses, because neither survives everything:
+ *  - the completion marker (data/scheduler/completions/<id>.json), which is per-id, gitignored
+ *    and local to the firing instance — so a git merge can never carry it away, but a rebuilt
+ *    data dir loses it;
+ *  - the entry's own `lastRun.status === 'ok'`, which travels inside schedules.json — so it
+ *    survives a wiped data dir, but only if the resurrected copy is from after that run.
+ */
+function oneShotAlreadyRan(s: Schedule): string | null {
+  if (s.trigger.kind !== 'once') return null;
+  const marker = readCompletionMarker(s.id);
+  // `completedAt` is the last SUCCESSFUL completion, and 0 when there has never been one. A
+  // marker is also written at fire time (`markRunStarted`) and on failure
+  // (`recordAttemptOutcome`), so its mere existence proves only an attempt. A future-dated
+  // one-off whose manual test-run errored has a marker but has never sent — retiring it would
+  // cancel a send that never happened, and report it as completed at epoch 0.
+  if (marker && marker.completedAt > 0) return `it completed at ${new Date(marker.completedAt).toISOString()} (${marker.triggeredBy})`;
+  if (s.lastRun?.status === 'ok') return `its own lastRun records a successful run at ${new Date(s.lastRun.at).toISOString()}`;
+  return null;
+}
 
 const MISSED_POLICIES: MissedPolicy[] = ['run', 'skip', 'offer'];
 
