@@ -27,6 +27,24 @@ BUN="${BUN:-bun}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-180}"
 SOAK="${SOAK:-60}"
 
+# ── Escape the service cgroup ─────────────────────────────────────────────────
+# Under systemd the default KillMode=control-group kills EVERY process in the unit's cgroup on
+# restart — and a detached child of the server is in that cgroup. So the supervisor would be killed
+# by the very restart it triggers, taking the verify AND the rollback with it: exactly the guarantees
+# it exists to provide. Re-exec into a transient scope (same uid, so `bun install` doesn't leave
+# root-owned files) and we live outside the unit. Best-effort: where systemd-run or passwordless sudo
+# is absent, carry on in-cgroup — an unsupervised upgrade still beats no upgrade.
+if [ -z "${UPGRADE_DETACHED:-}" ]; then
+  export UPGRADE_DETACHED=1
+  if command -v systemd-run >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    escape=(sudo -n systemd-run --scope --quiet --collect --uid="$(id -u)" --gid="$(id -g)")
+    for v in APP_ROOT PKG TARGET FROM RESTART_CMD HEALTH_URL REPORT BUN BOOT_TIMEOUT SOAK PATH UPGRADE_DETACHED; do
+      escape+=("--setenv=$v=${!v-}")
+    done
+    exec "${escape[@]}" bash "$0"
+  fi
+fi
+
 cd "$APP_ROOT" || exit 1
 BACKUP="$(mktemp -d)"
 LOG="${REPORT%.json}.log"
