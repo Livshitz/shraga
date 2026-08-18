@@ -43,6 +43,13 @@ function buildBlocks(id: string, questions: AskQuestion[]): unknown[] {
   return blocks;
 }
 
+/** Replace a question message's blocks with a final state, so its buttons stop looking live. */
+async function retire(p: Pending, text: string) {
+  if (!p.messageTs) return;
+  await slackPost('chat.update', { channel: p.channel, ts: p.messageTs, text, blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] }, p.useUserToken)
+    .catch((err) => console.error(`${PREFIX} retire failed:`, (err as Error)?.message));
+}
+
 /** Build a QuestionHandler bound to a Slack channel/thread for the current turn. */
 export function makeSlackQuestionHandler(ctx: Ctx): QuestionHandler {
   return async (id, questions) => {
@@ -55,7 +62,12 @@ export function makeSlackQuestionHandler(ctx: Ctx): QuestionHandler {
     console.log(`${PREFIX} posted question ${id} (${questions.length}q) to ${ctx.channel}`);
     return new Promise<QuestionAnswers | null>((resolve) => {
       const timer = setTimeout(() => {
-        if (pending.delete(id)) { console.log(`${PREFIX} ${id} timed out`); resolve(null); }
+        const p = pending.get(id);
+        if (!p) return;
+        pending.delete(id);
+        console.log(`${PREFIX} ${id} timed out`);
+        void retire(p, '⌛ This question expired — I went ahead without an answer. Reply in the thread to steer me.');
+        resolve(null);
       }, TTL_MS);
       pending.set(id, { ...ctx, resolve, questions, messageTs: res.ts, timer });
     });
@@ -98,14 +110,22 @@ export async function handleSlackInteraction(payload: any): Promise<boolean> {
   if (!submit) return false;
   const id = submit.value as string;
   const p = pending.get(id);
-  if (!p) return false;
+  if (!p) {
+    // Expired or lost to a restart: the buttons are still clickable but nothing is listening.
+    // Silence reads as a broken app, so always answer the click.
+    console.warn(`${PREFIX} submit for unknown/expired question ${id}`);
+    const channel = payload.channel?.id;
+    if (channel && userId) {
+      await slackPost('chat.postEphemeral', { channel, user: userId, text: '⌛ That question is no longer active (expired or I restarted). Just reply in the thread and I\'ll pick it up.' })
+        .catch((err) => console.error(`${PREFIX} ephemeral failed:`, (err as Error)?.message));
+    }
+    return false;
+  }
   pending.delete(id);
   clearTimeout(p.timer);
   const answers = parseAnswers(payload.state?.values, p.questions);
-  if (p.messageTs) {
-    const summary = Object.entries(answers).map(([q, a]) => `• *${q}* — ${Array.isArray(a) ? a.join(', ') : a}`).join('\n') || '_(no selection)_';
-    await slackPost('chat.update', { channel: p.channel, ts: p.messageTs, text: '✅ Got your answers.', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `✅ Got your answers:\n${summary}` } }] }, p.useUserToken).catch(() => {});
-  }
+  const summary = Object.entries(answers).map(([q, a]) => `• *${q}* — ${Array.isArray(a) ? a.join(', ') : a}`).join('\n') || '_(no selection)_';
+  await retire(p, `✅ Got your answers:\n${summary}`);
   console.log(`${PREFIX} resolved question ${id} (${Object.keys(answers).length} answered)`);
   p.resolve(Object.keys(answers).length ? answers : null);
   return true;

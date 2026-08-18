@@ -398,6 +398,18 @@ export class ClaudeCodeEngine implements AgentEngine {
             if (!waitingForBg) { waitingForBg = true; clearBgTimer(); console.log(`[claude] Holding stream for ${outstandingTasks.size} bg tasks (${elapsed()})`); }
             continue;
           }
+          // The SDK reports `subtype: 'success'` even when the API call failed (e.g. an org spend
+          // cap → HTTP 400) — the only tells are `is_error` / `api_error_status`. Trusting the
+          // subtype makes an all-turns-failing agent look healthy: schedules store lastRun 'ok',
+          // the failure notifier stays silent, and Slack simply gets nothing. Surface it as an
+          // error so the run fails loudly.
+          // `error_max_turns` also sets is_error but is a benign stop reason we already model.
+          if ((m.is_error || m.api_error_status) && sub !== 'max_turns_reached') {
+            const detail = typeof m.result === 'string' && m.result ? m.result : `api_error_status=${m.api_error_status ?? '?'}`;
+            console.error(`[claude] API error result — ${detail}`);
+            yield { type: 'error', message: `Claude API error: ${detail}` };
+            return;
+          }
           if (textDeltaCount === 0) {
             console.warn(`[claude] Empty response — result keys: ${Object.keys(m).join(',')}`);
           }

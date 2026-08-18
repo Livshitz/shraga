@@ -188,4 +188,35 @@ describe('scheduler prompt-run retry (transient, zero-output failures only)', ()
     expect(calls).toBe(1);
     expect(summary.status).toBe('ok');
   });
+
+  // `sideEffectFree` is the contract the engine re-arms on: it must mean "the work provably never
+  // started", or a re-armed window double-applies whatever the failed run already did.
+  describe('sideEffectFree (the engine re-arms the window on this flag)', () => {
+    test('exhausted the ladder with zero output → sideEffectFree', async () => {
+      const err = [{ type: 'error', message: 'Claude API error: usage limit reached' }];
+      const { summary } = await run([err, err, err]);
+      expect(summary.status).toBe('error');
+      expect(summary.sideEffectFree).toBe(true);
+    });
+
+    test('a tool already ran → NOT sideEffectFree', async () => {
+      const { summary } = await run([[
+        { type: 'tool_use', tool: 'Bash', toolUseId: 't1', input: { command: 'post-slack-dm' } },
+        { type: 'error', message: 'boom' },
+      ]]);
+      expect(summary.status).toBe('error');
+      expect(summary.sideEffectFree).toBe(false);
+    });
+
+    test('produced text → NOT sideEffectFree', async () => {
+      const { summary } = await run([[{ type: 'text_delta', text: 'partial' }, { type: 'error', message: 'boom' }]]);
+      expect(summary.sideEffectFree).toBe(false);
+    });
+
+    test('a successful run carries no flag at all', async () => {
+      const { summary } = await run([[{ type: 'text_delta', text: 'fine' }, { type: 'done' }]]);
+      expect(summary.status).toBe('ok');
+      expect(summary.sideEffectFree).toBeUndefined();
+    });
+  });
 });

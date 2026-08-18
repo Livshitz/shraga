@@ -150,6 +150,11 @@ with the process frozen), the scheduler decides whether to replay it. `onMissed`
 | `skip` | Never replay. The window is simply lost. |
 | `offer` | Don't auto-fire, but **record** it so a human/agent can run it on demand. |
 
+`skip`/`offer` suppress *unattended replay* generally — including the failed-run re-arm below, not
+just a window missed while the process was down. A schedule set to `offer` will not retry itself
+after an outage; that is the point of the setting, but it is also how a daily report goes quietly
+missing for a day.
+
 ```bash
 curl -s -X PUT -H "Content-Type: application/json" -H "x-internal-token: $INTERNAL_API_TOKEN" \
   http://localhost:$PORT/api/schedules/{id} -d '{ "onMissed": "offer" }' | jq .
@@ -158,8 +163,16 @@ curl -s -X PUT -H "Content-Type: application/json" -H "x-internal-token: $INTERN
 - **A staleness ceiling overrides every policy, `run` included**: a window more than
   `SCHEDULER_MAX_MISSED_AGE_MS` (default **6h**) late is never replayed. Finishing an 08:00 report
   at 22:00 is not the job the schedule describes.
-- One decision (`judgeMissed` in `scheduler/engine.ts`) governs **all three** paths that could
+- One decision (`judgeMissed` in `scheduler/engine.ts`) governs **all four** paths that could
   replay a window:
+  0. **Failed-run re-arm** — the run fired on time but errored *before producing anything* (no
+     `tool_use`, no text, no thinking: `sideEffectFree` on the run summary). The work provably
+     never started, so the window has not been spent. The engine retries the **same** window on a
+     5/15/30/60m backoff — the in-process ladder in `runner.ts` is sub-second, tuned for a flaky
+     engine, and an outage (a capped API key, a dead upstream) outlives it. A newer window
+     supersedes a pending retry; disable/delete cancels it; success clears it. The re-arm timer is
+     in-memory, so boot catch-up re-derives the same condition from `lastRun` and picks it up
+     across a restart.
   1. **Boot catch-up** (cron only) — the process was down when the window passed.
   2. **In-place resume** of a run interrupted mid-flight — every trigger kind
      (`interval`/`once`/`event` have no catch-up, so resume is their only gate; their window is

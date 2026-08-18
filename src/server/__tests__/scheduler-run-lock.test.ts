@@ -16,6 +16,8 @@ let stubActive = false;
 let started: { scheduleId: string; sessionId: string; resumed: boolean }[] = [];
 /** Terminal status the stub reports for the next run(s). */
 let nextStatus: ScheduleRunSummary['status'] = 'ok';
+/** When true the stubbed run reports the side-effect-free boundary the engine re-arms on. */
+let nextSideEffectFree = false;
 /** How long a stubbed run stays in flight. */
 let runMs = 5;
 /** When set, the next stubbed run REJECTS instead of resolving — the unexpected-throw path. */
@@ -45,7 +47,7 @@ mock.module('../scheduler/runner.ts', () => ({
     // The real runner clears the lock when it reaches a terminal state — mirror that, otherwise
     // the engine's own release would be the only one and we'd not be testing the real ordering.
     (await import('../scheduler/storage.ts')).clearRunningMarker(schedule.id);
-    return { at: Date.now(), sessionId, status: nextStatus };
+    return { at: Date.now(), sessionId, status: nextStatus, sideEffectFree: nextStatus === 'error' ? nextSideEffectFree : undefined };
   },
 }));
 
@@ -59,7 +61,7 @@ beforeAll(async () => {
   stubActive = true;
   // bun test shares ONE process across files — restore these so sibling suites (which assert the
   // scheduler is INACTIVE) aren't affected by us.
-  for (const k of ['DATA_SYNC_SCHEDULER_ACTIVE', 'SCHEDULER_CATCHUP_DELAY_MS', 'SCHEDULER_MAX_MISSED_AGE_MS']) savedEnv[k] = process.env[k];
+  for (const k of ['DATA_SYNC_SCHEDULER_ACTIVE', 'SCHEDULER_CATCHUP_DELAY_MS', 'SCHEDULER_MAX_MISSED_AGE_MS', 'SCHEDULER_REARM_BACKOFF_MS']) savedEnv[k] = process.env[k];
   process.env.DATA_SYNC_SCHEDULER_ACTIVE = 'true';
   process.env.SCHEDULER_CATCHUP_DELAY_MS = '30';
   // NOTE: SCHEDULER_MAX_MISSED_AGE_MS is deliberately NOT set — every test below runs against the
@@ -137,6 +139,7 @@ function deadPid(): number {
 beforeEach(() => {
   started = [];
   nextStatus = 'ok';
+  nextSideEffectFree = false;
   throwNext = false;
   runMs = 5;
   peakConcurrent = 0;
@@ -816,5 +819,79 @@ describe('an interrupted run keeps its session link', () => {
     expect(rec.lastRun!.sessionId).toBe(started[0]!.sessionId);
     expect(rec.lastRun!.sessionId).not.toBe('');
     await sleep(350);
+  });
+});
+
+// A run that fired on time but died before producing anything has NOT spent its window: the work
+// provably never started. The engine must keep the window replayable rather than burning it — the
+// incident this exists for is an API spend cap that lasted hours and cost a daily report.
+describe('failed-run re-arm (side-effect-free error)', () => {
+  test('does NOT record an attempt marker — the window stays replayable', async () => {
+    process.env.SCHEDULER_REARM_BACKOFF_MS = '20';
+    const s = makeSchedule();
+    nextStatus = 'error';
+    nextSideEffectFree = true;
+    boot([s]);
+    expect(engine.runNow(s.id).ok).toBe(true);
+    await sleep(40);
+    // An attempt marker is exactly what makes a window un-replayable — there must be none.
+    expect(markerFor(s.id)?.attemptWindow).toBeUndefined();
+    delete process.env.SCHEDULER_REARM_BACKOFF_MS;
+  });
+
+  test('an error that DID produce output still burns the window (attempt recorded)', async () => {
+    const s = makeSchedule();
+    nextStatus = 'error';
+    nextSideEffectFree = false;
+    boot([s]);
+    expect(engine.runNow(s.id).ok).toBe(true);
+    await sleep(40);
+    expect(markerFor(s.id)?.status).toBe('error');
+  });
+
+  test('the retry actually re-fires the SAME window', async () => {
+    process.env.SCHEDULER_REARM_BACKOFF_MS = '20';
+    const s = makeSchedule();
+    nextStatus = 'error';
+    nextSideEffectFree = true;
+    boot([s]);
+    engine.runNow(s.id);
+    await sleep(40);
+    const afterFirst = started.length;
+    nextStatus = 'ok';           // upstream recovers
+    await sleep(120);
+    expect(started.length).toBeGreaterThan(afterFirst);
+    // …and once it lands, the window is complete and nothing further is pending.
+    expect(markerFor(s.id)?.completedAt).toBeGreaterThan(0);
+    delete process.env.SCHEDULER_REARM_BACKOFF_MS;
+    await sleep(60);
+  });
+
+  test('onMissed=skip refuses the re-arm — an explicit standing instruction wins', async () => {
+    process.env.SCHEDULER_REARM_BACKOFF_MS = '20';
+    const s = makeSchedule({ onMissed: 'skip' });
+    nextStatus = 'error';
+    nextSideEffectFree = true;
+    boot([s]);
+    engine.runNow(s.id);
+    await sleep(40);
+    const afterFirst = started.length;
+    await sleep(120);
+    expect(started.length).toBe(afterFirst); // never retried
+    expect(markerFor(s.id)?.status).toBe('error'); // fell through to the normal failure path
+    delete process.env.SCHEDULER_REARM_BACKOFF_MS;
+  });
+
+  test('boot catch-up picks the window back up — the re-arm timer does not survive a restart', async () => {
+    // The state a restart mid-retry leaves behind: lastRun is NEWER than the window (the run did
+    // fire) but errored side-effect-free, and no attempt marker was written.
+    const prev = timing.computePrevRun({ kind: 'cron', expr: '0 * * * *', tz: 'UTC' })!;
+    const s = makeSchedule({
+      lastRun: { at: prev + 1000, sessionId: 'sched-died', status: 'error', sideEffectFree: true },
+    });
+    rmSync(path.join(DATA_DIR, 'schedule-markers', `${s.id}.json`), { force: true });
+    boot([s]);
+    await sleep(120);
+    expect(started.map((r) => r.scheduleId)).toContain(s.id);
   });
 });
