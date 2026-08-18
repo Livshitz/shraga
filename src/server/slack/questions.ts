@@ -9,7 +9,15 @@ const PREFIX = '[slack-q]';
 const TTL_MS = 15 * 60_000; // questions expire after 15min → agent self-decides
 const SLACK_MAX = 75; // Slack option label/value max length
 
-type Ctx = { channel: string; threadTs?: string; useUserToken?: boolean };
+type Ctx = {
+  channel: string;
+  threadTs?: string;
+  useUserToken?: boolean;
+  /** Closes the streamed reply message in flight, so the form posts BELOW what the agent has said so
+   *  far and everything after the answer lands below the form. Without it the continuation keeps
+   *  appending to the earlier message — the reply then reads as if it preceded the question. */
+  cut?: () => Promise<void>;
+};
 type Pending = Ctx & {
   resolve: (answers: QuestionAnswers | null) => void;
   questions: AskQuestion[];
@@ -53,6 +61,7 @@ async function retire(p: Pending, text: string) {
 /** Build a QuestionHandler bound to a Slack channel/thread for the current turn. */
 export function makeSlackQuestionHandler(ctx: Ctx): QuestionHandler {
   return async (id, questions) => {
+    await ctx.cut?.().catch((err) => console.error(`${PREFIX} cut failed:`, (err as Error)?.message));
     const res = await slackPost(
       'chat.postMessage',
       { channel: ctx.channel, thread_ts: ctx.threadTs, text: 'I have a few questions for you:', blocks: buildBlocks(id, questions) },
