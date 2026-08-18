@@ -1,4 +1,4 @@
-import { loadSchedules, saveSchedules, readCompletionMarker, writeCompletionMarker, readRunningMarker, isProcessAlive, loadThrottleState, saveThrottleState, acquireRunLock, clearRunningMarker, markRunStarted } from './storage.ts';
+import { loadSchedules, saveSchedules, readCompletionMarker, writeCompletionMarker, readRunningMarker, isProcessAlive, loadThrottleState, saveThrottleState, acquireRunLock, clearRunningMarker, markRunStarted, releaseAttemptWindow } from './storage.ts';
 import { computeNextRun, computePrevRun, validateTrigger } from './timing.ts';
 import { runSchedule, type ResumeOptions, type EventContext } from './runner.ts';
 import { backfillScope, ensureBuiltinSchedules } from './builtins.ts';
@@ -22,6 +22,9 @@ interface RuntimeState {
   queues: Map<string, QueuedFire[]>;
   /** Schedules currently running (id → AbortController for the live run). */
   running: Map<string, AbortController>;
+  /** Pending re-arms of a window whose run failed before producing anything (id → timer). One
+   *  per schedule: a schedule can only be retrying one window at a time. */
+  retries: Map<string, { timer: ReturnType<typeof setTimeout>; window: number; attempt: number }>;
   broadcast: Broadcast;
 }
 
@@ -50,6 +53,7 @@ const state: RuntimeState = {
   timer: null,
   queues: new Map(),
   running: new Map(),
+  retries: new Map(),
   broadcast: () => {},
 };
 
@@ -74,6 +78,18 @@ export function start(broadcast: Broadcast): void {
       s.lastRun.error = 'interrupted by server restart';
     }
     if (!s.enabled) { s.nextRun = undefined; continue; }
+    // A one-off that already ran must never be armed again. It is normally DELETED on success,
+    // but schedules.json is a whole-file JSON array shared by this process and by humans over
+    // git — a conflicting rebase, or data-sync's union-merge conflict resolver, can bring the
+    // deleted entry back. If its `at` is still in the future the past-due guard below cannot
+    // see it, and a completed campaign send would go out twice. Refuse it here instead.
+    const ranBefore = oneShotAlreadyRan(s);
+    if (ranBefore) {
+      console.warn(`[scheduler] ⚠️ refusing to re-arm completed one-off ${s.id} ("${s.name}") — ${ranBefore}. Disabled; delete it or create a new schedule.`);
+      s.enabled = false;
+      s.nextRun = undefined;
+      continue;
+    }
     const next = computeNextRun(s.trigger);
     if (next === null) {
       if (s.trigger.kind === 'once') s.enabled = false;
@@ -90,7 +106,13 @@ export function start(broadcast: Broadcast): void {
     if (prev === null) continue;
     const lastAt = s.lastRun?.at;
     if (lastAt === undefined) continue; // never ran — nothing to catch up
-    if (lastAt >= prev) continue;
+    // A run that errored WITHOUT producing anything did not spend its window (see rearmWindow):
+    // its work provably never started, so the window is still owed even though `lastRun.at` is
+    // newer than it. The in-memory re-arm timer does NOT survive a restart — and on a box whose
+    // watchdog restarts the service, that is the common case, not the exotic one — so boot must
+    // recognise the same condition or the retry silently dies with the process.
+    const owedByFailure = s.lastRun?.status === 'error' && s.lastRun.sideEffectFree === true;
+    if (lastAt >= prev && !owedByFailure) continue;
 
     const marker = readCompletionMarker(s.id);
     if (marker && marker.completedAt >= prev) {
@@ -154,6 +176,10 @@ export function getSchedule(id: string): Schedule | undefined {
 export function upsertSchedule(s: Schedule): { ok: true; schedule: Schedule } | { ok: false; error: string } {
   const err = validateTrigger(s.trigger);
   if (err) return { ok: false, error: err };
+  // Same guard as boot: re-adding a spent one-off under its old id is a resurrection, not an
+  // edit. A genuinely new job gets a new id.
+  const ranBefore = oneShotAlreadyRan(s);
+  if (ranBefore) return { ok: false, error: `This one-off schedule already ran — ${ranBefore}. Create a new schedule instead of re-adding this one.` };
   if (s.onMissed !== undefined && !MISSED_POLICIES.includes(s.onMissed)) {
     return { ok: false, error: `Invalid onMissed "${s.onMissed}" (expected ${MISSED_POLICIES.join(' | ')})` };
   }
@@ -182,6 +208,7 @@ export function deleteSchedule(id: string): boolean {
   if (idx < 0) return false;
   state.schedules.splice(idx, 1);
   state.queues.delete(id);
+  clearRearm(id);
   const ac = state.running.get(id);
   if (ac) ac.abort();
   saveSchedules(state.schedules);
@@ -205,6 +232,8 @@ export function toggleSchedule(id: string, enabled: boolean): Schedule | null {
     }
   } else {
     s.nextRun = undefined;
+    // A disabled schedule must not come back to life via a pending retry.
+    clearRearm(id);
   }
   saveSchedules(state.schedules);
   replan();
@@ -348,6 +377,31 @@ export function resumeRun(scheduleId: string, sessionId: string, prompt: string)
 
 // ── Internals ───────────────────────────────────────────────────────────────
 
+/**
+ * Evidence that a `once` schedule has ALREADY had its single run — i.e. this entry is a
+ * resurrection of one the engine deleted on success, not a new job. Returns a human-readable
+ * reason, or null when the schedule is not a spent one-off.
+ *
+ * Two independent witnesses, because neither survives everything:
+ *  - the completion marker (data/scheduler/completions/<id>.json), which is per-id, gitignored
+ *    and local to the firing instance — so a git merge can never carry it away, but a rebuilt
+ *    data dir loses it;
+ *  - the entry's own `lastRun.status === 'ok'`, which travels inside schedules.json — so it
+ *    survives a wiped data dir, but only if the resurrected copy is from after that run.
+ */
+function oneShotAlreadyRan(s: Schedule): string | null {
+  if (s.trigger.kind !== 'once') return null;
+  const marker = readCompletionMarker(s.id);
+  // `completedAt` is the last SUCCESSFUL completion, and 0 when there has never been one. A
+  // marker is also written at fire time (`markRunStarted`) and on failure
+  // (`recordAttemptOutcome`), so its mere existence proves only an attempt. A future-dated
+  // one-off whose manual test-run errored has a marker but has never sent — retiring it would
+  // cancel a send that never happened, and report it as completed at epoch 0.
+  if (marker && marker.completedAt > 0) return `it completed at ${new Date(marker.completedAt).toISOString()} (${marker.triggeredBy})`;
+  if (s.lastRun?.status === 'ok') return `its own lastRun records a successful run at ${new Date(s.lastRun.at).toISOString()}`;
+  return null;
+}
+
 const MISSED_POLICIES: MissedPolicy[] = ['run', 'skip', 'offer'];
 
 function refuse(reason: RunRefusal, message: string): RunOutcome {
@@ -428,6 +482,75 @@ function judgeMissed(s: Schedule, window: number, now: number = Date.now()): Mis
   return { replay: true };
 }
 
+/** Backoff between re-arms of a side-effect-free failed window. Deliberately minutes, not the
+ *  sub-second ladder the in-process retry uses: that one exists for a flaky engine, this one for an
+ *  outage — a capped API key or a dead upstream is not coming back in 2 seconds. The last entry
+ *  repeats; the real bound is the staleness ceiling, which stops replay well before the ladder does.
+ *  Read per call (like `catchupDelayMs`) so tests — and an operator — can shorten it. */
+const rearmBackoffMs = (): number[] => {
+  const override = process.env.SCHEDULER_REARM_BACKOFF_MS;
+  if (!override) return [5 * 60_000, 15 * 60_000, 30 * 60_000, 60 * 60_000];
+  const parsed = override.split(',').map((v) => Number(v.trim())).filter((v) => Number.isFinite(v) && v >= 0);
+  return parsed.length ? parsed : [5 * 60_000];
+};
+
+/** Cancel any pending re-arm for a schedule (disabled, deleted, or superseded by a newer window). */
+function clearRearm(id: string): void {
+  const pending = state.retries.get(id);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  state.retries.delete(id);
+}
+
+/**
+ * Re-arm a window whose run failed before producing any output. Returns true when a retry is
+ * pending — the caller must then NOT record an attempt outcome, because an attempt marker is
+ * exactly what makes the window un-replayable.
+ *
+ * Refuses (returns false, caller falls through to the normal failure path) when the retry would
+ * land outside what `judgeMissed` permits: past the staleness ceiling, or against an explicit
+ * `onMissed` of `skip`/`offer`. Those are standing instructions about unattended replay and this
+ * is unattended replay, so it answers to them rather than routing around them.
+ */
+function rearmWindow(s: Schedule, window: number): boolean {
+  if (!schedulerActive) return false;
+  const live = getSchedule(s.id);
+  if (!live?.enabled) return false;
+
+  const pending = state.retries.get(s.id);
+  const attempt = pending?.window === window ? pending.attempt + 1 : 1;
+  clearRearm(s.id);
+
+  const ladder = rearmBackoffMs();
+  const delay = ladder[Math.min(attempt - 1, ladder.length - 1)]!;
+  // Judge the window as of WHEN THE RETRY WOULD FIRE, not now — arming a timer that is already
+  // doomed to be refused just burns the ceiling in silence.
+  const verdict = judgeMissed(live, window, Date.now() + delay);
+  if (!verdict.replay) {
+    console.log(`[scheduler] not re-arming ${s.id} — ${verdict.message}`);
+    if (verdict.reason !== 'skip') noteMissed(live, window, verdict.reason);
+    return false;
+  }
+
+  // The at-start marker already stamped this window as attempted; that stamp is what would make
+  // the replay a no-op, so drop it. Nothing else about the marker moves.
+  releaseAttemptWindow(s.id, window);
+  console.warn(`[scheduler] ${s.id} failed before producing any output — re-arming window ${new Date(window).toISOString()} in ${Math.round(delay / 60_000)}m (retry ${attempt})`);
+  const timer = setTimeout(() => {
+    // Deliberately NOT deleting the entry: it carries the attempt count, and the retry we are
+    // about to fire may fail again. Dropping it here would restart the ladder at 5m on every
+    // round — a fixed 5m poll wearing the shape of a backoff. It is cleared on success, on a
+    // superseding window, and on disable/delete.
+    const cur = getSchedule(s.id);
+    if (!cur?.enabled) return;
+    console.log(`[scheduler] retrying window ${new Date(window).toISOString()} for ${s.id}`);
+    enqueueFire(cur, window);
+  }, delay);
+  timer.unref?.();
+  state.retries.set(s.id, { timer, window, attempt });
+  return true;
+}
+
 function noteMissed(s: Schedule, at: number, reason: 'skip' | 'offer' | 'stale'): void {
   s.missedRun = { at, reason, noticedAt: Date.now() };
   saveSchedules(state.schedules);
@@ -497,6 +620,13 @@ function fireDue(): void {
 }
 
 function enqueueFire(s: Schedule, firedAt: number, override?: string, manual = false, eventCtx?: EventContext): RunOutcome {
+  // A newer window supersedes a pending retry of an older one: today's 08:00 report is the job,
+  // not yesterday's. Retrying both would double-post.
+  const pendingRetry = state.retries.get(s.id);
+  if (pendingRetry && firedAt > pendingRetry.window) {
+    console.log(`[scheduler] dropping pending retry of ${new Date(pendingRetry.window).toISOString()} for ${s.id} — superseded by a newer window`);
+    clearRearm(s.id);
+  }
   // Skip if this cron period was already completed/attempted. Manual runs (runNow from UI/API)
   // always proceed past the period guard — but never past the run lock in startRun().
   if (!manual && s.trigger.kind === 'cron') {
@@ -588,12 +718,21 @@ function startRun(s: Schedule, firedAt: number, override?: string, resume?: Resu
         saveSchedules(state.schedules);
         state.broadcast({ type: 'schedule:updated', schedule: live });
       }
+      // A run that failed WITHOUT producing anything has not spent its window: the work provably
+      // never started, so re-running cannot double-apply a side effect. Re-arm instead of burning
+      // the window — otherwise a multi-hour upstream outage (an API spend cap, a dead engine)
+      // silently costs the day's run, which is exactly how a morning report goes missing with
+      // every marker reading "attempted". Recording the attempt is deferred to the give-up path,
+      // because an attempt marker is precisely what blocks the replay we want.
+      if (summary.status === 'error' && summary.sideEffectFree && rearmWindow(s, firedAt)) return;
       if (summary.status !== 'ok') {
         // Keep the attempt on record with its real outcome — the next boot must see that this
         // window was tried and failed, not that it never ran.
         recordAttemptOutcome(s.id, firedAt, summary.at, summary.status === 'running' ? 'started' : summary.status);
       }
       if (summary.status === 'ok') {
+        // The window landed — drop any retry bookkeeping so the next failure starts a fresh ladder.
+        clearRearm(s.id);
         writeCompletionMarker({ completedAt: summary.at, triggeredBy: 'scheduler', scheduleId: s.id, lastAttemptAt: summary.at, attemptWindow: firedAt, status: 'ok' });
         if (live && live.trigger.kind === 'once') {
           console.log(`[scheduler] auto-deleting completed once-schedule ${s.id}`);

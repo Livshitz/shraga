@@ -193,6 +193,7 @@ export async function runSchedule(
 
   let status: ScheduleRunSummary['status'] = 'ok';
   let error: string | undefined;
+  let sideEffectFree = false;
 
   // A `bash` task is not exec'd — it's handed to the agent as a prompt, so the command's exit code
   // reaches nobody: the agent reports the failure in prose, its own turn succeeds, the run is stored
@@ -280,6 +281,10 @@ export async function runSchedule(
       // `tool_use_input`, `tool_result_image`, `permission_request` and `question_request` need no
       // separate flag: each is necessarily preceded by the `tool_use` that already set the boundary.
       const producedOutput = assistantBlocks.length > 0 || assistantText.length > 0 || producedThinking;
+      // Carry the boundary out to the summary. The in-process ladder is tuned for a flaky engine
+      // (sub-second backoff); an outage measured in hours outlives it, and the engine needs to know
+      // whether the window is still safely replayable once this run gives up.
+      sideEffectFree = !producedOutput;
       if (producedOutput || abortController.signal.aborted || attempt >= MAX_ATTEMPTS) {
         // Nobody watches stderr on a scheduled run — record the failure in the transcript.
         if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
@@ -317,7 +322,7 @@ export async function runSchedule(
   const preview = assistantText.slice(0, 120) || (status === 'ok' ? 'Schedule completed' : `Schedule ${status}`);
   addUnread(schedule.createdBy.uid, sessionId, preview, 'schedule', schedule.name);
 
-  const summary: ScheduleRunSummary = { at: now, sessionId, status, error };
+  const summary: ScheduleRunSummary = { at: now, sessionId, status, error, sideEffectFree: status === 'error' ? sideEffectFree : undefined };
   onEvent({ type: 'schedule:run_finished', scheduleId: schedule.id, sessionId, summary });
   return summary;
 }

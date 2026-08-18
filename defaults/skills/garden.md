@@ -14,10 +14,15 @@ You are performing structural maintenance on the workspace knowledge base — de
 
 ## Mode check — do this FIRST, before Phase 1
 
-Read `selfImprovement` from `data/agent-config.json` and honor it. Garden only ever edits **team-scope** files — `context.md`, `knowledge/*.md`, `marketing/*.md` — so a single key, `selfImprovement.teamKnowledge`, governs the whole run.
+Two independent settings can put this run in **auto** mode. Read both before Phase 1:
 
-- **`"auto"`** — run Phase 1 → 2 → 3 → **4 (apply)**, then DM a **past-tense** report of what was *done*. Still write the full report file first: it is the audit trail and the revert map. Always include the revert commit SHA in the DM.
-- **`"approval"`** (default) — propose only. Write the report, send the DM with numbered proposals, and stop.
+1. `selfImprovement.teamKnowledge` in `data/agent-config.json` — garden only ever edits **team-scope** files (`context.md`, `knowledge/*.md`, `marketing/*.md`), so this single key governs the whole run.
+2. `autoApply` in `data/workspace/preferences/garden.json` — the owner's standing instruction for garden specifically.
+
+**Either one set to auto puts the run in `auto` mode** (`teamKnowledge: "auto"`, or `{"autoApply": true}`). If neither is set, the mode is **`approval`** — the default.
+
+- **`auto`** — run Phase 1 → 2 → 3 → **4 (apply)**, then DM a **past-tense** report of what was *done*. Still write the full report file first: it is the audit trail and the revert map. Always include the revert commit SHA in the DM.
+- **`approval`** — propose only. Write the report, send the DM with numbered proposals, and stop.
 
 ### Escalation exception — applies in `auto` too
 
@@ -28,6 +33,7 @@ Read `selfImprovement` from `data/agent-config.json` and honor it. Garden only e
 - **Touches a live status claim** — fundraising figures, campaign performance reads, open incident status — rather than structure.
 - Is a **large refactor** (splitting a 250+ line file, restructuring the knowledge index wholesale).
 - Is **security-related**, or touches auth/permissions/credentials, or lives in `users/{id}/`.
+- Carries **`Risk: medium` or `Risk: high`** in the report. Only `none`/`low` auto-applies.
 
 The bar: *"would a reasonable person be annoyed if I did this without asking?"* No → do it and report. Yes → ask. Routine dedup / compress / cross-ref / stale-collapse / new-facts is always "do it".
 
@@ -152,7 +158,7 @@ The full report is the audit trail. Raw agent reports let you verify the diagnos
 
 ### Send Slack DM to owners
 
-Send a DM to each owner (from `<known_contacts>` with Slack IDs) using `post_slack_message`.
+Send a DM to each owner (from `<known_contacts>` with Slack IDs) using `post_slack_message`, worded per the mode resolved at the top of this skill.
 
 **In `approval` mode**, send the proposal DM:
 
@@ -173,7 +179,6 @@ Full audit trail: data/workspace/garden-reports/{date}.md
    Diff: -{removed summary} +{added summary}
 
 Skipped {N} lower-priority findings (see report).
-Reply with numbers to approve (e.g. "1,3") or "all".
 ```
 
 **In `approval` mode: STOP here. Do not apply changes. Wait for user approval.**
@@ -199,7 +204,7 @@ Skipped {N} lower-priority findings (see report).
 In `auto` mode, apply the proposed changes straight after writing the report. In `approval` mode, apply when the user replies with numbers (e.g. "1,3") or "all":
 
 1. Load the report from `data/workspace/garden-reports/{date}.md`
-2. Apply the changes using Edit tool — in `auto` mode all of them except anything hitting the escalation exception; in `approval` mode only the approved ones
+2. Apply the changes using Edit tool — in `auto` mode all of them except anything hitting the escalation exception (which includes anything `Risk: medium`/`high`); in `approval` mode only the approved ones
 3. Commit:
 
 ```bash
