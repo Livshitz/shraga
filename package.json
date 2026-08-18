@@ -70,7 +70,7 @@
     "express": "^4.21.1",
     "firebase": "^11.0.0",
     "lucide-react": "^0.468.0",
-    "mcp-slack-use": "github:Livshitz/mcp-slack-use#1dde291",
+    "mcp-slack-use": "github:Livshitz/mcp-slack-use#38ff8b7",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^9.0.0",

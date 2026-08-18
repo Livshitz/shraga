@@ -19,6 +19,7 @@ const IMMUTABLE_SYSTEM_PROMPT = readFileSync(path.resolve(import.meta.dirname, '
 const DEFAULT_USER_PROMPT = `You are a helpful assistant with access to MCP tools.`;
 const DEFAULT_ALLOWED_TOOLS = ['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch'];
 const BG_TASK_MAX_WAIT_MS = 15 * 60_000;
+const BG_HEARTBEAT_MS = 60_000;
 const HISTORY_LIMIT = 50;
 
 const NO_INTERACTIVE_ANSWER = 'No interactive channel is available to answer right now. Use your best judgement to proceed, and surface these options to the user in your reply so they can redirect if needed.';
@@ -313,7 +314,8 @@ export class ClaudeCodeEngine implements AgentEngine {
     let waitingForBg = false;
     let bgTimer: Promise<'__bgtimeout'> | null = null;
     let bgTimerHandle: ReturnType<typeof setTimeout> | null = null;
-    const clearBgTimer = () => { if (bgTimerHandle) { clearTimeout(bgTimerHandle); bgTimerHandle = null; } bgTimer = null; };
+    let bgHeartbeat: ReturnType<typeof setInterval> | null = null;
+    const clearBgTimer = () => { if (bgTimerHandle) { clearTimeout(bgTimerHandle); bgTimerHandle = null; } bgTimer = null; if (bgHeartbeat) { clearInterval(bgHeartbeat); bgHeartbeat = null; } };
 
     try {
       while (true) {
@@ -395,7 +397,14 @@ export class ClaudeCodeEngine implements AgentEngine {
           console.log(`[claude] Result: subtype=${m.subtype}→${sub} session=${lastSessionId} turns=${sdkTurns}/${maxTurns} cost=$${m.total_cost_usd?.toFixed(4) ?? '?'} msgs=${messageCount} deltas=${textDeltaCount} (${elapsed()})`);
           logCacheUsage(m.usage, activeModel);
           if (outstandingTasks.size > 0) {
-            if (!waitingForBg) { waitingForBg = true; clearBgTimer(); console.log(`[claude] Holding stream for ${outstandingTasks.size} bg tasks (${elapsed()})`); }
+            if (!waitingForBg) {
+              waitingForBg = true; clearBgTimer();
+              console.log(`[claude] Holding stream for ${outstandingTasks.size} bg tasks (${elapsed()})`);
+              // The hold is invisible to the user (their next message queues behind it), so beat
+              // every minute — otherwise a stuck task reads as a dead agent with nothing in the log.
+              bgHeartbeat = setInterval(() => console.log(`[claude] Still holding for ${outstandingTasks.size} bg task(s): ${[...outstandingTasks].join(',')} (${elapsed()})`), BG_HEARTBEAT_MS);
+              bgHeartbeat.unref?.();
+            }
             continue;
           }
           // The SDK reports `subtype: 'success'` even when the API call failed (e.g. an org spend
