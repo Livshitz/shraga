@@ -323,7 +323,7 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
         abortController,
         context: triggerContext,
         onPermissionRequest: async () => ({ allow: true }),
-        onUserQuestion: makeSlackQuestionHandler({ channel, threadTs, useUserToken }),
+        onUserQuestion: makeSlackQuestionHandler({ channel, threadTs, useUserToken, cut: () => msg.cut?.() ?? Promise.resolve() }),
       }),
       sessionId,
       { partial: true, artifacts: true },
@@ -369,8 +369,9 @@ export async function retrySlackSession(session: SessionMeta, prompt: string): P
   if (threadTs) recoveryContext.thread = threadTs;
 
   try {
+    const handle: { cut?: () => Promise<void> } = {};
     const replyTs = await pipeAgentReply(
-      { channel, threadTs, useUserToken, transform: undefined, finalTransform: resolveUserMentions },
+      { channel, threadTs, useUserToken, transform: undefined, finalTransform: resolveUserMentions, handle },
       pumpStream(
         streamChat({
           prompt,
@@ -382,7 +383,7 @@ export async function retrySlackSession(session: SessionMeta, prompt: string): P
           abortController: recoveryAc,
           context: recoveryContext,
           onPermissionRequest: async () => ({ allow: true }),
-          onUserQuestion: makeSlackQuestionHandler({ channel, threadTs, useUserToken }),
+          onUserQuestion: makeSlackQuestionHandler({ channel, threadTs, useUserToken, cut: () => handle.cut?.() ?? Promise.resolve() }),
         }),
         session.sessionId,
         { partial: false, artifacts: false },
