@@ -16,3 +16,25 @@ describe('scheduler task.model → [model] directive', () => {
     expect(directives.model).toBe('claude-haiku-4-5-20251001');
   });
 });
+
+// A schedule prompt may already open with its own [turns:N] group when runner.ts prepends
+// `[model] `. Both groups must survive — the single-group parse dropped the second silently
+// and downgraded the pinned model to the config default (feedox social runs, 08-17..08-19).
+describe('stacked directive groups', () => {
+  test('[turns:120][opus] keeps both', () => {
+    const { prompt, directives } = parseDirectives('[turns:120][opus] Run the routine.');
+    expect(directives.model).toBe('claude-opus-5');
+    expect(directives.turns).toBe(120);
+    expect(prompt).toBe('Run the routine.');
+  });
+  test('[opus] [turns:120] (runner prepend shape) keeps both', () => {
+    const { directives } = parseDirectives('[opus] [turns:120] Run the routine.');
+    expect(directives.model).toBe('claude-opus-5');
+    expect(directives.turns).toBe(120);
+  });
+  test('non-directive bracket text is left in the prompt', () => {
+    const { prompt, directives } = parseDirectives("[opus] [WARN] disk full");
+    expect(directives.model).toBe('claude-opus-5');
+    expect(prompt).toBe('[WARN] disk full');
+  });
+});
