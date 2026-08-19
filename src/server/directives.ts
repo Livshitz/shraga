@@ -23,12 +23,42 @@ import { MODEL_ALIASES } from './model-aliases.ts';
 
 const DIRECTIVE_RE = /^\s*\[([^\]]*)\]\s*([\s\S]*)/;
 
-export function parseDirectives(text: string): ParsedPrompt {
-  const match = text.match(DIRECTIVE_RE);
-  if (!match) return { prompt: text, directives: {} };
+const DIRECTIVE_KEYS = ['model', 'turns', 'thinking', 'think', 'effort', 'engine'];
 
-  const raw = match[1].trim();
-  const prompt = match[2].trim();
+/** Does a bracket group look like directives (vs. prompt text that happens to start with `[`)?
+ * Every token must be a known key:value or a known positional, else we leave the group alone. */
+function isDirectiveGroup(raw: string): boolean {
+  const tokens = raw.split(',').map((t) => t.trim()).filter(Boolean);
+  if (!tokens.length) return false;
+  return tokens.every((t) => {
+    const colonIdx = t.indexOf(':');
+    if (colonIdx !== -1) return DIRECTIVE_KEYS.includes(t.slice(0, colonIdx).trim().toLowerCase());
+    const v = t.toLowerCase();
+    return !!MODEL_ALIASES[v] || /^\d+$/.test(v) || ['think', 'adaptive', 'nothink', 'nothinking'].includes(v);
+  });
+}
+
+export function parseDirectives(text: string): ParsedPrompt {
+  // Consume EVERY consecutive leading [..] group, not just the first. runner.ts prepends
+  // `[model] ` onto prompts that may already open with `[turns:120]`, so a single-group parse
+  // silently dropped the second — a schedule pinned to opus quietly ran on the config default
+  // for three days. Groups that don't parse as directives are left as prompt text.
+  let rest = text;
+  const groups: string[] = [];
+  for (;;) {
+    const m = rest.match(DIRECTIVE_RE);
+    if (!m) break;
+    const g = m[1].trim();
+    // The first group is always consumed (long-standing contract: `[unknown] hi` strips and warns).
+    // Later groups must actually look like directives, so prompt text such as `[WARN] …` survives.
+    if (groups.length && g && !isDirectiveGroup(g)) break;
+    groups.push(g);
+    rest = m[2];
+  }
+  if (!groups.length) return { prompt: text, directives: {} };
+
+  const raw = groups.filter(Boolean).join(',');
+  const prompt = rest.trim();
   if (!raw) return { prompt, directives: {} };
 
   const directives: Directives = {};
