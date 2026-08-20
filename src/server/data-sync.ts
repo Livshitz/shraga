@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { hostname } from 'node:os';
 import { DATA_DIR } from './paths.ts';
 import { emitEvent } from './events/bus.ts';
 import { runTextQuery } from './sdk-utils.ts';
@@ -18,6 +19,15 @@ export class DataSyncOptions {
    * A real deployment must ALSO set DATA_SYNC_ENABLE=1. Dev/verify boots never sync/push.
    */
   enabled = process.env.DATA_SYNC_ENABLE === '1' || process.env.DATA_SYNC_ENABLE === 'true';
+  /**
+   * Owner-facing alerts are a PROD side effect, so only the designated single-writer instance
+   * (the same one that fires schedules) may DM owners. A dev laptop legitimately syncs the shared
+   * data repo, but it also shares .env's APP_NAME, OWNERS and the Slack bot token — so its alerts
+   * are indistinguishable from the box's. Past incident 2026-08-20: a laptop pinned to an older
+   * shraga re-sent a merge-conflict alert for a bug already fixed AND deployed on the box, and the
+   * DM gave no way to tell which instance sent it. Suppressed alerts are still logged locally.
+   */
+  notify = process.env.DATA_SYNC_SCHEDULER_ACTIVE === 'true';
 }
 
 export class DataSync {
@@ -550,6 +560,12 @@ export class DataSync {
   }
 
   private async notifyOwners(text: string): Promise<void> {
+    if (!this.options.notify) {
+      // Not the authoritative instance — log it so a dev run still surfaces the problem locally,
+      // but never DM owners (see DataSyncOptions.notify).
+      console.warn(`${TAG} notification suppressed (not the authoritative instance):\n${text}`);
+      return;
+    }
     // No Slack coupling here — resolve owner contacts and publish a deploy notice on the event bus.
     // The Slack feature (slackFeature) subscribes and DMs each owner. Owner resolution uses the
     // contacts store only, so data-sync stays transport-agnostic.
@@ -562,7 +578,10 @@ export class DataSync {
       console.warn(`${TAG} No owners (OWNERS env) with Slack IDs found, skipping notification`);
       return;
     }
-    emitEvent('data-sync', { kind: 'deploy', owners, text });
+    // Stamp the sender: every owner alert must name the instance it came from, so "is this back?"
+    // is answerable without log archaeology across hosts.
+    const from = `${this.options.deploymentId || 'shraga'}@${hostname()}`;
+    emitEvent('data-sync', { kind: 'deploy', owners, text: `${text}\n\n_from ${from}_` });
   }
 
   /**
