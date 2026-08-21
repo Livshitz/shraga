@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { hostname } from 'node:os';
 import { DATA_DIR } from './paths.ts';
@@ -116,10 +117,12 @@ export class DataSync {
     // Defer heavy sync I/O (reads all tracked files + execSync) to avoid blocking
     // WS connections and page loads during startup.
     setTimeout(() => {
-      this.scanForConflictMarkers().catch(err => {
-        console.warn(`${TAG} Post-init conflict scan failed:`, (err as Error).message);
-      });
-      this.runIntegrityAudit();
+      this.scanForConflictMarkers()
+        .catch(err => console.warn(`${TAG} Post-init conflict scan failed:`, (err as Error).message))
+        // execSync inside the audit blocks too — keep it off the scan's tick so the two
+        // never add up into one long freeze.
+        .then(() => new Promise<void>(r => setImmediate(r)))
+        .then(() => this.runIntegrityAudit());
     }, 60_000);
   }
 
@@ -442,13 +445,20 @@ export class DataSync {
     try {
       const tracked = (await this.git('ls-files')).split('\n').filter(Boolean);
       const conflicted: string[] = [];
-      for (const f of tracked) {
-        const abs = path.join(DATA_DIR, f);
+      // ASYNC + YIELDING on purpose. This walks every tracked file (1000+, GBs on a real
+      // deployment); doing it synchronously froze the event loop for ~45s — the server stopped
+      // answering /api/version entirely, which also made self-upgrade verification fail and
+      // auto-revert healthy versions. Deferring a synchronous freeze only moves it; it has to
+      // not block at all.
+      for (let i = 0; i < tracked.length; i++) {
+        const abs = path.join(DATA_DIR, tracked[i]);
         try {
-          if (!existsSync(abs) || statSync(abs).isDirectory()) continue;
-          const content = readFileSync(abs, 'utf-8');
-          if (/^<{7} /m.test(content)) conflicted.push(f);
+          const info = await stat(abs).catch(() => null);
+          if (!info || info.isDirectory()) continue;
+          const content = await readFile(abs, 'utf-8');
+          if (/^<{7} /m.test(content)) conflicted.push(tracked[i]);
         } catch { /* skip unreadable */ }
+        if (i % 25 === 24) await new Promise<void>(r => setImmediate(r)); // let the server breathe
       }
       if (!conflicted.length) return;
 
