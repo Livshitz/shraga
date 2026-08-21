@@ -100,6 +100,9 @@ curl -s -H "$AUTH" -H 'content-type: application/json' \
   therefore refused by design: this cannot fire unattended.
 - **Check `blockers` first and relay them.** A source checkout (upgrade with git instead) and a
   local dev symlink at `node_modules/shraga` are both refused on purpose — do not work around either.
+- **A scheduled job mid-run also blocks it.** The restart would kill that run (SIGTERM/143), so the
+  default is to wait for idle. Say so and offer to retry shortly; only send `{"force":true}` if the
+  owner, told what is running, asks for it anyway.
 - **202 means started, not succeeded.** The upgrade restarts the server, so the POST cannot report
   the outcome. A detached supervisor installs, restarts, waits for `/api/version` to report the new
   version, soaks it, and **reverts to the previous version automatically** if it doesn't hold.
