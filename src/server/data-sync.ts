@@ -1,9 +1,8 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { hostname } from 'node:os';
 import { DATA_DIR } from './paths.ts';
-import { emitEvent } from './events/bus.ts';
+import { notifyOwners } from './notify-owners.ts';
 import { runTextQuery } from './sdk-utils.ts';
 
 const TAG = '[data-sync]';
@@ -576,23 +575,9 @@ export class DataSync {
       console.warn(`${TAG} notification suppressed (not the authoritative instance):\n${text}`);
       return;
     }
-    // No Slack coupling here — resolve owner contacts and publish a deploy notice on the event bus.
-    // The Slack feature (slackFeature) subscribes and DMs each owner. Owner resolution uses the
-    // contacts store only, so data-sync stays transport-agnostic.
-    const { getAll } = await import('./contacts.ts');
-    const ownerEmails = (process.env.OWNERS ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-    const owners = getAll()
-      .filter(c => c.slackIds.length > 0 && c.emails.some(e => ownerEmails.includes(e.toLowerCase())))
-      .map(c => ({ name: c.name, slackId: c.slackIds[0] }));
-    if (!owners.length) {
-      console.warn(`${TAG} No owners (OWNERS env) with Slack IDs found, skipping notification`);
-      return;
-    }
-    // Stamp the sender: every owner alert must name the instance it came from, so "is this back?"
-    // is answerable without log archaeology across hosts.
-    const from = `${this.options.deploymentId || 'shraga'}@${hostname()}`;
-    emitEvent('data-sync', { kind: 'deploy', owners, text: `${text}\n\n_from ${from}_` });
+    await notifyOwners('data-sync', text);
   }
+
 
   /**
    * Routed through the Claude Code SDK (runTextQuery), same as the rest of the platform —

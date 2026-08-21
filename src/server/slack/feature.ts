@@ -25,11 +25,12 @@ export const slackFeature: ServerFeature = {
 
     if (!oauthMounted) { oauthMounted = true; registerSlackOAuthRoutes(ctx.app); }
 
-    // Data-sync deploy notices arrive on the event bus (data-sync.ts has no Slack coupling); DM owners.
+    // Owner notices arrive on the event bus (see notify-owners.ts — no subsystem couples to Slack);
+    // DM owners. Keyed on the notice KIND, not the source: self-upgrade emitted its outcome under
+    // its own source and a source-gated subscriber silently dropped every one of them.
     if (!ctx.passive && !busSubscribed) {
       busSubscribed = true;
       subscribeEvents((evt) => {
-        if (evt.source !== 'data-sync') return;
         const payload = evt.payload as DeployNotice;
         if (payload?.kind !== 'deploy' || !payload.owners?.length) return;
         for (const owner of payload.owners) {

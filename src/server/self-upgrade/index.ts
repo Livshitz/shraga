@@ -14,6 +14,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { APP_ROOT, PACKAGE_ROOT, dataPath } from '../paths.ts';
 import { emitEvent } from '../events/bus.ts';
+import { notifyOwners } from '../notify-owners.ts';
 
 const TAG = '[self-upgrade]';
 const PKG = 'shraga';
@@ -191,6 +192,12 @@ export class SelfUpgrade {
 
     console.log(`${TAG} ${report.status}: ${report.detail}`);
     emitEvent('self-upgrade.finished', report);
+    // ...and actually tell a human. The event alone reached nobody: no subscriber existed, so every
+    // upgrade outcome — including `revert-failed`, which needs hands — was silently dropped.
+    const icon = report.status === 'ok' ? '✅' : report.status === 'reverted' ? '↩️' : '🚨';
+    notifyOwners('self-upgrade', `${icon} Self-upgrade ${report.status}: ${report.detail}\n\n` +
+      `${report.package} ${report.from} → ${report.target} (now on ${report.installed})\nLog: \`${report.log}\``)
+      .catch(err => console.warn(`${TAG} could not notify owners:`, (err as Error).message));
     return report;
   }
 
