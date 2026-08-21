@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, afterAll, beforeEach, mock } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach, mock } from 'bun:test';
 import { spawnSync, spawn } from 'node:child_process';
 import { writeFileSync, rmSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -19,6 +19,8 @@ let nextStatus: ScheduleRunSummary['status'] = 'ok';
 /** When true the stubbed run reports the side-effect-free boundary the engine re-arms on. */
 let nextSideEffectFree = false;
 /** How long a stubbed run stays in flight. */
+// Scaled like every other timing knob: a stubbed run that stays 5ms while the waits around it
+// stretch 4x is no longer 'in flight' when the test looks — a fixture bug, not a race.
 let runMs = 5;
 /** When set, the next stubbed run REJECTS instead of resolving — the unexpected-throw path. */
 let throwNext = false;
@@ -63,7 +65,7 @@ beforeAll(async () => {
   // scheduler is INACTIVE) aren't affected by us.
   for (const k of ['DATA_SYNC_SCHEDULER_ACTIVE', 'SCHEDULER_CATCHUP_DELAY_MS', 'SCHEDULER_MAX_MISSED_AGE_MS', 'SCHEDULER_REARM_BACKOFF_MS']) savedEnv[k] = process.env[k];
   process.env.DATA_SYNC_SCHEDULER_ACTIVE = 'true';
-  process.env.SCHEDULER_CATCHUP_DELAY_MS = '30';
+  process.env.SCHEDULER_CATCHUP_DELAY_MS = knobMs(30);
   // NOTE: SCHEDULER_MAX_MISSED_AGE_MS is deliberately NOT set — every test below runs against the
   // shipped 6h default. Fixtures use an hourly cron so their missed window is at most 60m old
   // whatever time of day the suite runs, and the incident tests build their window explicitly.
@@ -79,7 +81,27 @@ afterAll(() => {
 });
 
 const DAY = 24 * 60 * 60 * 1000;
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// These tests drive REAL timers, so every wait is a race against the machine they run on. Two
+// levers keep that honest instead of flaky:
+//  - SCHED_TEST_SCALE stretches BOTH the waits and the scheduler's own delay knobs by the same
+//    factor, so a loaded runner (CI) gets proportionally more room without changing any ratio.
+//  - waitFor() replaces "sleep long enough, then assert it happened" — a slow machine simply
+//    waits longer instead of failing. Fixed sleeps remain ONLY where the assertion is that
+//    something did NOT happen, which genuinely needs a fixed observation window.
+const SCALE = Math.max(1, Number(process.env.SCHED_TEST_SCALE || 1));
+const knobMs = (base: number) => String(base * SCALE);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms * SCALE));
+
+/** Poll until `pred` holds. Fails with `label` rather than a bare assertion mismatch. */
+async function waitFor(pred: () => boolean, label: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs * SCALE;
+  while (Date.now() < deadline) {
+    if (pred()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`timed out after ${timeoutMs * SCALE}ms waiting for: ${label}`);
+}
 
 let n = 0;
 function makeSchedule(over: Partial<Schedule> = {}): Schedule {
@@ -141,7 +163,7 @@ beforeEach(() => {
   nextStatus = 'ok';
   nextSideEffectFree = false;
   throwNext = false;
-  runMs = 5;
+  runMs = 5 * SCALE;
   peakConcurrent = 0;
   inFlight = 0;
 });
@@ -184,7 +206,8 @@ describe('scheduler run lock', () => {
     expect(engine.runNow(s.id).ok).toBe(true);
     const second = engine.runNow(s.id);
     expect(second).toEqual({ ok: true, sessionId: null, queued: true });   // accepted, deferred
-    await sleep(80);
+    await waitFor(() => started.length === 2 && lockFor(s.id) === null,
+      'both runs to complete, one after the other');
     expect(started).toHaveLength(2);
     expect(peakConcurrent).toBe(1);
     expect(lockFor(s.id)).toBeNull();
@@ -201,7 +224,7 @@ describe('catch-up vs in-place resume', () => {
 
     // The resumed run is STILL IN FLIGHT when the catch-up timer fires, so what suppresses the
     // catch-up here is the run lock itself, not the completion marker.
-    runMs = 200;
+    runMs = 200 * SCALE;
     boot([s]);                                  // schedules the catch-up (30ms)
     engine.resumeRun(s.id, 'sched-old', 'continue where you left off'); // recovery wins the race
     await sleep(400);                           // let the catch-up timer fire and settle
@@ -692,7 +715,7 @@ describe('boot ordering: recovery vs the catch-up timer', () => {
   test('recovery lands BEFORE the catch-up timer — the interrupted session is resumed', async () => {
     const s = makeSchedule();
     seedCrashState(s);
-    runMs = 200;                                     // still in flight when catch-up fires
+    runMs = 200 * SCALE;                                     // still in flight when catch-up fires
     boot([s]);
     engine.resumeRun(s.id, 'sched-crashed', 'continue');
     await sleep(400);
@@ -710,7 +733,7 @@ describe('boot ordering: recovery vs the catch-up timer', () => {
     expect(started).toHaveLength(0);
 
     expect(engine.resumeRun(s.id, 'sched-crashed', 'continue').ok).toBe(true);
-    await sleep(60);
+    await waitFor(() => started.length === 1 && lockFor(s.id) === null, 'the resumed run to finish');
     expect(started).toHaveLength(1);
     expect(started[0]!.resumed).toBe(true);
   });
@@ -719,7 +742,8 @@ describe('boot ordering: recovery vs the catch-up timer', () => {
     const s = makeSchedule();
     seedCrashState(s, { legacy: true });
     boot([s]);
-    await sleep(120);
+    await waitFor(() => started.length === 1 && lockFor(s.id) === null,
+      'catch-up to cover the interrupted window AND finish');
 
     expect(started).toHaveLength(1);
     expect(started[0]!.resumed).toBe(false);         // fresh run, not the interrupted session
@@ -810,7 +834,7 @@ describe('run lock age ceiling', () => {
 
 describe('an interrupted run keeps its session link', () => {
   test('lastRun.sessionId is persisted as soon as the run registers, not only on completion', async () => {
-    runMs = 300;
+    runMs = 300 * SCALE;
     const s = makeSchedule({ trigger: { kind: 'interval', everyMs: 60_000 } });
     storage.clearRunningMarker(s.id);
     boot([s]);
@@ -830,60 +854,62 @@ describe('an interrupted run keeps its session link', () => {
 // provably never started. The engine must keep the window replayable rather than burning it — the
 // incident this exists for is an API spend cap that lasted hours and cost a daily report.
 describe('failed-run re-arm (side-effect-free error)', () => {
+  // In beforeEach/afterEach, NOT inline: a test that failed before its cleanup line used to leave
+  // the knob set for every sibling below it — one real failure became several.
+  beforeEach(() => { process.env.SCHEDULER_REARM_BACKOFF_MS = knobMs(20); });
+  afterEach(() => { delete process.env.SCHEDULER_REARM_BACKOFF_MS; });
+
   test('does NOT record an attempt marker — the window stays replayable', async () => {
-    process.env.SCHEDULER_REARM_BACKOFF_MS = '20';
     const s = makeSchedule();
     nextStatus = 'error';
     nextSideEffectFree = true;
     boot([s]);
     expect(engine.runNow(s.id).ok).toBe(true);
+    await waitFor(() => started.length >= 1 && lockFor(s.id) === null, 'the failing run to finish');
     await sleep(40);
     // An attempt marker is exactly what makes a window un-replayable — there must be none.
     expect(markerFor(s.id)?.attemptWindow).toBeUndefined();
-    delete process.env.SCHEDULER_REARM_BACKOFF_MS;
   });
 
   test('an error that DID produce output still burns the window (attempt recorded)', async () => {
     const s = makeSchedule();
+    delete process.env.SCHEDULER_REARM_BACKOFF_MS;   // this path must not re-arm at all
     nextStatus = 'error';
     nextSideEffectFree = false;
     boot([s]);
     expect(engine.runNow(s.id).ok).toBe(true);
-    await sleep(40);
+    await waitFor(() => markerFor(s.id)?.status === 'error', 'the failure to be recorded');
     expect(markerFor(s.id)?.status).toBe('error');
   });
 
   test('the retry actually re-fires the SAME window', async () => {
-    process.env.SCHEDULER_REARM_BACKOFF_MS = '20';
     const s = makeSchedule();
     nextStatus = 'error';
     nextSideEffectFree = true;
     boot([s]);
     engine.runNow(s.id);
-    await sleep(40);
+    await waitFor(() => started.length >= 1 && lockFor(s.id) === null, 'the first (failing) run to finish');
     const afterFirst = started.length;
     nextStatus = 'ok';           // upstream recovers
-    await sleep(120);
+    await waitFor(() => started.length > afterFirst, 'the re-armed retry to fire');
+    await waitFor(() => (markerFor(s.id)?.completedAt ?? 0) > 0, 'the window to complete');
     expect(started.length).toBeGreaterThan(afterFirst);
     // …and once it lands, the window is complete and nothing further is pending.
     expect(markerFor(s.id)?.completedAt).toBeGreaterThan(0);
-    delete process.env.SCHEDULER_REARM_BACKOFF_MS;
     await sleep(60);
   });
 
   test('onMissed=skip refuses the re-arm — an explicit standing instruction wins', async () => {
-    process.env.SCHEDULER_REARM_BACKOFF_MS = '20';
     const s = makeSchedule({ onMissed: 'skip' });
     nextStatus = 'error';
     nextSideEffectFree = true;
     boot([s]);
     engine.runNow(s.id);
-    await sleep(40);
+    await waitFor(() => started.length >= 1 && lockFor(s.id) === null, 'the failing run to finish');
     const afterFirst = started.length;
-    await sleep(120);
+    await sleep(120);                        // a fixed window: we assert nothing MORE happens
     expect(started.length).toBe(afterFirst); // never retried
     expect(markerFor(s.id)?.status).toBe('error'); // fell through to the normal failure path
-    delete process.env.SCHEDULER_REARM_BACKOFF_MS;
   });
 
   test('boot catch-up picks the window back up — the re-arm timer does not survive a restart', async () => {
@@ -895,7 +921,7 @@ describe('failed-run re-arm (side-effect-free error)', () => {
     });
     rmSync(path.join(DATA_DIR, 'schedule-markers', `${s.id}.json`), { force: true });
     boot([s]);
-    await sleep(120);
+    await waitFor(() => started.some((r) => r.scheduleId === s.id), 'boot catch-up to fire it');
     expect(started.map((r) => r.scheduleId)).toContain(s.id);
   });
 });

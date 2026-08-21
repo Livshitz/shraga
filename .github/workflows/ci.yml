@@ -13,4 +13,9 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
+      # A shared GitHub runner is slower and noisier than any dev machine, and these scheduler
+      # tests drive real timers. Stretch their waits AND the scheduler's own delay knobs by the
+      # same factor so the ratios stay identical — headroom, not changed behaviour.
       - run: bun run test
+        env:
+          SCHED_TEST_SCALE: '4'
