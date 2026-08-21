@@ -104,6 +104,30 @@ describe('SelfUpgrade preflight', () => {
   });
 });
 
+describe('SelfUpgrade vs running jobs', () => {
+  test('refuses while a scheduled job is mid-run — the restart would kill it', async () => {
+    const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
+    const s = subject(root, { runningJobs: () => ['morning-social-recon'] });
+
+    expect(s.blockers().join(' ')).toContain('morning-social-recon');
+    const plan = await s.start({ version: '0.1.99' });
+    expect(plan.started).toBe(false);
+    expect(plan.reason).toContain('kill them mid-flight');
+  });
+
+  test('force overrides it — an owner may still want the upgrade now', () => {
+    const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
+    const s = subject(root, { runningJobs: () => ['morning-social-recon'] });
+
+    expect(s.blockers({ force: true }).join(' ')).not.toContain('morning-social-recon');
+  });
+
+  test('an idle scheduler blocks nothing', () => {
+    const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
+    expect(subject(root, { runningJobs: () => [] }).blockers()).toEqual([]);
+  });
+});
+
 describe('SelfUpgrade report delivery', () => {
   test('delivers a report exactly once — a second boot has nothing left to announce', () => {
     const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });

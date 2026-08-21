@@ -61,8 +61,18 @@ export class SelfUpgrade {
    *                            the running process disagreeing with no way to reconcile.
    *   - upgrade in flight    → two supervisors racing on package.json is how you get a tree that
    *                            matches neither version. */
-  public blockers(): string[] {
+  public blockers(opts: { force?: boolean } = {}): string[] {
     const reasons: string[] = [];
+
+    // An upgrade restarts the process, which kills any scheduled run mid-flight — observed taking
+    // out the morning social recon (SIGTERM/143) during a routine upgrade. Wait for idle instead;
+    // `force` is the deliberate escape hatch for an owner who wants it now anyway.
+    if (!opts.force) {
+      const running = this.o.runningJobs();
+      if (running.length) {
+        reasons.push(`${running.length} scheduled job(s) still running (${running.join(', ')}) — restarting now would kill them mid-flight; retry when idle or pass {"force":true}`);
+      }
+    }
     const pkgPath = path.join(this.o.appRoot, 'package.json');
 
     if (!existsSync(pkgPath)) {
@@ -114,11 +124,11 @@ export class SelfUpgrade {
    * Start an upgrade. Resolves as soon as the supervisor is detached — the result arrives later, in
    * the report file, because this process is about to be restarted by that supervisor.
    */
-  public async start(opts: { version?: string } = {}): Promise<UpgradePlan> {
+  public async start(opts: { version?: string; force?: boolean } = {}): Promise<UpgradePlan> {
     const from = this.currentVersion();
     const target = !opts.version || opts.version === 'latest' ? await this.latestVersion() : opts.version.replace(/^v/, '');
 
-    const blockers = this.blockers();
+    const blockers = this.blockers({ force: opts.force });
     if (blockers.length) return { started: false, from, target, reason: blockers.join('; ') };
     if (from === target) return { started: false, from, target, reason: `already on ${target}` };
     if (!await this.versionExists(target)) return { started: false, from, target, reason: `${this.o.pkg}@${target} does not exist on the registry` };
@@ -236,6 +246,14 @@ export class SelfUpgradeOptions {
   public soakSec: number = 60;
   /** After this, an in-flight marker is treated as abandoned (supervisor killed by a reboot). */
   public maxRunMs: number = 30 * 60 * 1000;
+  /** Scheduled runs currently in flight. Lazy + guarded: the scheduler is not always mounted (and
+   *  must not be imported at module load), and a preflight that throws is worse than one that
+   *  assumes idle. Injectable so the preflight is testable without a running scheduler. */
+  public runningJobs: () => string[] = () => {
+    try { return require('../scheduler/engine.ts').getRunningIds() as string[]; }
+    catch (err) { console.warn(`${TAG} could not read running jobs:`, (err as Error).message); return []; }
+  };
+
   /** Injectable so the preflight is testable without depending on the test host's PATH. */
   public hasPython3: () => boolean = () => {
     try { return spawnSync('python3', ['--version'], { stdio: 'ignore' }).status === 0; }

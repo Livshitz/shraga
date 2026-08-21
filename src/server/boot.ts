@@ -210,7 +210,7 @@ app.get('/api/self-upgrade', requireAuth, async (req, res) => {
 app.post('/api/self-upgrade', requireAuth, async (req, res) => {
   if (!(req as any).user?.isOwner) return void res.status(403).json({ error: 'Only the owner can manage upgrades' });
   try {
-    const plan = await selfUpgrade.start({ version: req.body?.version });
+    const plan = await selfUpgrade.start({ version: req.body?.version, force: req.body?.force === true });
     // 409, not 500: a refusal is a well-formed answer about the deployment's state, and the caller
     // (often the agent, relaying to a human) needs the reason, not a stack trace.
     res.status(plan.started ? 202 : 409).json(plan);
