@@ -181,7 +181,13 @@ export class SelfUpgrade {
       return null;
     }
     try { unlinkSync(this.o.reportFile); } catch { /* report already gone; emit anyway */ }
-    try { unlinkSync(this.o.lockFile); } catch { /* no lock to clear */ }
+    // Clear the marker only if it belongs to THIS report. A boot can find a leftover report from
+    // the previous upgrade while a NEW one is already in flight (that is exactly the sequence when
+    // two upgrades run back to back) — deleting that marker would unguard the live attempt.
+    const marker = this.inFlight();
+    if (!marker || marker.target === report.target) {
+      try { unlinkSync(this.o.lockFile); } catch { /* no lock to clear */ }
+    }
 
     console.log(`${TAG} ${report.status}: ${report.detail}`);
     emitEvent('self-upgrade.finished', report);
