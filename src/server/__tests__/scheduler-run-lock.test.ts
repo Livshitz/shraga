@@ -271,7 +271,11 @@ describe('onMissed policy', () => {
       boot([s]);
       await sleep(120);
     } finally {
-      process.env.SCHEDULER_MAX_MISSED_AGE_MS = prevMax;
+      // `process.env.X = undefined` stringifies to "undefined" on some runtimes instead of
+      // unsetting — which silently poisons every later test that asserts the SHIPPED default
+      // ceiling (parseInt("undefined") → NaN). Delete when there was no prior value.
+      if (prevMax === undefined) delete process.env.SCHEDULER_MAX_MISSED_AGE_MS;
+      else process.env.SCHEDULER_MAX_MISSED_AGE_MS = prevMax;
     }
     return engine.getSchedule(s.id)!;
   }
