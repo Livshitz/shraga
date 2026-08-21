@@ -107,8 +107,8 @@ export class DataSync {
       }
       this.ensureGitignore();
       if (!this.verifyDeploymentId()) return;
+      await this.configureGit(); // must precede untrackIgnored — it neutralises per-user excludes
       await this.untrackIgnored();
-      await this.configureGit();
       this.ready = true;
     }
 
@@ -624,7 +624,13 @@ export class DataSync {
   /** Commit a refreshed .gitignore and untrack any committed files that now match it. */
   private async untrackIgnored(): Promise<void> {
     await this.git('add', '.gitignore').catch(() => {});
-    const out = await this.git('ls-files', '-i', '-c', '--exclude-standard').catch(() => '');
+    // core.excludesFile=/dev/null: --exclude-standard would otherwise fold in the USER'S global
+    // gitignore (~/.gitignore_global) and untrack files that are ignored on this host only. The
+    // data repo is shared, so a personal rule must never decide what leaves the remote. Real
+    // near-miss 2026-08-20: a laptop's global `.agent/` rule staged 50 files for deletion —
+    // including workspace/.agent/memory/MEMORY.md, the agent's own memory — and only
+    // guardMassDeletions() stopped it. Only the repo's OWN .gitignore may untrack anything.
+    const out = await this.git('-c', 'core.excludesFile=/dev/null', 'ls-files', '-i', '-c', '--exclude-standard').catch(() => '');
     // Only untrack files that actually exist on disk AND match .gitignore.
     // git ls-files -i can falsely report tracked files missing from the worktree
     // (remote-only files restored during init). Removing those wipes remote data.
@@ -673,6 +679,8 @@ export class DataSync {
     const name = process.env.APP_NAME || 'shraga';
     await this.git('config', 'user.name', `${name} agent`).catch(() => {});
     await this.git('config', 'user.email', `agent@${name}.local`).catch(() => {});
+    // The data repo must behave identically on every host: no per-user global gitignore.
+    await this.git('config', 'core.excludesFile', '/dev/null').catch(() => {});
   }
 
   private authedUrl(): string {
