@@ -117,6 +117,31 @@ describe('SelfUpgrade report delivery', () => {
     expect(s.deliverPendingReport()?.status).toBe('reverted');
     expect(s.deliverPendingReport()).toBeNull();
   });
+
+  // The real sequence on a SUCCESSFUL upgrade: supervisor restarts us, we boot and look for a
+  // report that does not exist yet, and only then (after the soak) does the supervisor write it.
+  // Boot-time delivery alone therefore never fires, and the in-flight marker blocks retries until
+  // it ages out. Delivery must keep watching while the marker is live.
+  test('a report written AFTER boot is still delivered, and clears the in-flight marker', async () => {
+    const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
+    const reportFile = path.join(root, '.self-upgrade', 'report.json');
+    const lockFile = path.join(root, '.self-upgrade', 'in-flight.json');
+    mkdirSync(path.dirname(reportFile), { recursive: true });
+    writeFileSync(lockFile, JSON.stringify({ target: '0.1.34', startedAt: new Date().toISOString(), at: Date.now() }));
+    const s = subject(root, { reportFile, lockFile, reportPollMs: 10 });
+
+    expect(s.deliverPendingReport()).toBeNull();   // nothing to announce yet — the watch starts here
+    expect(s.inFlight()).not.toBeNull();
+
+    writeFileSync(reportFile, JSON.stringify({
+      status: 'ok', detail: 'upgraded to 0.1.34 and verified for 60s', from: '0.1.33', target: '0.1.34',
+      installed: '0.1.34', package: 'shraga', log: '/tmp/x.log', finishedAt: '2026-08-21T00:00:00Z',
+    }));
+    await new Promise((r) => setTimeout(r, 120));
+
+    expect(existsSync(reportFile)).toBe(false);    // consumed => the owner was told
+    expect(s.inFlight()).toBeNull();               // and a further upgrade is not blocked
+  });
 });
 
 // The supervisor is a shell script that runs detached, so it is exercised the only honest way:
