@@ -196,6 +196,36 @@ describe('supervisor.sh', () => {
     expect(r.installed).toBe('0.1.99');
   }, 30_000);
 
+  // A single dropped probe on a busy box is not a crash-loop. Zero tolerance here reverted a
+  // perfectly healthy 0.1.48 on the feedox box while the process stayed up the whole time.
+  test('a single missed probe mid-soak does not revert a healthy upgrade', async () => {
+    const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
+    const report = path.join(root, 'report.json');
+    let hits = 0;
+    await runSupervisor({
+      APP_ROOT: root, PKG: 'shraga', TARGET: '0.1.99', FROM: '0.1.33',
+      RESTART_CMD: 'true', REPORT: report, BUN: 'true', BOOT_TIMEOUT: '15', SOAK: '12',
+    }, () => (++hits === 3 ? null : '0.1.99'));   // one 503 partway through the soak
+
+    expect(JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).dependencies.shraga).toBe('0.1.99');
+    expect(JSON.parse(readFileSync(report, 'utf8')).status).toBe('ok');
+  }, 60_000);
+
+  test('but a version that stops answering for good still reverts', async () => {
+    const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
+    const report = path.join(root, 'report.json');
+    let hits = 0;
+    await runSupervisor({
+      APP_ROOT: root, PKG: 'shraga', TARGET: '0.1.99', FROM: '0.1.33',
+      RESTART_CMD: 'true', REPORT: report, BUN: 'true', BOOT_TIMEOUT: '15', SOAK: '60',
+      // dies during the soak (3 consecutive misses = the limit), then the reverted old version
+      // answers again — the sequence a real rollback produces.
+    }, () => { hits++; if (hits <= 2) return '0.1.99'; if (hits <= 7) return null; return '0.1.33'; });
+
+    expect(JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).dependencies.shraga).toBe('0.1.33');
+    expect(JSON.parse(readFileSync(report, 'utf8')).status).toBe('reverted');
+  }, 60_000);
+
   test('refuses to edit an ambiguous package.json rather than guessing which pin is the dep', async () => {
     // The same name under both dependencies and overrides: a first-match text edit would silently
     // rewrite whichever came first. Nothing may be touched, and nothing may be restarted.

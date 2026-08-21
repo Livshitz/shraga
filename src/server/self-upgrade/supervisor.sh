@@ -136,10 +136,22 @@ wait_for_version() { # version timeout
 
 # A server that boots, flips the version, then dies 20s later has NOT upgraded successfully — that is
 # exactly the crash-loop an unattended upgrade must catch. Keep probing for the whole soak window.
+# One dropped probe is not a crash-loop. This runs on a busy box where a single request can lose a
+# 10s race (MCP mounts, a GC pause, the drain window of the restart we just did), and a zero-
+# tolerance soak turns that blip into an automatic rollback of a perfectly good version — observed
+# reverting 0.1.48 on feedox while the process stayed up throughout. Require CONSECUTIVE misses, so
+# a real crash (which never answers again) still fails fast.
+SOAK_MISS_LIMIT="${SOAK_MISS_LIMIT:-3}"
 soak() { # version seconds
-  local deadline=$(( SECONDS + $2 ))
+  local deadline=$(( SECONDS + $2 )) misses=0
   while [ "$SECONDS" -lt "$deadline" ]; do
-    reports_version "$1" || return 1
+    if reports_version "$1"; then
+      misses=0
+    else
+      misses=$(( misses + 1 ))
+      say "soak probe missed ($misses/$SOAK_MISS_LIMIT)"
+      [ "$misses" -ge "$SOAK_MISS_LIMIT" ] && return 1
+    fi
     sleep 5
   done
   return 0
