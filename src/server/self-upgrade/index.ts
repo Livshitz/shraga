@@ -25,6 +25,8 @@ export class SelfUpgrade {
 
   private get o(): SelfUpgradeOptions { return this.options as SelfUpgradeOptions; }
 
+  private watching = false;
+
   /** Version of `pkg` this deployment currently has pinned in its app-root package.json. */
   public currentVersion(): string | null {
     try {
@@ -170,13 +172,35 @@ export class SelfUpgrade {
    */
   public deliverPendingReport(): UpgradeReport | null {
     const report = this.lastReport();
-    if (!report) return null;
+    if (!report) {
+      // The supervisor writes the report only AFTER this process has booted and soaked, so on a
+      // successful upgrade there is NOTHING here yet — boot always loses the race. Without this
+      // watch the outcome DM was never delivered, and the in-flight marker sat until it aged out
+      // (30m), blocking every retry in between. Keep watching while the marker is live.
+      if (this.inFlight()) this.watchForReport();
+      return null;
+    }
     try { unlinkSync(this.o.reportFile); } catch { /* report already gone; emit anyway */ }
     try { unlinkSync(this.o.lockFile); } catch { /* no lock to clear */ }
 
     console.log(`${TAG} ${report.status}: ${report.detail}`);
     emitEvent('self-upgrade.finished', report);
     return report;
+  }
+
+  /** Poll until the supervisor's report lands (or its marker ages out), then deliver it exactly
+   *  once. Unref'd: a pending upgrade watch must never hold the process open. */
+  private watchForReport(): void {
+    if (this.watching) return;
+    this.watching = true;
+    const timer = setInterval(() => {
+      if (!this.inFlight()) { clearInterval(timer); this.watching = false; return; } // aged out
+      if (!existsSync(this.o.reportFile)) return;
+      clearInterval(timer);
+      this.watching = false;
+      this.deliverPendingReport();
+    }, this.o.reportPollMs);
+    timer.unref?.();
   }
 }
 
@@ -193,6 +217,8 @@ export class SelfUpgradeOptions {
   public supervisorScript: string = path.join(PACKAGE_ROOT, 'src', 'server', 'self-upgrade', 'supervisor.sh');
   public reportFile: string = dataPath('.self-upgrade', 'report.json');
   public lockFile: string = dataPath('.self-upgrade', 'in-flight.json');
+  /** How often the post-boot watch looks for the supervisor's report. */
+  public reportPollMs: number = 5_000;
   public bootTimeoutSec: number = 180;
   public soakSec: number = 60;
   /** After this, an in-flight marker is treated as abandoned (supervisor killed by a reboot). */
