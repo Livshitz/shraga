@@ -15,6 +15,18 @@ describe('scheduler task.model → [model] directive', () => {
     const { directives } = parseDirectives('[haiku] Base prompt.\n\n---\nAdditional instructions for this run:\nmore');
     expect(directives.model).toBe('claude-haiku-4-5-20251001');
   });
+  test('engine + provider-qualified model (the runner prefix shape) both resolve', () => {
+    const { prompt, directives } = parseDirectives('[engine:agentx,model:cursor/composer-2.5] Do the thing.');
+    expect(directives.engine).toBe('agentx');
+    expect(directives.model).toBe('cursor/composer-2.5');
+    expect(prompt).toBe('Do the thing.');
+  });
+  // A qualified id is NOT honoured bare: `[src/foo.ts]` is indistinguishable from it, and a second
+  // bracket group would then be eaten as directives instead of staying prompt text.
+  test('a qualified id is only honoured in key form', () => {
+    expect(parseDirectives('[cursor/composer-2.5] hi').directives.model).toBeUndefined();
+    expect(parseDirectives('[opus] [src/foo.ts] fix it').prompt).toBe('[src/foo.ts] fix it');
+  });
 });
 
 // A schedule prompt may already open with its own [turns:N] group when runner.ts prepends

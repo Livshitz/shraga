@@ -5,8 +5,8 @@ export type Trigger =
   | { kind: 'event'; source: string; match?: Record<string, string> };
 
 export type Task =
-  | { kind: 'prompt'; prompt: string; model?: string }
-  | { kind: 'bash'; command: string; model?: string }
+  | { kind: 'prompt'; prompt: string; model?: string; engine?: string }
+  | { kind: 'bash'; command: string; model?: string; engine?: string }
   | { kind: 'job'; command: string };
 
 export type Scope = 'system' | 'user';

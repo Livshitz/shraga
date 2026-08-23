@@ -19,9 +19,11 @@ export interface EventThrottle {
   windowSec: number;
 }
 
+/** `engine`/`model` pin the runtime a run uses (e.g. engine 'agentx' + model
+ *  'cursor/composer-2.5'); both ride the prompt-directive channel — see runner.ts. */
 export type Task =
-  | { kind: 'prompt'; prompt?: string; promptFile?: string; model?: string }
-  | { kind: 'bash'; command: string; model?: string }
+  | { kind: 'prompt'; prompt?: string; promptFile?: string; model?: string; engine?: string }
+  | { kind: 'bash'; command: string; model?: string; engine?: string }
   | { kind: 'job'; command: string };
 
 /** Visibility: 'system' schedules + their sessions are shared with all whitelisted users; 'user' is private to createdBy. */

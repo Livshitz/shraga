@@ -140,10 +140,13 @@ export async function runSchedule(
     if (eventCtx) base = `${base}\n\n---\n${formatEventBlock(eventCtx)}`;
     prompt = base;
   }
-  // task.model rides the same [model] prompt-directive channel users type by hand — parseDirectives
-  // strips it and resolves aliases. Prepending (vs new plumbing) also persists the choice into the
-  // saved prompt, so the session UI shows which model the schedule actually requested.
-  if (!resume && task.model) prompt = `[${task.model}] ${prompt}`;
+  // task.engine/task.model ride the same prompt-directive channel users type by hand —
+  // parseDirectives strips them and resolves aliases. Prepending (vs new plumbing) also persists the
+  // choice into the saved prompt, so the session UI shows what the schedule actually requested.
+  if (!resume) {
+    const pins = [task.engine && `engine:${task.engine}`, task.model && `model:${task.model}`].filter(Boolean);
+    if (pins.length) prompt = `[${pins.join(',')}] ${prompt}`;
+  }
 
   // Save the synthesized user prompt to the conversation (skip on resume — task prompt already persisted).
   if (!resume) {
