@@ -25,6 +25,13 @@ const DIRECTIVE_RE = /^\s*\[([^\]]*)\]\s*([\s\S]*)/;
 
 const DIRECTIVE_KEYS = ['model', 'turns', 'thinking', 'think', 'effort', 'engine'];
 
+/** MODEL_ALIASES only covers the bare Anthropic shorthands. A `provider/model` id
+ *  (`cursor/composer-2.5`, `openai/gpt-5.6`) is already concrete — gating it on the alias table
+ *  silently dropped it and ran the instance default instead. Honoured ONLY in `model:` key form:
+ *  as a bare positional it is indistinguishable from prompt text like `[src/foo.ts]`, which a
+ *  second bracket group would then swallow. */
+const isQualifiedModel = (v: string) => /^[a-z0-9._-]+\/[a-z0-9./_-]+$/.test(v);
+
 /** Does a bracket group look like directives (vs. prompt text that happens to start with `[`)?
  * Every token must be a known key:value or a known positional, else we leave the group alone. */
 function isDirectiveGroup(raw: string): boolean {
@@ -84,7 +91,9 @@ export function parseDirectives(text: string): ParsedPrompt {
       } else if (['nothink', 'nothinking'].includes(val)) {
         directives.thinking = 'disabled';
       } else if (positionalIndex === 0) {
-        console.warn(`[directives] Unknown model alias: "${t}"`);
+        console.warn(isQualifiedModel(val)
+          ? `[directives] Provider-qualified model needs key form: "[model:${t}]"`
+          : `[directives] Unknown model alias: "${t}"`);
       }
       positionalIndex++;
     }
@@ -97,6 +106,7 @@ function applyDirective(d: Directives, key: string, val: string) {
   switch (key) {
     case 'model':
       if (MODEL_ALIASES[val]) d.model = MODEL_ALIASES[val];
+      else if (isQualifiedModel(val)) d.model = val;
       else console.warn(`[directives] Unknown model alias: "${val}"`);
       break;
     case 'turns':

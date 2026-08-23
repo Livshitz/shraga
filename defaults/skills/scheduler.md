@@ -130,13 +130,20 @@ Trigger:
   { kind: "cron", expr: "<cron>", tz: "<IANA_tz>" }
   { kind: "event", source: "<name>", match?: { "<dot.path>": "<value>" } }
 
-Task:
-  { kind: "prompt", prompt: "<text>" }
-  { kind: "bash", command: "<cmd>" }
+Task:                                      // model/engine pin the runtime (see below)
+  { kind: "prompt", prompt: "<text>", model?: "<model>", engine?: "<engine>" }
+  { kind: "bash", command: "<cmd>", model?: "<model>", engine?: "<engine>" }
 
 Schedule: { id, name, enabled, trigger, task, scope, createdBy, nextRun?, lastRun?, runCount,
             onMissed?, missedRun? }
 ```
+
+`task.model` / `task.engine` pin what the run executes on, instead of the instance default:
+`model` takes an alias (`opus`, `haiku`) or a provider-qualified id (`cursor/composer-2.5`);
+`engine` names a registered runtime (`claude-code`, `agentx`, `cursor` — availability is
+deployment-specific). Both are prepended to the prompt as a `[engine:…,model:…]` directive, so a
+prompt that opens with its OWN model group (`[opus] …`) would out-rank the pin — drop it from the
+prompt text when pinning. `job` tasks run a command, not an agent, so neither applies.
 
 ## Missed windows (`onMissed` / `missedRun`)
 
