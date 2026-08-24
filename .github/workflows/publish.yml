@@ -31,7 +31,11 @@ jobs:
 
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
+      # Same headroom the CI workflow gives the real-timer scheduler tests on a shared runner —
+      # the two workflows run the SAME suite, so they must run it under the same knobs.
       - run: bun run test
+        env:
+          SCHED_TEST_SCALE: '4'
 
       - name: Configure git
         run: |

@@ -263,7 +263,10 @@ describe('attempts are recorded at start, not only on success', () => {
     storage.clearRunningMarker(s.id);
 
     boot([s]);                                  // boot 1 → catch-up fires
-    await sleep(120);
+    // Wait for the run to REACH its terminal marker, not for a fixed slice of wall clock: the
+    // catch-up delay plus the run itself can outlast any fixed sleep on a loaded runner, and the
+    // marker would still read 'started'.
+    await waitFor(() => markerFor(s.id)?.status === 'error', "the catch-up run to record its terminal 'error' marker");
     expect(started).toHaveLength(1);
 
     const m = markerFor(s.id)!;
