@@ -193,7 +193,7 @@ describe('scheduler run lock', () => {
     boot([s]);
     expect(engine.runNow(s.id).ok).toBe(true);
     expect(lockFor(s.id)?.pid).toBe(process.pid);
-    await sleep(40);
+    await waitFor(() => started.length === 1 && lockFor(s.id) === null, 'the reclaimed run to start and release the lock');
     expect(started.map((r) => r.scheduleId)).toEqual([s.id]);
     // Released on completion.
     expect(lockFor(s.id)).toBeNull();
@@ -242,8 +242,9 @@ describe('catch-up vs in-place resume', () => {
     rmSync(path.join(DATA_DIR, 'scheduler/completions', `${s.id}.json`), { force: true });
     storage.clearRunningMarker(s.id);
 
+    runMs = 200 * SCALE;                        // the catch-up must still be IN FLIGHT below
     boot([s]);
-    await sleep(35);                            // catch-up has fired and is in-flight
+    await waitFor(() => started.length === 1, 'the catch-up run to start');
     expect(started).toHaveLength(1);
     expect(started[0]!.resumed).toBe(false);
     // The catch-up is in-flight in THIS process, so the in-memory guard answers before the lock.
@@ -287,7 +288,7 @@ describe('attempts are recorded at start, not only on success', () => {
 });
 
 describe('onMissed policy', () => {
-  async function bootMissed(over: Partial<Schedule>, maxAge?: string) {
+  async function bootMissed(over: Partial<Schedule>, maxAge?: string, until?: () => boolean) {
     const s = makeSchedule({ lastRun: { at: Date.now() - 2 * DAY, sessionId: 'x', status: 'ok' }, ...over });
     rmSync(path.join(DATA_DIR, 'scheduler/completions', `${s.id}.json`), { force: true });
     storage.clearRunningMarker(s.id);
@@ -295,7 +296,11 @@ describe('onMissed policy', () => {
     if (maxAge) process.env.SCHEDULER_MAX_MISSED_AGE_MS = maxAge;
     try {
       boot([s]);
-      await sleep(120);
+      // A replay is a did-HAPPEN assertion — poll for it, so a slow machine waits longer instead
+      // of failing. Callers asserting nothing ran pass no predicate and keep the fixed window,
+      // which is the only honest way to observe an absence.
+      if (until) await waitFor(until, 'the missed window to be replayed');
+      else await sleep(120);
     } finally {
       // `process.env.X = undefined` stringifies to "undefined" on some runtimes instead of
       // unsetting — which silently poisons every later test that asserts the SHIPPED default
@@ -307,13 +312,13 @@ describe('onMissed policy', () => {
   }
 
   test("absent onMissed defaults to 'run' — the missed window is replayed", async () => {
-    const live = await bootMissed({});
+    const live = await bootMissed({}, undefined, () => started.length === 1);
     expect(started.map((r) => r.scheduleId)).toEqual([live.id]);
     expect(live.missedRun).toBeUndefined();
   });
 
   test("'run' replays the missed window", async () => {
-    const live = await bootMissed({ onMissed: 'run' });
+    const live = await bootMissed({ onMissed: 'run' }, undefined, () => started.length === 1);
     expect(started.map((r) => r.scheduleId)).toEqual([live.id]);
   });
 
@@ -330,8 +335,7 @@ describe('onMissed policy', () => {
     expect(live.missedRun?.at).toBeGreaterThan(0);
     // …and it is still runnable on demand.
     expect(engine.runNow(live.id).ok).toBe(true);
-    await sleep(40);
-    expect(started).toHaveLength(1);
+    await waitFor(() => started.length === 1, 'the on-demand run of the offered window');
   });
 
   test('an operator-lowered ceiling is honoured', async () => {
@@ -390,7 +394,7 @@ describe('incident: a ~14h-stale daily window must not replay', () => {
     storage.clearRunningMarker(s.id);
 
     boot([s]);
-    await sleep(120);
+    await waitFor(() => started.length === 1, 'the 1h-late window to be replayed');
 
     expect(started).toHaveLength(1);
     expect(engine.getSchedule(s.id)!.missedRun).toBeUndefined();
@@ -428,7 +432,7 @@ describe('incident: a ~14h-stale daily window must not replay', () => {
     boot([s]);
 
     expect(engine.resumeRun(s.id, 'sched-crashed', 'continue').ok).toBe(true);
-    await sleep(120);
+    await waitFor(() => started.length === 1, 'the fresh window to be resumed');
 
     expect(started).toHaveLength(1);
     expect(started[0]!.resumed).toBe(true);
@@ -473,7 +477,7 @@ describe('non-cron: the staleness ceiling and onMissed apply to every trigger ki
     boot([s]);
 
     expect(engine.resumeRun(s.id, 'sched-crashed', 'continue').ok).toBe(true);
-    await sleep(120);
+    await waitFor(() => started.length === 1, 'the fresh interval interruption to be resumed');
     expect(started).toHaveLength(1);
     expect(started[0]!.resumed).toBe(true);
   });
@@ -545,7 +549,7 @@ describe('timer path: a fire that arrives late because the host was suspended', 
     const s = makeSchedule();
     const filler = bootWithFiller(s);
     fireLate(s, 0, filler);
-    await sleep(80);
+    await waitFor(() => started.length === 1, 'the punctual fire to run');
 
     expect(started.map((r) => r.scheduleId)).toEqual([s.id]);
     expect(engine.getSchedule(s.id)!.missedRun).toBeUndefined();
@@ -555,7 +559,7 @@ describe('timer path: a fire that arrives late because the host was suspended', 
     const s = makeSchedule({ onMissed: 'skip' });
     const filler = bootWithFiller(s);
     fireLate(s, 0, filler);
-    await sleep(80);
+    await waitFor(() => started.length === 1, 'the punctual fire to run despite onMissed=skip');
 
     expect(started).toHaveLength(1);
     expect(engine.getSchedule(s.id)!.missedRun).toBeUndefined();
@@ -565,7 +569,7 @@ describe('timer path: a fire that arrives late because the host was suspended', 
     const s = makeSchedule();
     const filler = bootWithFiller(s);
     const window = fireLate(s, 14, filler);
-    await sleep(80);
+    await waitFor(() => !!engine.getSchedule(s.id)!.missedRun, 'the stale fire to be recorded as missedRun');
 
     expect(started).toHaveLength(0);
     expect(engine.getSchedule(s.id)!.missedRun).toEqual({ at: window, reason: 'stale', noticedAt: expect.any(Number) });
@@ -575,7 +579,7 @@ describe('timer path: a fire that arrives late because the host was suspended', 
     const s = makeSchedule();
     const filler = bootWithFiller(s);
     const window = fireLate(s, 14, filler);
-    await sleep(80);
+    await waitFor(() => !!engine.getSchedule(s.id)!.missedRun, 'the stale fire to be recorded as missedRun');
 
     const missed = engine.getSchedule(s.id)!.missedRun!;
     expect(missed.at).toBe(window);              // when it should have run
@@ -586,7 +590,7 @@ describe('timer path: a fire that arrives late because the host was suspended', 
     const s = makeSchedule({ onMissed: 'skip' });
     const filler = bootWithFiller(s);
     fireLate(s, 14, filler);
-    await sleep(80);
+    await waitFor(() => !!engine.getSchedule(s.id)!.missedRun, 'the stale fire to be recorded as missedRun');
 
     expect(started).toHaveLength(0);
     expect(engine.getSchedule(s.id)!.missedRun?.reason).toBe('skip');
@@ -596,22 +600,21 @@ describe('timer path: a fire that arrives late because the host was suspended', 
     const s = makeSchedule({ onMissed: 'offer' });
     const filler = bootWithFiller(s);
     fireLate(s, 14, filler);
-    await sleep(80);
+    await waitFor(() => !!engine.getSchedule(s.id)!.missedRun, 'the stale fire to be recorded as missedRun');
 
     expect(started).toHaveLength(0);
     expect(engine.getSchedule(s.id)!.missedRun?.reason).toBe('offer');
     // `offer` is a read-path affordance: the missed window must survive onto the API's output.
     expect(engine.listSchedules().find((x) => x.id === s.id)?.missedRun?.reason).toBe('offer');
     expect(engine.runNow(s.id).ok).toBe(true);   // …and can still be run on demand
-    await sleep(80);
-    expect(started).toHaveLength(1);
+    await waitFor(() => started.length === 1, 'the on-demand run of the offered window');
   });
 
   test('a refused fire writes NO attempt/completion marker — nothing to double-record', async () => {
     const s = makeSchedule();
     const filler = bootWithFiller(s);
     fireLate(s, 14, filler);
-    await sleep(80);
+    await waitFor(() => !!engine.getSchedule(s.id)!.missedRun, 'the fire to be refused and recorded');
 
     expect(markerFor(s.id)).toBeNull();          // the window was never attempted
     expect(lockFor(s.id)).toBeNull();
@@ -628,7 +631,7 @@ describe('timer path: a fire that arrives late because the host was suspended', 
     const s = makeSchedule({ trigger: { kind: 'interval', everyMs: 5 * 60_000 } });
     const filler = bootWithFiller(s);
     fireLate(s, 2.5, filler);                    // 2.5h < 6h ceiling
-    await sleep(80);
+    await waitFor(() => started.length === 1, 'the post-suspend interval fire to run');
 
     expect(started).toHaveLength(1);             // ONE fire, not one per elapsed period
     const live = engine.getSchedule(s.id)!;
@@ -640,7 +643,7 @@ describe('timer path: a fire that arrives late because the host was suspended', 
     const s = makeSchedule({ trigger: { kind: 'interval', everyMs: 5 * 60_000 } });
     const filler = bootWithFiller(s);
     fireLate(s, 14, filler);
-    await sleep(80);
+    await waitFor(() => !!engine.getSchedule(s.id)!.missedRun, 'the stale interval fire to be recorded');
 
     expect(started).toHaveLength(0);
     const live = engine.getSchedule(s.id)!;
@@ -657,7 +660,7 @@ describe('timer path: a fire that arrives late because the host was suspended', 
     const s = makeSchedule({ trigger: { kind: 'once', at: Date.now() + DAY } });
     const filler = bootWithFiller(s);
     const window = fireLate(s, 14, filler);
-    await sleep(80);
+    await waitFor(() => !!engine.getSchedule(s.id)!.missedRun, 'the stale `once` fire to be recorded');
 
     expect(started).toHaveLength(0);
     const live = engine.getSchedule(s.id)!;
@@ -670,7 +673,8 @@ describe('timer path: a fire that arrives late because the host was suspended', 
     const s = makeSchedule({ trigger: { kind: 'once', at: Date.now() + DAY } });
     const filler = bootWithFiller(s);
     fireLate(s, 1, filler);
-    await sleep(120);
+    await waitFor(() => started.length === 1 && engine.getSchedule(s.id) === undefined,
+      'the `once` to fire and then self-delete');
 
     expect(started).toHaveLength(1);
     expect(engine.getSchedule(s.id)).toBeUndefined();   // once-schedules self-delete on success
@@ -701,7 +705,7 @@ describe('an unexpected rejection records a terminal outcome', () => {
     boot([s]);
     throwNext = true;                                 // the runner rejects instead of resolving
     expect(engine.runNow(s.id).ok).toBe(true);
-    await sleep(60);
+    await waitFor(() => markerFor(s.id)?.status === 'error', "the thrown run to record its terminal 'error' marker");
 
     const m = markerFor(s.id)!;
     expect(m.status).toBe('error');                   // was 'started' — indistinguishable from a crash
@@ -767,8 +771,7 @@ describe('run lock age ceiling', () => {
       boot([s]);
       expect(engine.runNow(s.id).ok).toBe(true);
       expect(lockFor(s.id)?.pid).toBe(process.pid);
-      await sleep(40);
-      expect(started).toHaveLength(1);
+      await waitFor(() => started.length === 1, 'the run that reclaimed the over-age lock to start');
     } finally {
       other.kill();
       storage.clearRunningMarker(s.id);
@@ -801,8 +804,7 @@ describe('run lock age ceiling', () => {
       expect(refusedWith(engine.runNow(s.id))).toBe('locked');   // 1m old, default 6h ceiling ⇒ respected
       process.env.SCHEDULER_RUN_LOCK_MAX_AGE_MS = '1000';
       expect(engine.runNow(s.id).ok).toBe(true);
-      await sleep(40);
-      expect(started).toHaveLength(1);
+      await waitFor(() => started.length === 1, 'the run to start once the ceiling was shortened');
     } finally {
       if (prev === undefined) delete process.env.SCHEDULER_RUN_LOCK_MAX_AGE_MS; else process.env.SCHEDULER_RUN_LOCK_MAX_AGE_MS = prev;
       other.kill();
@@ -842,14 +844,16 @@ describe('an interrupted run keeps its session link', () => {
     storage.clearRunningMarker(s.id);
     boot([s]);
     engine.runNow(s.id);
-    await sleep(30);                                  // mid-run: this is what a crash would leave
+    // mid-run: this is what a crash would leave. Poll for the at-start persist rather than
+    // guessing how long it takes — the run itself is 300ms, so the window is still open.
+    const readBack = () => (JSON.parse(readFileSync(path.join(DATA_DIR, 'schedules.json'), 'utf-8')) as Schedule[]).find((p) => p.id === s.id);
+    await waitFor(() => !!readBack()?.lastRun?.sessionId, 'the run to persist its sessionId at start');
 
-    const persisted: Schedule[] = JSON.parse(readFileSync(path.join(DATA_DIR, 'schedules.json'), 'utf-8'));
-    const rec = persisted.find((p) => p.id === s.id)!;
+    const rec = readBack()!;
     expect(rec.lastRun!.status).toBe('running');
     expect(rec.lastRun!.sessionId).toBe(started[0]!.sessionId);
     expect(rec.lastRun!.sessionId).not.toBe('');
-    await sleep(350);
+    await waitFor(() => lockFor(s.id) === null, 'the run to finish before the suite moves on');
   });
 });
 
@@ -863,6 +867,9 @@ describe('failed-run re-arm (side-effect-free error)', () => {
   afterEach(() => { delete process.env.SCHEDULER_REARM_BACKOFF_MS; });
 
   test('does NOT record an attempt marker — the window stays replayable', async () => {
+    // The re-arm is still armed — we just push it beyond the observation window below, so the
+    // retry's own at-start marker can't race in and masquerade as the first run's.
+    process.env.SCHEDULER_REARM_BACKOFF_MS = knobMs(5_000);
     const s = makeSchedule();
     nextStatus = 'error';
     nextSideEffectFree = true;
