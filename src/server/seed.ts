@@ -66,8 +66,16 @@ export function seedDefaults() {
     console.log(`[seed] Synced ${count} built-in subagent defs from defaults`);
   }
 
-  // MCPs dir: ensure it exists for per-user configs
+  // MCPs dir: ensure it exists for per-user configs, and ship the README that says what is
+  // actually read here. Load-bearing docs, not decoration: an operator once encoded a real
+  // security intent into a `data/mcps/_global.json` that no loader has ever opened, and the
+  // silent no-op left prod RTDB writable. Overwritten from defaults (like skills/extensions) —
+  // it's shipped documentation, not user data.
   mkdirSync(dataPath('mcps'), { recursive: true });
+  const mcpsReadme = path.join(DEFAULTS_DIR, 'mcps', 'README.md');
+  if (existsSync(mcpsReadme) && copyIfChanged(mcpsReadme, dataPath('mcps', 'README.md'))) {
+    console.log('[seed] Synced data/mcps/README.md from defaults');
+  }
 
   // Scripts: seed agent-facing scripts from defaults → data/scripts/
   const srcScripts = path.join(DEFAULTS_DIR, 'scripts');

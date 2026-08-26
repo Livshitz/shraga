@@ -1,4 +1,5 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { DATA_DIR, APP_ROOT } from './paths.ts';
 import type { McpServerConfig, McpConfig, McpHttpServerConfig } from './mcp.ts';
@@ -93,28 +94,122 @@ export function resolveConfigPath(): string | null {
 }
 
 let _cached: ShragaConfig | null = null;
+/** Config file the cache was built from, and its `mtimeMs:size` stamp. */
+let _cachedPath: string | null = null;
+let _cachedStamp = '';
+/** Stamp of the last version we failed to load — so a broken config logs once, not per call. */
+let _failedStamp = '';
 
-export async function loadShragaConfig(): Promise<ShragaConfig> {
-  if (_cached) return _cached;
+const _require = createRequire(import.meta.url);
+
+function stampOf(file: string): string {
+  try {
+    const st = statSync(file);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Load the config module SYNCHRONOUSLY, bypassing the runtime module cache.
+ *
+ * Busting `_cached` alone is not enough: `await import(p)` returns the SAME module object for a
+ * path already loaded, so an edited file is never re-evaluated (measured on Bun 1.3.10).
+ * `require` + a `require.cache` delete does re-evaluate — and being sync, it lets the sync
+ * consumers (`getGlobalMcpsFromConfig`, `getPublicOrigin`, …) pick up an edit with no call-site
+ * changes anywhere.
+ *
+ * Throws on a broken config; callers keep the last-good value.
+ */
+function readConfigSync(configPath: string): ShragaConfig {
+  try {
+    // Delete by the RESOLVED key: the cache is keyed by the realpath, and DATA_DIR is often a
+    // symlinked path (macOS /var -> /private/var, or a symlinked data dir), so deleting the
+    // literal path silently misses and the stale module is returned.
+    const cache = _require.cache as Record<string, unknown> | undefined;
+    if (cache) {
+      delete cache[_require.resolve(configPath)];
+      delete cache[configPath];
+    }
+  } catch {
+    // A runtime without a mutable require.cache: fall through — the load below may still be fresh,
+    // and loadShragaConfig()'s async fallback covers the stale case.
+  }
+  const mod = _require(configPath);
+  return (mod?.default ?? {}) as ShragaConfig;
+}
+
+/**
+ * Re-read the config when the file changed on disk (mtime+size), so editing `shraga.config.ts`
+ * takes effect without restarting the process — the way editing `data/mcps/<uid>.json` already
+ * does. Returns the load error, or null.
+ *
+ * Fully synchronous, so two concurrent turns can never interleave into a torn cache.
+ */
+function refreshConfig(): unknown {
   const configPath = resolveConfigPath();
   if (!configPath) {
-    _cached = {};
-    return _cached;
+    if (_cached === null || _cachedPath !== null) { _cached = {}; _cachedPath = null; _cachedStamp = ''; }
+    return null;
   }
+  const stamp = stampOf(configPath);
+  if (_cached !== null && configPath === _cachedPath && stamp === _cachedStamp) return null;
   try {
-    const mod = await import(configPath);
-    _cached = mod.default ?? {};
+    _cached = readConfigSync(configPath);
+    _cachedPath = configPath;
+    _cachedStamp = stamp;
+    _failedStamp = '';
+    return null;
   } catch (e) {
-    console.error(`[config] failed to load ${path.basename(configPath)}:`, e instanceof Error ? e.message : String(e));
-    _cached = {};
+    if (_failedStamp !== stamp) {
+      _failedStamp = stamp;
+      console.error(
+        `[config] failed to load ${path.basename(configPath)}:`,
+        e instanceof Error ? e.message : String(e),
+        _cached === null ? '— using an EMPTY config' : '— KEEPING the last-good config in memory',
+      );
+    }
+    // Never leave the process with no config, and never poison the cache with a broken file:
+    // keep the last-good value, and deliberately do NOT advance _cachedStamp so the next call
+    // retries (a fixed file recovers on its own).
+    if (_cached === null) { _cached = {}; _cachedPath = configPath; _cachedStamp = ''; }
+    return e;
   }
-  // Every path above assigns _cached a non-null value; `?? {}` satisfies the type
-  // without changing behavior (mirrors getShragaConfigSync below).
+}
+
+/** Drop the cache so the next read re-evaluates the config file unconditionally. */
+export function invalidateShragaConfig(): void {
+  _cached = null;
+  _cachedPath = null;
+  _cachedStamp = '';
+  _failedStamp = '';
+}
+
+export async function loadShragaConfig(): Promise<ShragaConfig> {
+  const err = refreshConfig();
+  if (err) {
+    // `require` cannot load every valid ESM config (top-level await). Retry through the async
+    // loader — cache-busted, since a plain re-import of a loaded path returns the stale module.
+    const configPath = resolveConfigPath();
+    if (configPath) {
+      try {
+        const stamp = stampOf(configPath);
+        const mod = await import(`${configPath}?stamp=${encodeURIComponent(stamp)}`);
+        _cached = mod.default ?? {};
+        _cachedPath = configPath;
+        _cachedStamp = stamp;
+        _failedStamp = '';
+      } catch {
+        // Already logged by refreshConfig; last-good (or {}) stands.
+      }
+    }
+  }
   return _cached ?? {};
 }
 
 export function getShragaConfigSync(): ShragaConfig {
-  if (!_cached) console.warn('[config] getShragaConfigSync called before loadShragaConfig — returning empty config');
+  refreshConfig();
   return _cached ?? {};
 }
 
