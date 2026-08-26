@@ -8,6 +8,57 @@ import { runTextQuery } from './sdk-utils.ts';
 const TAG = '[data-sync]';
 const DEPLOYMENT_ID_FILE = '.deployment-id';
 
+/** How long the LLM commit-message call may take before we fall back (ms). */
+const COMMIT_MSG_TIMEOUT_MS = 60_000;
+/** Warn if the push latch has been held longer than this — the 2026-08 outage's signature was silence. */
+const PUSHING_STUCK_MS = 5 * 60_000;
+
+/** Reject after `ms` so a hung subprocess can't hold the push latch forever. */
+export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let t: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    p,
+    new Promise<T>((_, rej) => { t = setTimeout(() => rej(new Error(`${label} timed out after ${ms}ms`)), ms); }),
+  ]).finally(() => clearTimeout(t!));
+}
+
+/** Deterministic, always-valid commit subject derived from the changed paths. */
+export function fallbackCommitMessage(files: string[]): string {
+  const names = files.filter(Boolean);
+  if (!names.length) return 'sync: update agent data';
+  const joined = `sync: ${names.join(', ')}`;
+  if (joined.length <= 72) return joined;
+  return `sync: ${names[0]} (+${names.length - 1} more)`.slice(0, 72);
+}
+
+const PROSE_PREAMBLE = /^(looking at|here'?s|here is|sure|certainly|based on|this (diff|change|commit)|i'?ll|okay|the diff)\b/i;
+
+/**
+ * Pull a real commit subject out of a model reply. Bug 2026-08-26: the raw reply went straight to
+ * `git commit -m`, so a fence-only answer produced a commit literally titled "```".
+ * Returns '' when nothing usable is there — callers must use fallbackCommitMessage().
+ */
+export function extractCommitSubject(raw: string): string {
+  if (!raw) return '';
+  // Prefer the body of a fenced block if the model wrapped its answer in one.
+  const fenced = raw.match(/```[a-zA-Z]*\n([\s\S]*?)```/);
+  const body = fenced ? fenced[1] : raw.replace(/```[a-zA-Z]*/g, '');
+  for (const rawLine of body.split('\n')) {
+    let line = rawLine.trim();
+    if (!line) continue;
+    line = line.replace(/^[-*>#]+\s*/, '').trim();          // bullets / headings / quotes
+    line = line.replace(/^`+|`+$/g, '').trim();              // inline code ticks
+    line = line.replace(/^["'](.*)["']$/, '$1').trim();      // wrapping quotes
+    if (!line || /^`+$/.test(line) || line.includes('```')) continue;
+    if (line.length < 3) continue;
+    if (PROSE_PREAMBLE.test(line)) return '';                // model explained instead of answering
+    if (line.endsWith(':')) return '';                       // "Commit message:" style preamble
+    if (line.length > 120) return '';                        // prose paragraph, not a subject
+    return line.slice(0, 72).trim();
+  }
+  return '';
+}
+
 export class DataSyncOptions {
   repoUrl = process.env.DATA_SYNC_REPO || '';
   branch = process.env.DATA_SYNC_BRANCH || 'main';
@@ -35,6 +86,7 @@ export class DataSync {
   private pending = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private pushing = false;
+  private pushingSince = 0;
   private pulling = false;
   private pullPending = false;
   private ready = false;
@@ -303,8 +355,14 @@ export class DataSync {
   }
 
   private async flush(): Promise<void> {
-    if (!this.pending.size || this.pushing) return;
+    if (!this.pending.size) return;
+    if (this.pushing) {
+      const held = Date.now() - this.pushingSince;
+      if (held > PUSHING_STUCK_MS) console.warn(`${TAG} Push latch held for ${Math.round(held / 1000)}s — sync is not pushing (pending: ${this.pending.size})`);
+      return;
+    }
     this.pushing = true;
+    this.pushingSince = Date.now();
     const files = [...this.pending];
     this.pending.clear();
     this.timer = null;
@@ -320,13 +378,13 @@ export class DataSync {
       }
 
       const status = await this.git('status', '--porcelain');
-      if (!status.trim()) { this.pushing = false; return; }
+      if (!status.trim()) return;
 
-      if (await this.guardMassDeletions('flush')) { this.pushing = false; return; }
+      if (await this.guardMassDeletions('flush')) return;
       const msg = await this.generateCommitMessage(files);
       await this.git('commit', '-m', msg).catch(() => {});
       const ahead = await this.git('rev-list', '--count', `origin/${this.options.branch}..HEAD`).catch(() => '0');
-      if (parseInt(ahead.trim()) === 0) { this.pushing = false; return; }
+      if (parseInt(ahead.trim()) === 0) return;
       await this.git('push', 'origin', this.options.branch).catch(async (err) => {
         console.warn(`${TAG} Push failed, pulling first:`, (err as Error).message);
         await this.pull();
@@ -336,26 +394,35 @@ export class DataSync {
       this.rebuildLog().catch(() => {});
     } catch (err) {
       console.error(`${TAG} Commit/push failed:`, (err as Error).message);
-    }
-    this.pushing = false;
-    if (this.pending.size && !this.timer) {
-      this.timer = setTimeout(() => this.flush(), 2000);
+    } finally {
+      // ALWAYS release the latch: any unsettled/throwing await used to wedge sync permanently,
+      // since every later flush() early-returns on `if (this.pushing) return`.
+      this.pushing = false;
+      if (this.pending.size && !this.timer) {
+        this.timer = setTimeout(() => this.flush(), 2000);
+      }
     }
   }
 
   private async generateCommitMessage(files: string[]): Promise<string> {
-    const fallback = `sync: ${files.join(', ')}`;
+    const fallback = fallbackCommitMessage(files);
     try {
       const diff = await this.git('diff', '--cached', '--stat').catch(() => '');
       const diffContent = await this.git('diff', '--cached', '--no-color', '-U2').catch(() => '');
       if (!diffContent.trim()) return fallback;
       const truncated = diffContent.slice(0, 3000);
-      const msg = await this.askClaude(
-        'Write a concise git commit message (max 72 chars, no quotes, no prefix like "feat:" or "sync:") for this change to an AI agent\'s behavioral config.\n' +
-        `Files: ${files.join(', ')}\nStats: ${diff}\n\nDiff:\n${truncated}`,
-        'haiku',
+      // Bounded: a hung `claude` subprocess used to wedge flush() forever (it holds the push latch).
+      const msg = await withTimeout(
+        this.askClaude(
+          'Write a concise git commit message (max 72 chars, no quotes, no prefix like "feat:" or "sync:") for this change to an AI agent\'s behavioral config.\n' +
+          `Files: ${files.join(', ')}\nStats: ${diff}\n\nDiff:\n${truncated}`,
+          'haiku',
+        ),
+        Number(process.env.DATA_SYNC_COMMIT_MSG_TIMEOUT_MS) || COMMIT_MSG_TIMEOUT_MS,
+        'commit-message query',
       );
-      const line = msg.split('\n')[0].trim().slice(0, 72);
+      const line = extractCommitSubject(msg);
+      if (!line) console.warn(`${TAG} Unusable LLM commit msg, using fallback:`, JSON.stringify((msg || '').slice(0, 120)));
       return line || fallback;
     } catch (err) {
       console.warn(`${TAG} LLM commit msg failed:`, (err as Error).message);
