@@ -13,12 +13,16 @@ const COMMIT_MSG_TIMEOUT_MS = 60_000;
 /** Warn if the push latch has been held longer than this — the 2026-08 outage's signature was silence. */
 const PUSHING_STUCK_MS = 5 * 60_000;
 
-/** Reject after `ms` so a hung subprocess can't hold the push latch forever. */
-export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+/**
+ * Reject after `ms` so a hung subprocess can't hold the push latch forever.
+ * `onTimeout` runs on the timeout path only — use it to actually CANCEL the work
+ * (Promise.race alone abandons it, which orphaned one `claude` subprocess per timeout).
+ */
+export function withTimeout<T>(p: Promise<T>, ms: number, label: string, onTimeout?: () => void): Promise<T> {
   let t: ReturnType<typeof setTimeout>;
   return Promise.race([
     p,
-    new Promise<T>((_, rej) => { t = setTimeout(() => rej(new Error(`${label} timed out after ${ms}ms`)), ms); }),
+    new Promise<T>((_, rej) => { t = setTimeout(() => { try { onTimeout?.(); } catch { /* cancel is best-effort */ } rej(new Error(`${label} timed out after ${ms}ms`)); }, ms); }),
   ]).finally(() => clearTimeout(t!));
 }
 
@@ -31,7 +35,10 @@ export function fallbackCommitMessage(files: string[]): string {
   return `sync: ${names[0]} (+${names.length - 1} more)`.slice(0, 72);
 }
 
-const PROSE_PREAMBLE = /^(looking at|here'?s|here is|sure|certainly|based on|this (diff|change|commit)|i'?ll|okay|the diff)\b/i;
+// Only unambiguous "I'm about to explain" openers. Deliberately does NOT list common subject
+// starters like "the diff"/"this change" — those swallowed legitimate subjects
+// ("the diff view now renders inline"). Real prose is caught by the length guard below.
+const PROSE_PREAMBLE = /^(looking at|here'?s|here is|sure|certainly|based on|i'?ll|okay)\b/i;
 
 /**
  * Pull a real commit subject out of a model reply. Bug 2026-08-26: the raw reply went straight to
@@ -46,14 +53,14 @@ export function extractCommitSubject(raw: string): string {
   for (const rawLine of body.split('\n')) {
     let line = rawLine.trim();
     if (!line) continue;
-    line = line.replace(/^[-*>#]+\s*/, '').trim();          // bullets / headings / quotes
+    line = line.replace(/^(?:[-*>#]+|\d+[.)])\s*/, '').trim(); // bullets / numbered list / headings / quotes
     line = line.replace(/^`+|`+$/g, '').trim();              // inline code ticks
     line = line.replace(/^["'](.*)["']$/, '$1').trim();      // wrapping quotes
     if (!line || /^`+$/.test(line) || line.includes('```')) continue;
     if (line.length < 3) continue;
     if (PROSE_PREAMBLE.test(line)) return '';                // model explained instead of answering
     if (line.endsWith(':')) return '';                       // "Commit message:" style preamble
-    if (line.length > 120) return '';                        // prose paragraph, not a subject
+    if (line.length > 72) return '';                         // longer than a subject line -> prose, never truncate
     return line.slice(0, 72).trim();
   }
   return '';
@@ -412,14 +419,17 @@ export class DataSync {
       if (!diffContent.trim()) return fallback;
       const truncated = diffContent.slice(0, 3000);
       // Bounded: a hung `claude` subprocess used to wedge flush() forever (it holds the push latch).
+      const ac = new AbortController();
       const msg = await withTimeout(
         this.askClaude(
           'Write a concise git commit message (max 72 chars, no quotes, no prefix like "feat:" or "sync:") for this change to an AI agent\'s behavioral config.\n' +
           `Files: ${files.join(', ')}\nStats: ${diff}\n\nDiff:\n${truncated}`,
           'haiku',
+          ac,
         ),
         Number(process.env.DATA_SYNC_COMMIT_MSG_TIMEOUT_MS) || COMMIT_MSG_TIMEOUT_MS,
         'commit-message query',
+        () => ac.abort(),
       );
       const line = extractCommitSubject(msg);
       if (!line) console.warn(`${TAG} Unusable LLM commit msg, using fallback:`, JSON.stringify((msg || '').slice(0, 120)));
@@ -653,8 +663,8 @@ export class DataSync {
    * which is unset on subscription-auth deployments — every merge-conflict resolution failed and
    * spammed owners via notifyOwners().
    */
-  private async askClaude(prompt: string, model: 'haiku' | 'sonnet' | 'opus' = 'sonnet'): Promise<string> {
-    return runTextQuery({ prompt, model, maxTurns: 1 });
+  private async askClaude(prompt: string, model: 'haiku' | 'sonnet' | 'opus' = 'sonnet', abortController?: AbortController): Promise<string> {
+    return runTextQuery({ prompt, model, maxTurns: 1, abortController });
   }
 
   private async getConflictedFiles(): Promise<string[]> {

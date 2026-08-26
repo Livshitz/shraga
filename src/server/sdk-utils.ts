@@ -9,6 +9,8 @@ export async function runTextQuery(opts: {
   model?: string;
   maxTurns?: number;
   systemPrompt?: string;
+  /** Passed to the SDK so a timed-out/cancelled call actually kills the `claude` subprocess. */
+  abortController?: AbortController;
 }): Promise<string> {
   const saved = process.env.CLAUDECODE;
   delete process.env.CLAUDECODE;
@@ -22,6 +24,7 @@ export async function runTextQuery(opts: {
         model,
         maxTurns: opts.maxTurns || 1,
         systemPrompt: opts.systemPrompt,
+        abortController: opts.abortController,
       },
     })) {
       const m = ev as any;
