@@ -72,6 +72,13 @@ export class SelfUpgrade {
       if (running.length) {
         reasons.push(`${running.length} scheduled job(s) still running (${running.join(', ')}) — restarting now would kill them mid-flight; retry when idle or pass {"force":true}`);
       }
+      // Same failure, other origin: an interactive Slack/web turn is not a scheduled job, so the
+      // check above never saw it and upgrades cut live replies off mid-sentence (143). Any held
+      // session lock means someone is mid-turn.
+      const turns = this.o.runningTurns();
+      if (turns) {
+        reasons.push(`${turns} agent turn(s) in flight — restarting now would cut the reply off mid-stream; retry when idle or pass {"force":true}`);
+      }
     }
     const pkgPath = path.join(this.o.appRoot, 'package.json');
 
@@ -252,6 +259,13 @@ export class SelfUpgradeOptions {
   public runningJobs: () => string[] = () => {
     try { return require('../scheduler/engine.ts').getRunningIds() as string[]; }
     catch (err) { console.warn(`${TAG} could not read running jobs:`, (err as Error).message); return []; }
+  };
+
+  /** Interactive agent turns in flight (Slack/web/API), counted off the live session locks. Same
+   *  lazy+guarded shape as runningJobs, and injectable for the same reason. */
+  public runningTurns: () => number = () => {
+    try { return require('../sessions.ts').getActiveLockCount() as number; }
+    catch (err) { console.warn(`${TAG} could not read running turns:`, (err as Error).message); return 0; }
   };
 
   /** Injectable so the preflight is testable without depending on the test host's PATH. */

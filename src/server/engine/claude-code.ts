@@ -1,4 +1,5 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { signInternalToken } from '../auth.ts';
@@ -118,18 +119,44 @@ function logCacheUsage(usage: any, model: string): void {
   console.log(`[claude] Cache: hit=${hitRate}% read=${read} write=${created} uncached=${fresh} out=${usage.output_tokens ?? 0} model=${model}`);
 }
 
+/** SDK spawn hook: same call the SDK would make, plus `detached` (own process group). See the
+ *  call site for why. Shape mirrors the SDK's own spawnLocalProcess return. */
+function spawnDetached(cfg: { command: string; args: string[]; cwd?: string; env: Record<string, string | undefined>; signal?: AbortSignal }) {
+  const child = spawn(cfg.command, cfg.args, {
+    cwd: cfg.cwd,
+    env: cfg.env,
+    signal: cfg.signal,
+    // Keep SDK debug output visible when it is asked for; otherwise the SDK's own default.
+    stdio: ['pipe', 'pipe', cfg.env.DEBUG_CLAUDE_AGENT_SDK ? 'inherit' : 'ignore'],
+    detached: true,
+    windowsHide: true,
+  });
+  return {
+    stdin: child.stdin,
+    stdout: child.stdout,
+    get killed() { return child.killed; },
+    get exitCode() { return child.exitCode; },
+    kill: child.kill.bind(child),
+    on: child.on.bind(child),
+    once: child.once.bind(child),
+    off: child.off.bind(child),
+  };
+}
+
 const INLINE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf']);
 
 async function* buildAttachmentPrompt(text: string, attachments: { path: string; name: string; mimeType: string }[], sessionId: string): AsyncIterable<any> {
   const content: any[] = [];
   const fileRefs: string[] = [];
   const audioRefs: string[] = [];
+  const inlined: string[] = [];
   for (const att of attachments) {
     if (INLINE_MIMES.has(att.mimeType)) {
       try {
         const buf = readFileSync(att.path);
         const blockType = att.mimeType === 'application/pdf' ? 'document' : 'image';
         content.push({ type: blockType, source: { type: 'base64', media_type: att.mimeType, data: buf.toString('base64') } });
+        inlined.push(`${att.name} (${att.path})`);
       } catch (err) {
         console.error(`[claude] Failed to read attachment ${att.path}:`, err);
         fileRefs.push(`${att.name} (at ${att.path} — failed to read)`);
@@ -143,6 +170,12 @@ async function* buildAttachmentPrompt(text: string, attachments: { path: string;
   }
   if (audioRefs.length > 0) text += `\n\n[Audio attached — transcribe with the mcp-audio tool (post_audio_transcribe { file }) before answering]: ${audioRefs.join(', ')}`;
   if (fileRefs.length > 0) text += `\n\n[Attached files — use Read tool to access]: ${fileRefs.join(', ')}`;
+  // Say IN THE TEXT that the inlined blocks exist. `text` carries the whole conversation history, so
+  // the image blocks sit tens of thousands of tokens above the actual question and the model has
+  // answered "I don't see any images attached" to a message that had four — the transcript proves the
+  // blocks were sent. This line makes the prompt agree with its own content, and names the on-disk
+  // paths so the model can Read them if it still can't see a block.
+  if (inlined.length > 0) text += `\n\n[${inlined.length} file(s) are attached to THIS message and included above as image/document blocks — look at them: ${inlined.join(', ')}]`;
   content.push({ type: 'text', text });
   yield { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, session_id: sessionId };
 }
@@ -273,6 +306,14 @@ export class ClaudeCodeEngine implements AgentEngine {
     const addonSuffix = getPromptSuffix(opts.turnHints);
     options['systemPrompt'] = `${IMMUTABLE_SYSTEM_PROMPT}\n\n${userPrompt}${addonSuffix ? `\n\n${addonSuffix}` : ''}`;
     if (opts.abortController) options['abortController'] = opts.abortController;
+    // Spawn the CLI in its OWN process group. The service manager signals the whole JOB on restart
+    // (`launchctl kickstart -k`, `systemctl restart`), so an inherited process group means the child
+    // dies instantly with SIGTERM — surfacing mid-reply as `exited with code 143` and making the
+    // server's 90s drain (gracefulShutdown) protect nothing: it only ever waited for a turn that was
+    // already dead. Detached, the signal reaches the server alone and the drain can finish the turn.
+    // Teardown is unaffected: the SDK still kills the child on abort/close and on process exit.
+    options['spawnClaudeCodeProcess'] = spawnDetached;
+
     // Passed as a FILE, never as `options.mcpServers` — the SDK would put the whole config (every MCP
     // server's credentials) on the CLI's argv, where `ps` / `/proc` / journald expose it. See
     // writeMcpConfigFile. Setting both would re-add the argv copy, so it's one or the other.

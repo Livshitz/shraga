@@ -126,6 +126,25 @@ describe('SelfUpgrade vs running jobs', () => {
     const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
     expect(subject(root, { runningJobs: () => [] }).blockers()).toEqual([]);
   });
+
+  // The scheduler check above never saw a Slack/web turn, so upgrades cut live replies off
+  // mid-sentence (`exited with code 143`). Interactive turns are held session locks, not jobs.
+  test('refuses while an interactive turn is in flight — the restart would cut the reply off', async () => {
+    const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
+    const s = subject(root, { runningJobs: () => [], runningTurns: () => 1 });
+
+    expect(s.blockers().join(' ')).toContain('agent turn(s) in flight');
+    const plan = await s.start({ version: '0.1.99' });
+    expect(plan.started).toBe(false);
+    expect(plan.reason).toContain('cut the reply off mid-stream');
+  });
+
+  test('force overrides the in-flight-turn block too', () => {
+    const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
+    const s = subject(root, { runningJobs: () => [], runningTurns: () => 3 });
+
+    expect(s.blockers({ force: true }).join(' ')).not.toContain('agent turn');
+  });
 });
 
 describe('SelfUpgrade report delivery', () => {
