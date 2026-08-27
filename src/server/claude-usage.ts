@@ -21,7 +21,6 @@ export interface ClaudeUsageLimit {
   percent: number;
   severity: string;
   resetsAt: string | null;
-  isActive: boolean;
   /** Present on scoped limits, e.g. a per-model window. */
   scopeLabel?: string;
 }
@@ -130,7 +129,6 @@ function toLimit(l: any): ClaudeUsageLimit | null {
     percent: Math.max(0, Math.min(100, Math.round(l.percent))),
     severity: String(l.severity ?? 'normal'),
     resetsAt: typeof l.resets_at === 'string' ? l.resets_at : null,
-    isActive: l.is_active === true,
     scopeLabel: l.scope?.model?.display_name ?? undefined,
   };
 }

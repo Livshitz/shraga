@@ -53,7 +53,6 @@ describe('subscription gate', () => {
     const u = await r.get();
     expect(u?.subscriptionType).toBe('max');
     expect(u?.limits.map(l => l.kind)).toEqual(['session', 'weekly_all']);
-    expect(u?.limits[0].isActive).toBe(true);
     expect(hits).toBe(1);
   });
 

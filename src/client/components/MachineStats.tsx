@@ -10,7 +10,6 @@ export interface UsageLimit {
   percent: number;
   severity: string;
   resetsAt: string | null;
-  isActive: boolean;
   scopeLabel?: string;
 }
 export interface Usage { subscriptionType: string | null; limits: UsageLimit[] }
@@ -98,7 +97,7 @@ export function UsageMetric({ usage }: { usage: Usage | null }) {
 
   // Every window, each labelled from its OWN resets_at — the `weekly_*` kinds do NOT reset weekly.
   const detail = usage.limits
-    .map(l => `${l.scopeLabel ?? l.kind} ${l.percent}%${l.isActive ? '' : ' (dormant)'}${untilLabel(l.resetsAt) ? ` (resets in ${untilLabel(l.resetsAt)})` : ''}`)
+    .map(l => `${l.scopeLabel ?? l.kind} ${l.percent}%${untilLabel(l.resetsAt) ? ` (resets in ${untilLabel(l.resetsAt)})` : ''}`)
     .join('\n');
   const plan = usage.subscriptionType ? `claude ${usage.subscriptionType} — ` : 'claude ';
 
@@ -107,13 +106,13 @@ export function UsageMetric({ usage }: { usage: Usage | null }) {
   return <Metric label="usage" value={top.percent} title={`${plan}${top.percent}% of the binding limit\n${detail}`} severity={top.severity} />;
 }
 
-/** The window that actually gates you is the fullest one that is IN EFFECT — `is_active` marks the
- *  window currently accruing, and a dormant window cannot bind you however full it is. If nothing is
- *  active (an idle box, or a vendor that stops sending the flag) we still answer with the fullest
- *  window rather than hiding the widget: degrading to slightly-stale beats degrading to absent. */
+/** The window that gates you first is simply the FULLEST one, whichever kind it is.
+ *  We deliberately ignore the endpoint's `is_active`: observed live on prod, `weekly_all` reports
+ *  `is_active: false` while genuinely accruing (1%, a real future resets_at, corroborated by
+ *  seven_day.utilization: 1.0). So the flag marks the window the vendor considers CURRENTLY binding,
+ *  not "this window is running" — filtering on it under-reports and is falsely reassuring. */
 export function binding(limits: UsageLimit[]): UsageLimit | null {
-  const fullest = (ls: UsageLimit[]) => ls.reduce<UsageLimit | null>((best, l) => (!best || l.percent > best.percent ? l : best), null);
-  return fullest(limits.filter(l => l.isActive)) ?? fullest(limits);
+  return limits.reduce<UsageLimit | null>((best, l) => (!best || l.percent > best.percent ? l : best), null);
 }
 
 /** Human "time until reset", derived from resets_at only — never from the limit's kind name. */
