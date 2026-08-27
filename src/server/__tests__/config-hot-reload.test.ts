@@ -55,6 +55,12 @@ async function run(root: string, body: string): Promise<{ out: string[]; stderr:
 const EDIT = (src: string) => `writeFileSync(CONFIG, ${JSON.stringify(src)});\n` +
   `await Bun.sleep(1100);\n`;
 
+/** A config that `require` CANNOT load (top-level await), forcing loadShragaConfig's async fallback. */
+const tlaConfigFor = (name: string) =>
+  `import { defineConfig } from ${JSON.stringify(path.join(SERVER_DIR, 'shraga-config.ts'))};\n` +
+  `await Promise.resolve();\n` +
+  `export default defineConfig({ mcps: { ${name}: { command: 'bun', args: ['run', '${name}'] } } });\n`;
+
 describe('global config hot-reload', () => {
   test('a config edited on disk is picked up without restarting the process', async () => {
     const root = deployment();
@@ -116,5 +122,65 @@ describe('global config hot-reload', () => {
       `say('identical', String(getShragaConfigSync() === a));`,
     ].join('\n'));
     expect(out).toEqual(['identical=true']);
+  });
+  // ── Gaps found in the original hot-reload change, fixed here ──────────────────────────────────
+
+  test('a config file that disappears keeps the last-good global MCPs, and says so once', async () => {
+    // The whole point of a global config is the MCP set. A deleted file used to reset the cache to
+    // `{}` — every global MCP gone from a running process, with nothing in the log to explain it.
+    const root = deployment();
+    writeFileSync(path.join(root, 'data', 'shraga.config.ts'), configFor('good'));
+    const { out, stderr } = await run(root, [
+      `import { rmSync } from 'node:fs';`,
+      `await loadShragaConfig();`,
+      `say('boot', names());`,
+      `rmSync(CONFIG);`,
+      `say('afterDelete', names());`,
+      `say('afterDeleteTwice', names());`,
+    ].join('\n'));
+    expect(out).toEqual(['boot=good', 'afterDelete=good', 'afterDeleteTwice=good']);
+    // Loud, but once — not once per read.
+    expect(stderr.match(/is GONE from/g)?.length).toBe(1);
+    expect(stderr).toContain('global MCPs preserved');
+  });
+
+  test('a truncated (0-byte) config is a failed write, not an authored "no MCPs"', async () => {
+    // `require` returns {} for an empty file WITHOUT throwing, so this slipped past the
+    // broken-config guard and wiped every global MCP silently.
+    const root = deployment();
+    writeFileSync(path.join(root, 'data', 'shraga.config.ts'), configFor('good'));
+    const { out, stderr } = await run(root, [
+      `await loadShragaConfig();`,
+      `say('boot', names());`,
+      `writeFileSync(CONFIG, '');`,
+      `say('afterTruncate', names());`,
+      EDIT(configFor('fixed')),
+      `say('afterFix', names());`,
+    ].join('\n'));
+    expect(out).toEqual(['boot=good', 'afterTruncate=good', 'afterFix=fixed']);
+    expect(stderr).toContain('empty (0 bytes)');
+    expect(stderr).toContain('KEEPING the last-good config');
+  });
+
+  test('the async fallback never overwrites a newer config loaded while it awaited', async () => {
+    // Lost update: caller A takes the top-level-await path for version 2; while it is parked on the
+    // import, caller B synchronously loads version 3. A used to commit v2 on top of v3 and stamp it
+    // as current — so A's own return value was stale even though v3 was already in the cache.
+    const root = deployment();
+    writeFileSync(path.join(root, 'data', 'shraga.config.ts'), tlaConfigFor('v1'));
+    const { out } = await run(root, [
+      `await loadShragaConfig();`,
+      `say('boot', names());`,
+      EDIT(tlaConfigFor('v2')),
+      // A: require throws (async module) -> parks on `await import(...v2)`.
+      `const pending = loadShragaConfig();`,
+      // B: still synchronous, so this lands BEFORE A's import resolves. A shorter, require-able
+      // file: the stamp is mtime+size, so the size change alone makes it a new version.
+      `writeFileSync(CONFIG, ${JSON.stringify(configFor('v3'))});`,
+      `say('syncCallerSees', names());`,
+      `const returned = await pending;`,
+      `say('asyncCallerReturned', Object.keys(returned.mcps ?? {}).sort().join(',') || '(none)');`,
+    ].join('\n'));
+    expect(out).toEqual(['boot=v1', 'syncCallerSees=v3', 'asyncCallerReturned=v3']);
   });
 });

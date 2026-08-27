@@ -99,6 +99,8 @@ let _cachedPath: string | null = null;
 let _cachedStamp = '';
 /** Stamp of the last version we failed to load — so a broken config logs once, not per call. */
 let _failedStamp = '';
+/** True once we've reported that a previously-present config file went missing (log once, not per call). */
+let _missingLogged = false;
 
 const _require = createRequire(import.meta.url);
 
@@ -123,6 +125,13 @@ function stampOf(file: string): string {
  * Throws on a broken config; callers keep the last-good value.
  */
 function readConfigSync(configPath: string): ShragaConfig {
+  // A 0-byte file is a TRUNCATED/FAILED WRITE, not an authored "no MCPs": `require` hands back `{}`
+  // for it without throwing, which would silently drop every global MCP. Fail loudly instead so the
+  // caller keeps the last-good value — and, because the stamp is not advanced, recovers by itself
+  // the moment the real content lands.
+  if (statSync(configPath).size === 0) {
+    throw new Error('config file is empty (0 bytes) — refusing to load it over the last-good config');
+  }
   try {
     // Delete by the RESOLVED key: the cache is keyed by the realpath, and DATA_DIR is often a
     // symlinked path (macOS /var -> /private/var, or a symlinked data dir), so deleting the
@@ -150,9 +159,22 @@ function readConfigSync(configPath: string): ShragaConfig {
 function refreshConfig(): unknown {
   const configPath = resolveConfigPath();
   if (!configPath) {
-    if (_cached === null || _cachedPath !== null) { _cached = {}; _cachedPath = null; _cachedStamp = ''; }
+    // Cold start with no config at all: an empty config is the honest answer.
+    if (_cached === null) { _cached = {}; _cachedPath = null; _cachedStamp = ''; return null; }
+    // We HAD a config and the file is now gone — deleted, renamed, or a checkout/mount blip.
+    // Resetting the cache here would silently drop EVERY global MCP from a running process, with
+    // no log to explain it. Keep the last-good value (same policy as a config that fails to parse),
+    // say so once, and leave _cachedPath/_cachedStamp intact so a re-appearing file recovers.
+    if (_cachedPath !== null && !_missingLogged) {
+      _missingLogged = true;
+      console.error(
+        `[config] ${path.basename(_cachedPath)} is GONE from ${DATA_DIR} —`,
+        'KEEPING the last-good config in memory (global MCPs preserved)',
+      );
+    }
     return null;
   }
+  _missingLogged = false;
   const stamp = stampOf(configPath);
   if (_cached !== null && configPath === _cachedPath && stamp === _cachedStamp) return null;
   try {
@@ -196,10 +218,17 @@ export async function loadShragaConfig(): Promise<ShragaConfig> {
       try {
         const stamp = stampOf(configPath);
         const mod = await import(`${configPath}?stamp=${encodeURIComponent(stamp)}`);
-        _cached = mod.default ?? {};
-        _cachedPath = configPath;
-        _cachedStamp = stamp;
-        _failedStamp = '';
+        // We just awaited, so the world may have moved: another caller can have loaded a NEWER
+        // config synchronously while this import was in flight. Committing unconditionally would
+        // overwrite it with the older value AND stamp it as current — a lost update that hands the
+        // stale config to both callers. Commit only when the file on disk is still the version we
+        // imported and the cache has not already reached it.
+        if (stampOf(configPath) === stamp && _cachedStamp !== stamp) {
+          _cached = mod.default ?? {};
+          _cachedPath = configPath;
+          _cachedStamp = stamp;
+          _failedStamp = '';
+        }
       } catch {
         // Already logged by refreshConfig; last-good (or {}) stands.
       }
