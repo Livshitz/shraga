@@ -6,9 +6,9 @@ import { UsageMetric, binding, untilLabel, type Usage } from '../MachineStats';
 const REAL: Usage = {
   subscriptionType: 'max',
   limits: [
-    { kind: 'session', group: 'session', percent: 5, severity: 'normal', resetsAt: '2026-08-27T20:50:00.087873+00:00', isActive: true },
-    { kind: 'weekly_all', group: 'weekly', percent: 0, severity: 'normal', resetsAt: '2026-09-01T21:00:00.087899+00:00', isActive: false },
-    { kind: 'weekly_scoped', group: 'weekly', percent: 0, severity: 'normal', resetsAt: null, isActive: false, scopeLabel: 'Fable' },
+    { kind: 'session', group: 'session', percent: 5, severity: 'normal', resetsAt: '2026-08-27T20:50:00.087873+00:00' },
+    { kind: 'weekly_all', group: 'weekly', percent: 0, severity: 'normal', resetsAt: '2026-09-01T21:00:00.087899+00:00' },
+    { kind: 'weekly_scoped', group: 'weekly', percent: 0, severity: 'normal', resetsAt: null, scopeLabel: 'Fable' },
   ],
 };
 
@@ -31,8 +31,7 @@ describe('UsageMetric gate', () => {
 describe('binding limit', () => {
   it('picks the fullest window, whichever kind it is', () => {
     expect(binding(REAL.limits)?.kind).toBe('session');
-    // isActive must move with it: a dormant window is not the binding one (see the suite below).
-    const weeklyHot = REAL.limits.map(l => (l.kind === 'weekly_all' ? { ...l, percent: 80, isActive: true } : l));
+    const weeklyHot = REAL.limits.map(l => (l.kind === 'weekly_all' ? { ...l, percent: 80 } : l));
     expect(binding(weeklyHot)?.kind).toBe('weekly_all');
   });
 });
@@ -53,25 +52,29 @@ describe('untilLabel', () => {
   });
 });
 
-describe('binding limit ignores windows that are not in effect', () => {
-  // is_active marks the window that is actually accruing. A dormant window at 42% is not what
-  // gates you, and the tooltip calls the headline "the binding limit".
-  const DORMANT_HOT: Usage = {
+describe('the headline is the window closest to exhausting', () => {
+  // Observed on prod: the vendor reports `is_active: false` on a window that is genuinely accruing,
+  // so it means "currently binding", not "running". Filtering on it painted a reassuring green 6%
+  // while 85% of the weekly window was gone, and called that live window "dormant".
+  const WEEKLY_HOT: Usage = {
     subscriptionType: 'max',
     limits: [
-      { kind: 'session', group: 'session', percent: 7, severity: 'normal', resetsAt: null, isActive: true },
-      { kind: 'weekly_all', group: 'weekly', percent: 42, severity: 'normal', resetsAt: null, isActive: false },
+      { kind: 'session', group: 'session', percent: 6, severity: 'normal', resetsAt: null },
+      { kind: 'weekly_all', group: 'weekly', percent: 85, severity: 'normal', resetsAt: null },
     ],
   };
 
-  it('never headlines an inactive window over an active one', () => {
-    expect(binding(DORMANT_HOT.limits)?.kind).toBe('session');
-    expect(renderToStaticMarkup(<UsageMetric usage={DORMANT_HOT} />)).toContain('7%');
+  it('headlines the fullest window even when the vendor calls it non-binding', () => {
+    expect(binding(WEEKLY_HOT.limits)?.kind).toBe('weekly_all');
+    const html = renderToStaticMarkup(<UsageMetric usage={WEEKLY_HOT} />);
+    expect(html).toContain('>85%<');
+    expect(html).not.toContain('6% of the binding limit');
+    expect(html).toContain('text-amber-500'); // 85% must not paint reassuringly green
+    expect(html).not.toContain('text-emerald-500');
   });
 
-  it('degrades to the fullest window when NOTHING is active (unknown vendor state, still render)', () => {
-    const allDormant = DORMANT_HOT.limits.map(l => ({ ...l, isActive: false }));
-    expect(binding(allDormant)?.kind).toBe('weekly_all');
+  it('never annotates a window as dormant', () => {
+    expect(renderToStaticMarkup(<UsageMetric usage={WEEKLY_HOT} />)).not.toContain('dormant');
   });
 
   it('is null for an empty list', () => {
@@ -92,7 +95,7 @@ describe('the usage gauge is complete on the FIRST paint', () => {
 describe('severity colouring survives an unknown vocabulary', () => {
   const at = (percent: number, severity: string): Usage => ({
     subscriptionType: 'max',
-    limits: [{ kind: 'session', group: 'session', percent, severity, resetsAt: null, isActive: true }],
+    limits: [{ kind: 'session', group: 'session', percent, severity, resetsAt: null }],
   });
 
   it('paints red for a known critical severity', () => {
