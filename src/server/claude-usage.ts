@@ -34,8 +34,10 @@ export interface ClaudeUsage {
 export class ClaudeUsageOptions {
   credentialsPath = path.join(homedir(), '.claude', '.credentials.json');
   endpoint = 'https://api.anthropic.com/api/oauth/usage';
-  /** Cache the UPSTREAM call, not the token: many browsers polling must not multiply into rate-limit
-   *  pressure. Failures are cached too, so a 403 box doesn't retry on every client poll. */
+  /** How long a completed upstream result (success OR failure) is reused for. Concurrent callers are
+   *  deduped separately onto one in-flight request, so a reload storm or a wall of open tabs costs at
+   *  most one upstream call per window — this endpoint answers 429 aggressively. Failures are cached
+   *  on the same terms, so a 403/API-key box does not retry on every client poll. */
   ttlMs = 60_000;
   timeoutMs = 8_000;
 }
@@ -43,6 +45,10 @@ export class ClaudeUsageOptions {
 export class ClaudeUsageReader {
   public options: ClaudeUsageOptions;
   private cache: { at: number; value: ClaudeUsage | null } | null = null;
+  /** The one upstream request currently in flight, shared by every caller that arrives while it runs.
+   *  Without this the TTL is useless against a stampede: the cache is only written once the request
+   *  RESOLVES, so N simultaneous callers all miss and all hit upstream. */
+  private inflight: Promise<ClaudeUsage | null> | null = null;
 
   public constructor(options?: Partial<ClaudeUsageOptions>) {
     this.options = { ...new ClaudeUsageOptions(), ...options };
@@ -52,9 +58,13 @@ export class ClaudeUsageReader {
   async get(): Promise<ClaudeUsage | null> {
     const now = Date.now();
     if (this.cache && now - this.cache.at < this.options.ttlMs) return this.cache.value;
-    const value = await this.fetchUsage();
-    this.cache = { at: now, value };
-    return value;
+    if (this.inflight) return this.inflight;
+    // Clear inflight before the value is handed out, so a rejection can never wedge the reader:
+    // the next call past the TTL starts a fresh request.
+    this.inflight = this.fetchUsage()
+      .then((value) => { this.cache = { at: Date.now(), value }; return value; })
+      .finally(() => { this.inflight = null; });
+    return this.inflight;
   }
 
   private async fetchUsage(): Promise<ClaudeUsage | null> {
