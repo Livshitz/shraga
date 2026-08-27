@@ -385,7 +385,10 @@ export async function retrySlackSession(session: SessionMeta, prompt: string): P
           onUserQuestion: makeSlackQuestionHandler({ channel, threadTs, useUserToken }),
         }),
         session.sessionId,
-        { partial: false, artifacts: false },
+        // Partial-capture ON: a recovery turn is the one most likely to be interrupted again (a
+        // restart loop, an upgrade retry), and with it off the second interruption had nothing to
+        // preserve and resumed from the original prompt instead of the cut-off point.
+        { partial: true, artifacts: false },
       ),
     );
     if (replyTs) { console.log(`[slack-bot] recovery reply posted: ${channel} ts=${replyTs}`); invalidateChannelContext(channel); }

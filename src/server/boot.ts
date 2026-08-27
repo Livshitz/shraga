@@ -26,7 +26,7 @@ import { mountFeatures, registerFeature, resumeFeatureSession, collectFeatureFla
 import { registerSpaCatchAll } from './spa-catchall.ts';
 import { slackFeature } from './slack/feature.ts';
 import { dataPath } from './paths.ts';
-import { getAllSessions, getSession, getSessionHistory, upsertSession, appendMessage, saveConversation, loadConversation, setSessionDirectives, getAutoApprove, setAutoApprove, getSessionsByScheduleId, getSessionsVisibleTo, isSessionVisibleTo, setRunStatus, incrementRetryCount, resetRetryCount, getRunningSessions, getActiveLockCount, updateScheduledSessionStatus, setShuttingDown, backfillSessionVisibility, writePartial, readPartial, clearPartial, registerLivePartial, unregisterLivePartial, readLivePartial, acquireSessionLock, releaseSessionLock, replaceSessionLock, isSessionLocked, getSessionAbortController, forkSession, generateSessionTitle, type ConvBlock, type ConvMessage, type SessionMeta } from './sessions.ts';
+import { getAllSessions, getSession, getSessionHistory, upsertSession, appendMessage, saveConversation, loadConversation, setSessionDirectives, getAutoApprove, setAutoApprove, getSessionsByScheduleId, getSessionsVisibleTo, isSessionVisibleTo, setRunStatus, incrementRetryCount, getRunningSessions, getActiveLockCount, updateScheduledSessionStatus, setShuttingDown, backfillSessionVisibility, writePartial, readPartial, clearPartial, registerLivePartial, unregisterLivePartial, readLivePartial, acquireSessionLock, releaseSessionLock, replaceSessionLock, isSessionLocked, getSessionAbortController, forkSession, generateSessionTitle, type ConvBlock, type ConvMessage, type SessionMeta } from './sessions.ts';
 import { setBroadcaster } from './session-bus.ts';
 import * as scheduler from './scheduler/index.ts';
 import { initPolls } from './polls.ts';
@@ -1325,7 +1325,6 @@ async function runStream(ws: WebSocket, session: WsSession, sid: string, promptT
     if (blocks.length) writePartial(sid, blocks);
   }, 5_000);
 
-  resetRetryCount(sid);
   setRunStatus(sid, 'running', 'web');
 
   let stopReason = '';

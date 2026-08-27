@@ -270,7 +270,16 @@ export function setRunStatus(sessionId: string, status: 'running' | 'idle', orig
   if (!s) return;
   s.runStatus = status;
   if (origin) s.runOrigin = origin;
-  if (status === 'idle') s.lastStopReason = stopReason;
+  if (status === 'idle') {
+    s.lastStopReason = stopReason;
+    // runRetryCount caps crash-resume loops (interrupt → resume → interrupt). Reaching 'idle' at all
+    // proves this turn was NOT killed by a restart — the guard above drops idle writes during a
+    // drain, and a hard kill never gets here — so the loop is broken and the count starts over.
+    // It used to be reset only on the web path, so Slack and scheduler sessions accumulated it
+    // forever: after two interruptions in their whole life they permanently lost auto-resume and
+    // every later restart ended at "please send a message to continue".
+    s.runRetryCount = 0;
+  }
   s.lastModified = Date.now();
   saveIndex(sessions);
 }
