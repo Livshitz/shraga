@@ -50,7 +50,10 @@ export function MachineStats({ socket, getToken }: Props) {
   const latest = samples[samples.length - 1];
 
   return (
-    <div className="flex items-center justify-center gap-2 text-[10px] text-muted-foreground/60">
+    // Wraps: three metrics do not fit one row in the w-64 sidebar (~302px of content, ~223px of box),
+    // and no amount of label/glyph trimming closes that gap without shrinking the CPU/MEM sparklines.
+    // w-full pins the row to the container so a wrapped line still centres against the sidebar.
+    <div className="w-full flex flex-wrap items-center justify-center gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground/60">
       <Metric label="cpu" value={latest.cpu} series={samples.map(s => s.cpu)} />
       <Metric label="mem" value={latest.mem} series={samples.map(s => s.mem)} />
       <ClaudeUsageMetric getToken={getToken} />
