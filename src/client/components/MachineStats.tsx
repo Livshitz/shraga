@@ -63,7 +63,6 @@ export function MachineStats({ socket, getToken }: Props) {
 // subscription — it answers 204 otherwise, and 204 (like any failure here) renders nothing.
 function ClaudeUsageMetric({ getToken }: { getToken: () => Promise<string | null> }) {
   const [usage, setUsage] = useState<Usage | null>(null);
-  const [series, setSeries] = useState<number[]>([]);
 
   useEffect(() => {
     let alive = true;
@@ -78,8 +77,6 @@ function ClaudeUsageMetric({ getToken }: { getToken: () => Promise<string | null
         const d: Usage = await r.json();
         if (!alive || !d?.limits?.length) return;
         setUsage(d);
-        const b = binding(d.limits);
-        if (b) setSeries(prev => [...prev, b.percent].slice(-WINDOW));
       } catch (err) {
         console.warn('[MachineStats] claude usage poll failed', err);
         if (alive) setUsage(null);
@@ -90,27 +87,33 @@ function ClaudeUsageMetric({ getToken }: { getToken: () => Promise<string | null
     return () => { alive = false; clearInterval(id); };
   }, [getToken]);
 
-  return <UsageMetric usage={usage} series={series} />;
+  return <UsageMetric usage={usage} />;
 }
 
 /** Pure render — null usage (204, or any failure) renders NOTHING. Split from the fetching shell so
  *  the gate and the labelling are testable without a network or a DOM. */
-export function UsageMetric({ usage, series }: { usage: Usage | null; series: number[] }) {
+export function UsageMetric({ usage }: { usage: Usage | null }) {
   const top = usage && binding(usage.limits);
   if (!usage || !top) return null;
 
   // Every window, each labelled from its OWN resets_at — the `weekly_*` kinds do NOT reset weekly.
   const detail = usage.limits
-    .map(l => `${l.scopeLabel ?? l.kind} ${l.percent}%${untilLabel(l.resetsAt) ? ` (resets in ${untilLabel(l.resetsAt)})` : ''}`)
+    .map(l => `${l.scopeLabel ?? l.kind} ${l.percent}%${l.isActive ? '' : ' (dormant)'}${untilLabel(l.resetsAt) ? ` (resets in ${untilLabel(l.resetsAt)})` : ''}`)
     .join('\n');
   const plan = usage.subscriptionType ? `claude ${usage.subscriptionType} — ` : 'claude ';
 
-  return <Metric label="usage" value={top.percent} series={series} title={`${plan}${top.percent}% of the binding limit\n${detail}`} severity={top.severity} />;
+  // No `series`: usage has no server-side history to seed from, so it renders a GAUGE (full from the
+  // first paint) instead of a sparkline that would plot tab-uptime and be empty for the first minutes.
+  return <Metric label="usage" value={top.percent} title={`${plan}${top.percent}% of the binding limit\n${detail}`} severity={top.severity} />;
 }
 
-/** The window that actually gates you is the fullest one, whichever kind it happens to be. */
+/** The window that actually gates you is the fullest one that is IN EFFECT — `is_active` marks the
+ *  window currently accruing, and a dormant window cannot bind you however full it is. If nothing is
+ *  active (an idle box, or a vendor that stops sending the flag) we still answer with the fullest
+ *  window rather than hiding the widget: degrading to slightly-stale beats degrading to absent. */
 export function binding(limits: UsageLimit[]): UsageLimit | null {
-  return limits.reduce<UsageLimit | null>((best, l) => (!best || l.percent > best.percent ? l : best), null);
+  const fullest = (ls: UsageLimit[]) => ls.reduce<UsageLimit | null>((best, l) => (!best || l.percent > best.percent ? l : best), null);
+  return fullest(limits.filter(l => l.isActive)) ?? fullest(limits);
 }
 
 /** Human "time until reset", derived from resets_at only — never from the limit's kind name. */
@@ -124,21 +127,38 @@ export function untilLabel(iso: string | null): string | null {
   return `${Math.round(h / 24)}d`;
 }
 
+/** Only severities we have actually SEEN mean something here. The vendor's vocabulary is not
+ *  documented and not fully observed, so an unrecognised value falls through to the percentage
+ *  thresholds — treating "anything that isn't normal" as elevated would paint the widget a
+ *  permanent amber the first time the endpoint adds a benign new word. */
+const ELEVATED: Record<string, string> = { critical: 'text-red-500', exceeded: 'text-red-500', warning: 'text-amber-500', warn: 'text-amber-500' };
+
 function level(v: number, severity?: string) {
-  // A non-normal severity from the server outranks our own thresholds — it knows about
-  // soft caps and approaching-limit states that a raw percentage doesn't show.
-  if (severity && severity !== 'normal') return severity === 'critical' ? 'text-red-500' : 'text-amber-500';
+  const known = severity ? ELEVATED[severity] : undefined;
+  if (known) return known;
   return v >= 90 ? 'text-red-500' : v >= 75 ? 'text-amber-500' : 'text-emerald-500';
 }
 
-function Metric({ label, value, series, title, severity }: { label: string; value: number; series: number[]; title?: string; severity?: string }) {
+function Metric({ label, value, series, title, severity }: { label: string; value: number; series?: number[]; title?: string; severity?: string }) {
   const tone = level(value, severity);
   return (
-    <span className="flex items-center gap-1" title={title ?? `${label} ${value}% — last ${series.length} samples`}>
+    <span className="flex items-center gap-1" title={title ?? `${label} ${value}%${series ? ` — last ${series.length} samples` : ''}`}>
       <span className="uppercase tracking-wide">{label}</span>
-      <Sparkline series={series} className={tone} />
+      {series ? <Sparkline series={series} className={tone} /> : <Gauge value={value} className={tone} />}
       <span className={cn('tabular-nums', tone)}>{value}%</span>
     </span>
+  );
+}
+
+// Same 40x12 footprint as the sparkline, so the strip stays one row of like-sized glyphs — but it
+// shows a single CURRENT value and is therefore correct and complete on the very first render.
+function Gauge({ value, className }: { value: number; className?: string }) {
+  const W = 40, H = 12, w = (Math.max(0, Math.min(100, value)) / 100) * W;
+  return (
+    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className={cn('overflow-visible', className)} preserveAspectRatio="none">
+      <rect x={0} y={H / 2 - 2} width={W} height={4} rx={2} fill="currentColor" opacity={0.2} />
+      {w > 0 && <rect x={0} y={H / 2 - 2} width={w} height={4} rx={2} fill="currentColor" />}
+    </svg>
   );
 }
 
