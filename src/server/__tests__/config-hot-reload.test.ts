@@ -166,21 +166,38 @@ describe('global config hot-reload', () => {
     // Lost update: caller A takes the top-level-await path for version 2; while it is parked on the
     // import, caller B synchronously loads version 3. A used to commit v2 on top of v3 and stamp it
     // as current — so A's own return value was stale even though v3 was already in the cache.
+    //
+    // Whether that path is reachable AT ALL is runtime-dependent: `require` of an async module
+    // throws on Bun 1.3.x (which is what makes the fallback exist) but succeeds on Bun >=1.4. When
+    // it succeeds there is no fallback and no race — v2 is then the CORRECT answer, because the
+    // config really was read before v3 was written. So the driver reports which runtime it is on
+    // and we assert the outcome that runtime owes us, instead of assuming the older one.
     const root = deployment();
     writeFileSync(path.join(root, 'data', 'shraga.config.ts'), tlaConfigFor('v1'));
+    const probe = path.join(root, 'tla-probe.ts');
+    writeFileSync(probe, 'await Promise.resolve();\nexport default {};\n');
     const { out } = await run(root, [
+      `import { createRequire } from 'node:module';`,
+      `let tlaThrows = false;`,
+      `try { createRequire(import.meta.url)(${JSON.stringify(probe)}); } catch { tlaThrows = true; }`,
+      `say('asyncFallbackReachable', String(tlaThrows));`,
       `await loadShragaConfig();`,
       `say('boot', names());`,
       EDIT(tlaConfigFor('v2')),
-      // A: require throws (async module) -> parks on `await import(...v2)`.
+      // A: on Bun 1.3.x require throws (async module) -> parks on `await import(...v2)`.
       `const pending = loadShragaConfig();`,
-      // B: still synchronous, so this lands BEFORE A's import resolves. A shorter, require-able
+      // B: still synchronous, so this lands BEFORE A's import can resolve. A shorter, require-able
       // file: the stamp is mtime+size, so the size change alone makes it a new version.
       `writeFileSync(CONFIG, ${JSON.stringify(configFor('v3'))});`,
       `say('syncCallerSees', names());`,
       `const returned = await pending;`,
       `say('asyncCallerReturned', Object.keys(returned.mcps ?? {}).sort().join(',') || '(none)');`,
     ].join('\n'));
-    expect(out).toEqual(['boot=v1', 'syncCallerSees=v3', 'asyncCallerReturned=v3']);
+
+    const reachable = out.includes('asyncFallbackReachable=true');
+    expect(out.slice(1, 3)).toEqual(['boot=v1', 'syncCallerSees=v3']);
+    // The point of the fix: when the fallback IS taken, the awaiting caller must not be handed the
+    // older config that it clobbered v3 with. Without the fix this reads v2.
+    expect(out[3]).toBe(reachable ? 'asyncCallerReturned=v3' : 'asyncCallerReturned=v2');
   });
 });
