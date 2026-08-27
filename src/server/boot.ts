@@ -57,6 +57,7 @@ import { syncVendorRepos } from './vendor-sync.ts';
 import { SelfUpgrade } from './self-upgrade/index.ts';
 import { initEngines, getAvailableEngines, getEngine } from './engine/index.ts';
 import { statsSampler } from './stats.ts';
+import { claudeUsage } from './claude-usage.ts';
 import { getAll as getAllContacts } from './contacts.ts';
 import { artifactsRouter } from './artifacts/artifacts.routes.ts';
 import { handleArtifactToolUse } from './artifacts/artifacts.handler.ts';
@@ -222,6 +223,17 @@ app.post('/api/self-upgrade', requireAuth, async (req, res) => {
 // Cached host stats — returns the in-memory ring buffer (does NOT sample on request).
 app.get('/api/stats', requireAuth, (_req, res) => {
   res.json({ samples: statsSampler.getStats() });
+});
+
+// Claude Code subscription usage for this box. 204 (not an error, not an empty object) is the
+// deliberate answer whenever we cannot PROVE a subscription — no credentials file, no user:profile
+// scope, or any upstream failure — so the client renders nothing rather than a misleading gauge.
+// Deliberately NOT gated on the active engine: the question is whether Claude Code is configured
+// with a subscription on this host, not which runtime happens to be selected right now.
+app.get('/api/claude-usage', requireAuth, async (_req, res) => {
+  const usage = await claudeUsage.get();
+  if (!usage) return void res.status(204).end();
+  res.json(usage);
 });
 
 app.get('/api/sessions', requireAuth, async (req, res) => {
