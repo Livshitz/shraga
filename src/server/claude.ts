@@ -22,7 +22,7 @@ import { getUserContextBlock } from './user-context.ts';
 import { collectTurnContext } from './turn-context.ts';
 import { DATA_DIR, dataPath } from './paths.ts';
 import * as contacts from './contacts.ts';
-import { resolveAndGetEngine, resolveEngine } from './engine/index.ts';
+import { resolveAndGetEngine } from './engine/index.ts';
 
 const CONFIG_PATH = dataPath('agent-config.json');
 
@@ -216,13 +216,12 @@ export async function* streamChat(opts: {
 
   const sessionMeta = opts.sessionId ? getSession(opts.sessionId) : undefined;
   const directives: Directives = { ...sessionMeta?.directives, ...parsed };
-  // Pin the resolved runtime shape on the session so reopening it later resumes the
-  // exact same engine/model even if global defaults change. Gaps only — stored or
-  // inline directives always win.
-  if (!directives.engine) directives.engine = resolveEngine(parsed, config);
-  if (!directives.model && config.model) directives.model = config.model;
-  if (!directives.turns && config.maxTurns) directives.turns = config.maxTurns;
-  if (!directives.thinking && config.thinking) directives.thinking = config.thinking;
+  // Persist ONLY what was explicitly chosen (inline directives, or the Agent Config panel's
+  // per-conversation save). Gaps stay gaps: every engine resolves `directives.x ?? config.x` at
+  // send time, so the global agent-config keeps applying live to sessions nobody pinned —
+  // including the non-UI channels (Slack, email, scheduler) that never open the config panel.
+  // Gap-filling here used to freeze the boot-time global onto every session's first turn, which
+  // made a later global engine/model change a no-op for every existing conversation.
   if (opts.sessionId && JSON.stringify(directives) !== JSON.stringify(sessionMeta?.directives ?? {})) {
     setSessionDirectives(opts.sessionId, directives);
     console.log(`[claude] Directives: ${JSON.stringify(directives)}`);

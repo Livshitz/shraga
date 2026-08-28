@@ -68,9 +68,13 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
   const [multiEngine, setMultiEngine] = useState(false);
   // Global config as loaded — so a per-session runtime change doesn't clobber the global defaults.
   const globalRef = useRef<AgentConfig>({});
+  // Save scope for the runtime knobs (engine/model/turns/thinking): this conversation, or the
+  // global default every channel without its own pin uses — Slack, email, scheduler included.
+  const [applyGlobally, setApplyGlobally] = useState(false);
 
   useEffect(() => {
     if (!open) return;
+    setApplyGlobally(false); // scope is a per-open decision, never a sticky one
     getToken().then((token) => {
       if (!token) return;
       fetch('/api/config', { headers: { Authorization: `Bearer ${token}` } })
@@ -105,15 +109,16 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
     const auth = { Authorization: `Bearer ${token ?? ''}`, 'Content-Type': 'application/json' };
     try {
       if (sessionId) {
-        // Runtime knobs apply to THIS conversation (session directives shadow global at send time).
-        const runtime: SessionDirectives = {
-          engine: config.engine, model: config.model, turns: config.maxTurns, thinking: config.thinking,
-        };
+        // Global scope: write the runtime knobs into agent-config AND clear this session's own
+        // pins, so the conversation follows the new default instead of its stale override.
+        // Session scope: pin them on the session only, leaving the global values untouched.
+        const runtime: SessionDirectives = applyGlobally
+          ? { engine: '', model: '', turns: null, thinking: '' } as any // '' / null = clear the pin
+          : { engine: config.engine, model: config.model, turns: config.maxTurns, thinking: config.thinking };
         const r = await fetch(`/api/sessions/${sessionId}/directives`, { method: 'PUT', headers: auth, body: JSON.stringify(runtime) })
           .then((res) => res.json()).catch((e) => { console.warn('[config] directives save failed', e); return null; });
         if (r?.directives) onDirectivesSaved?.(r.directives);
-        // Persist only the non-runtime fields globally — keep the global engine/model/turns/thinking intact.
-        const global: AgentConfig = {
+        const global: AgentConfig = applyGlobally ? config : {
           ...config,
           engine: globalRef.current.engine, model: globalRef.current.model,
           maxTurns: globalRef.current.maxTurns, thinking: globalRef.current.thinking,
@@ -177,9 +182,16 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
 
         <DialogBody className="space-y-4">
           {sessionId && (
-            <p className="text-xs text-muted-foreground rounded-md bg-muted/50 px-3 py-2">
-              Engine, Model, Max Turns & Thinking apply to <strong>this conversation</strong>. Other settings are global defaults for new sessions.
-            </p>
+            <div className="text-xs text-muted-foreground rounded-md bg-muted/50 px-3 py-2 space-y-2">
+              <p>
+                Engine, Model, Max Turns & Thinking apply to{' '}
+                <strong>{applyGlobally ? 'every conversation' : 'this conversation'}</strong>. Other settings are always global defaults.
+              </p>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={applyGlobally} onChange={(e) => setApplyGlobally(e.target.checked)} />
+                <span>Apply globally — also the default for Slack, email &amp; scheduled runs</span>
+              </label>
+            </div>
           )}
           {multiEngine && (
             <div>
