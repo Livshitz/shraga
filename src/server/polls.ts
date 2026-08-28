@@ -7,10 +7,9 @@
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { dataPath } from './paths.ts';
-import { appendMessage, getSession, type ConvBlock } from './sessions.ts';
-import { addUnread } from './unread.ts';
-import { postMessage, slackPost, getUserName, buildPollBlocks, type PollSpec } from './slack/api.ts';
-import { findSlackSessionBySessionId } from './slack/sessions.ts';
+import { getSession } from './sessions.ts';
+import { slackPost, getUserName, buildPollBlocks, type PollSpec } from './slack/api.ts';
+import { initWake, wakeSession, type TurnRunner } from './wake.ts';
 
 const PREFIX = '[polls]';
 
@@ -28,14 +27,10 @@ export interface PollRecord extends PollSpec {
   createdAt: number;
 }
 
-// ── IoC: injected by index.ts at startup to avoid a claude.ts <-> polls.ts cycle ──
-type TurnRunner = (args: { prompt: string; sessionId: string; uid: string; userEmail?: string }) => Promise<ConvBlock[]>;
-let runTurn: TurnRunner | null = null;
-let broadcastFn: ((ev: object) => void) | null = null;
-
+// ── IoC: injected by boot.ts at startup to avoid a claude.ts <-> polls.ts cycle. The runners live
+// in wake.ts now — every subsystem that reports back after its turn ended shares them. ──
 export function initPolls(deps: { runTurn: TurnRunner; broadcast: (ev: object) => void }): void {
-  runTurn = deps.runTurn;
-  broadcastFn = deps.broadcast;
+  initWake(deps);
   setInterval(sweep, 60_000);
   console.log(`${PREFIX} sweeper started`);
 }
@@ -140,7 +135,6 @@ async function closePoll(pollId: string, reason: 'deadline' | 'quorum' | 'manual
 
 // ── Close then report: wake the originating session once with the tally ─────────
 async function wakeAgent(p: PollRecord, reason: string): Promise<void> {
-  if (!runTurn) { console.warn(`${PREFIX} no turn runner; skipping wake for ${p.pollId}`); return; }
   if (!getSession(p.sessionId)) { console.warn(`${PREFIX} session ${p.sessionId} gone; skipping wake`); return; }
 
   // Per-option voters, with Slack user ids resolved to display names (cached).
@@ -161,15 +155,5 @@ async function wakeAgent(p: PollRecord, reason: string): Promise<void> {
   const headline = p.kind === 'question' ? 'Your question was answered' : `Your poll closed (${reason})`;
   const prompt = `[Poll result] ${headline}. Title: "${p.title}". ${voterCount(p)} participant(s).\n${lines}\n\nFollow up appropriately (summarize, take the next action, or notify the relevant people). Do not re-post the poll.`;
 
-  appendMessage(p.sessionId, { id: crypto.randomUUID(), role: 'user', blocks: [{ type: 'text', text: prompt }], channel: 'poll' });
-  broadcastFn?.({ type: 'session_messages_changed', sessionId: p.sessionId });
-
-  const blocks = await runTurn({ prompt, sessionId: p.sessionId, uid: p.uid, userEmail: p.userEmail });
-  if (!blocks.length) return;
-  appendMessage(p.sessionId, { id: crypto.randomUUID(), role: 'assistant', blocks });
-  broadcastFn?.({ type: 'session_messages_changed', sessionId: p.sessionId });
-  const text = blocks.filter((b): b is { type: 'text'; text: string } => b.type === 'text').map((b) => b.text).join('\n\n').trim();
-  addUnread(p.uid, p.sessionId, text.slice(0, 120) || 'Poll closed', 'proactive', p.title);
-  const slack = findSlackSessionBySessionId(p.sessionId);
-  if (slack && text) await postMessage(slack.channel, text, slack.threadTs, slack.useUserToken).catch((e) => console.error(`${PREFIX} slack deliver failed:`, (e as Error)?.message));
+  await wakeSession({ sessionId: p.sessionId, uid: p.uid, userEmail: p.userEmail, prompt, channel: 'poll', title: p.title, unreadFallback: 'Poll closed' });
 }
