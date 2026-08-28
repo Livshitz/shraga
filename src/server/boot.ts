@@ -30,6 +30,7 @@ import { getAllSessions, getSession, getSessionHistory, upsertSession, appendMes
 import { setBroadcaster } from './session-bus.ts';
 import * as scheduler from './scheduler/index.ts';
 import { initPolls } from './polls.ts';
+import { initBackgroundJobs } from './background-jobs.ts';
 import { pushEnabled } from './push/push.ts';
 import { upsertToken, removeToken } from './push/store.ts';
 import { initPushTriggers, pushTurnDone, pushQuestion } from './push/triggers.ts';
@@ -1138,6 +1139,11 @@ initPolls({
   runTurn: ({ prompt, sessionId, uid, userEmail }) =>
     consumeStream(streamChat({ prompt, sessionId, uid, userEmail, mcpServers: getMcpConfig(uid), abortController: new AbortController(), onPermissionRequest: async () => ({ allow: true }) })),
 });
+// Background jobs outlive the turn that started them, so their follow-up must too. Must run AFTER
+// initPolls (which wires wake.ts's turn runner) — boot adoption can report a job that finished
+// while we were down, and that report runs a turn. Skipped when passive: a standby twin must not
+// adopt the active instance's children or double-report them.
+if (!PASSIVE) initBackgroundJobs();
 // Remote-push triggers: subscribe to schedule.finished and expose turn-done/question
 // hooks. isForeground reuses the existing presence tracking (see isUserViewingSession).
 initPushTriggers({
