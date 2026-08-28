@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentSocket, ServerEvent } from '@/lib/ws';
 import { cn } from '@/lib/utils';
-import { HoverCard, HoverCardContent, HoverCardTrigger } from './ui/hover-card';
+import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 
 type Sample = Extract<ServerEvent, { type: 'stats' }>['sample'];
 
@@ -97,28 +97,89 @@ function ClaudeUsageMetric({ getToken }: { getToken: () => Promise<string | null
  *  the gate and the labelling are testable without a network or a DOM. */
 export function UsageMetric({ usage }: { usage: Usage | null }) {
   const top = usage && binding(usage.limits);
+  const [state, setState] = useState<CardState>(CLOSED);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancel = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } };
+  const send = useCallback((ev: CardEvent, delayMs = 0) => {
+    cancel();
+    if (!delayMs) { setState(prev => nextCardState(prev, ev)); return; }
+    timer.current = setTimeout(() => { timer.current = null; setState(prev => nextCardState(prev, ev)); }, delayMs);
+  }, []);
+  useEffect(() => cancel, []);
+
   if (!usage || !top) return null;
 
   // No `series`: usage has no server-side history to seed from, so it renders a GAUGE (full from the
   // first paint) instead of a sparkline that would plot tab-uptime and be empty for the first minutes.
-  // No `title` either — the breakdown lives in the hover card below; a native tooltip on the same
-  // element would race it, appear a second late, and repeat the card word for word.
+  // No `title` either — the breakdown lives in the card below; a native tooltip on the same element
+  // would race it, appear a second late, and repeat the card word for word.
+  //
+  // The trigger is a real <button>: it must be tappable (Radix HoverCard was pointer-only, so the
+  // breakdown was flat-out unreachable on a phone) AND focusable, so Enter/Space opens it too.
+  // Hover is layered on top of that so a desktop mouse still just points at it.
   return (
-    <HoverCard openDelay={120} closeDelay={80}>
-      <HoverCardTrigger asChild>
-        <span className="cursor-default">
+    <Popover open={state.open} onOpenChange={o => send(o ? { type: 'activate' } : { type: 'dismiss' })}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label="claude usage breakdown"
+          className="cursor-default rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          onPointerEnter={e => send({ type: 'pointerenter', pointerType: e.pointerType }, HOVER_OPEN_MS)}
+          onPointerLeave={e => send({ type: 'pointerleave', pointerType: e.pointerType }, HOVER_CLOSE_MS)}
+        >
           <Metric label="usage" value={top.percent} severity={top.severity} />
-        </span>
-      </HoverCardTrigger>
-      <HoverCardContent>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        // A hover-opened card must not steal focus — that would yank the caret out of the composer
+        // just because the mouse crossed the strip. Escape still closes it: the dismissable layer
+        // listens on the document, not on the content's own focus.
+        onOpenAutoFocus={e => e.preventDefault()}
+        onPointerEnter={() => cancel()}
+        onPointerLeave={e => send({ type: 'pointerleave', pointerType: e.pointerType }, HOVER_CLOSE_MS)}
+      >
         <UsageCard usage={usage} />
-      </HoverCardContent>
-    </HoverCard>
+      </PopoverContent>
+    </Popover>
   );
 }
 
-/** The hover breakdown: one row per reported window. Exported bare so the rows can be asserted
- *  without driving a real hover (Radix only mounts the content once open). */
+const HOVER_OPEN_MS = 120;
+const HOVER_CLOSE_MS = 80;
+
+export interface CardState { open: boolean; byHover: boolean }
+export type CardEvent =
+  | { type: 'pointerenter' | 'pointerleave'; pointerType: string }
+  | { type: 'activate' }   // tap, click or Enter/Space on the trigger (Radix reports it as open)
+  | { type: 'dismiss' };   // Escape, outside press, or a second activation
+
+export const CLOSED: CardState = { open: false, byHover: false };
+
+/** Who may open and close the card, as a pure function so both interaction modes are testable
+ *  without a DOM. Two rules earn their keep:
+ *   - hover is MOUSE-ONLY. A touch tap also emits pointerenter/pointerleave (pointerType 'touch'),
+ *     and honouring those would open the card on touch-down and immediately close it again on lift.
+ *   - a card opened deliberately (tap / click / keyboard) does NOT close when the pointer wanders
+ *     off; only Escape, an outside press, or another activation dismisses it. */
+export function nextCardState(state: CardState, ev: CardEvent): CardState {
+  switch (ev.type) {
+    case 'pointerenter':
+      return isHoverPointer(ev.pointerType) ? { open: true, byHover: true } : state;
+    case 'pointerleave':
+      return isHoverPointer(ev.pointerType) && state.byHover ? CLOSED : state;
+    case 'activate':
+      return { open: true, byHover: false };
+    case 'dismiss':
+      return CLOSED;
+  }
+}
+
+// '' covers synthetic/legacy events that carry no pointerType; a real touch always says 'touch'.
+const isHoverPointer = (t: string) => t === 'mouse' || t === '';
+
+/** The breakdown card: one row per reported window. Exported bare so the rows can be asserted
+ *  without driving a real open (Radix only mounts the content once open). */
 export function UsageCard({ usage }: { usage: Usage }) {
   const top = binding(usage.limits);
   return (
@@ -201,7 +262,7 @@ function level(v: number, severity?: string) {
 function Metric({ label, value, series, title, severity }: { label: string; value: number; series?: number[]; title?: string; severity?: string }) {
   const tone = level(value, severity);
   // Plain-text fallback only where nothing richer exists (cpu/mem). The usage metric passes no title:
-  // it owns a hover card, and a native tooltip on the same element would double up on it.
+  // it owns a popover card, and a native tooltip on the same element would double up on it.
   const tip = title ?? (series ? `${label} ${value}% — last ${series.length} samples` : undefined);
   return (
     <span className="flex items-center gap-1" title={tip}>
