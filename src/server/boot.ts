@@ -274,7 +274,7 @@ app.put('/api/sessions/:id/directives', requireAuth, (req, res) => {
     ...meta.directives,
     ...(body.engine !== undefined ? { engine: body.engine || undefined } : {}),
     ...(body.model !== undefined ? { model: body.model || undefined } : {}),
-    ...(body.turns !== undefined ? { turns: body.turns } : {}),
+    ...(body.turns !== undefined ? { turns: (body.turns as unknown) === null || (body.turns as unknown) === '' ? undefined : body.turns } : {}),
     ...(body.thinking !== undefined ? { thinking: body.thinking || undefined } : {}),
     ...passthrough,
   };

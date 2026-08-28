@@ -27,10 +27,31 @@ const DIRECTIVE_KEYS = ['model', 'turns', 'thinking', 'think', 'effort', 'engine
 
 /** MODEL_ALIASES only covers the bare Anthropic shorthands. A `provider/model` id
  *  (`cursor/composer-2.5`, `openai/gpt-5.6`) is already concrete — gating it on the alias table
- *  silently dropped it and ran the instance default instead. Honoured ONLY in `model:` key form:
- *  as a bare positional it is indistinguishable from prompt text like `[src/foo.ts]`, which a
- *  second bracket group would then swallow. */
+ *  silently dropped it and ran the instance default instead. As a bare positional it is honoured
+ *  only when a REGISTERED engine actually advertises it (see the resolver below) — an arbitrary
+ *  `[src/foo.ts]` stays prompt text, which is what a second bracket group must not swallow. */
 const isQualifiedModel = (v: string) => /^[a-z0-9._-]+\/[a-z0-9./_-]+$/.test(v);
+
+/** Resolves a model token the alias table doesn't know against the REGISTERED engines' own model
+ *  lists, and reports which engine owns it. Without this, `[composer-2.5]` (an agentx model) was
+ *  warned about and dropped, so the turn silently ran on the previous engine/model. Injected by
+ *  `initEngines()` — directives.ts stays pure and dependency-free for CE and for tests. */
+export type ModelResolver = (token: string) => { model: string; engine?: string } | null;
+let modelResolver: ModelResolver | null = null;
+export function setModelResolver(fn: ModelResolver | null): void { modelResolver = fn; }
+
+/** Alias table first (canonical shorthands win), then the engine registry. */
+function resolveModelToken(d: Directives, val: string): boolean {
+  if (MODEL_ALIASES[val]) { d.model = MODEL_ALIASES[val]; return true; }
+  const hit = modelResolver?.(val);
+  if (hit) {
+    d.model = hit.model;
+    // An engine-owned model implies its engine — but never override an explicit `[engine:x]`.
+    if (hit.engine && !d.engine) d.engine = hit.engine;
+    return true;
+  }
+  return false;
+}
 
 /** Does a bracket group look like directives (vs. prompt text that happens to start with `[`)?
  * Every token must be a known key:value or a known positional, else we leave the group alone. */
@@ -41,7 +62,7 @@ function isDirectiveGroup(raw: string): boolean {
     const colonIdx = t.indexOf(':');
     if (colonIdx !== -1) return DIRECTIVE_KEYS.includes(t.slice(0, colonIdx).trim().toLowerCase());
     const v = t.toLowerCase();
-    return !!MODEL_ALIASES[v] || /^\d+$/.test(v) || ['think', 'adaptive', 'nothink', 'nothinking'].includes(v);
+    return !!MODEL_ALIASES[v] || !!modelResolver?.(v) || /^\d+$/.test(v) || ['think', 'adaptive', 'nothink', 'nothinking'].includes(v);
   });
 }
 
@@ -82,8 +103,8 @@ export function parseDirectives(text: string): ParsedPrompt {
       applyDirective(directives, key, val);
     } else {
       const val = t.toLowerCase();
-      if (positionalIndex === 0 && MODEL_ALIASES[val]) {
-        directives.model = MODEL_ALIASES[val];
+      if (positionalIndex === 0 && resolveModelToken(directives, val)) {
+        // handled
       } else if (positionalIndex <= 1 && /^\d+$/.test(val)) {
         directives.turns = parseInt(val, 10);
       } else if (['think', 'adaptive'].includes(val)) {
@@ -105,8 +126,8 @@ export function parseDirectives(text: string): ParsedPrompt {
 function applyDirective(d: Directives, key: string, val: string) {
   switch (key) {
     case 'model':
-      if (MODEL_ALIASES[val]) d.model = MODEL_ALIASES[val];
-      else if (isQualifiedModel(val)) d.model = val;
+      if (resolveModelToken(d, val)) break;
+      if (isQualifiedModel(val)) d.model = val;
       else console.warn(`[directives] Unknown model alias: "${val}"`);
       break;
     case 'turns':
