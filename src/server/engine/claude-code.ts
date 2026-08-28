@@ -225,6 +225,15 @@ export class ClaudeCodeEngine implements AgentEngine {
     sdkEnv.SHRAGA_USER_UID = sdkEnv.UNCLAW_USER_UID = opts.uid;
     if (opts.userEmail) sdkEnv.SHRAGA_USER_EMAIL = sdkEnv.UNCLAW_USER_EMAIL = opts.userEmail;
     sdkEnv.SHRAGA_SESSION_ID = sdkEnv.UNCLAW_SESSION_ID = opts.sessionId ?? '';
+    // Per-command wall-clock cap for the SDK's Bash tool. Without it a single unbounded command
+    // (e.g. `curl` with no `-m` against an SSE endpoint that streams nothing) eats the whole turn and
+    // the agent answers with "reads were interrupted". The model still sees `[exit 124]` + partial
+    // output and can adapt, and may ask for up to BASH_MAX_TIMEOUT_MS on a legitimately slow command.
+    // `??=` is not enough: the SDK treats a set-but-empty var as absent and silently falls back to
+    // its own 120s, so a blank host value must take our default too — only a real value wins.
+    const setIfBlank = (key: string, value: string) => { if (!sdkEnv[key]?.trim()) sdkEnv[key] = value; };
+    setIfBlank('BASH_DEFAULT_TIMEOUT_MS', process.env.AGENT_SHELL_TIMEOUT_MS?.trim() || '60000');
+    setIfBlank('BASH_MAX_TIMEOUT_MS', process.env.AGENT_SHELL_MAX_TIMEOUT_MS?.trim() || '600000');
     sdkEnv.INTERNAL_API_TOKEN = signInternalToken(opts.uid, opts.userEmail || 'unknown');
 
     const baseAllowed = config.allowedTools ?? DEFAULT_ALLOWED_TOOLS;
