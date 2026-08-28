@@ -41,6 +41,7 @@ import { registerModuleRoutes, reconcileInstalledModules } from './modules/index
 import { hydrateSlackUserToken } from './slack/oauth.ts';
 import { registerMcpOAuthRoutes } from './mcp-oauth.ts';
 import { registerEventRoutes } from './events/routes.ts';
+import { reclaimStalePort } from './port-reclaim.ts';
 import { startHeartbeat, recordBootGap, buildReport } from './downtime.ts';
 import { registerWebhook } from './events/webhook.ts';
 import { startEventDispatcher } from './events/dispatcher.ts';
@@ -1989,12 +1990,13 @@ async function recoverInterruptedSessions() {
 }
 
 let _draining = false;
+const DRAIN_MS = Number(process.env.SHRAGA_DRAIN_MS) || 8_000;
 
 async function gracefulShutdown(signal: string, opts: { exit?: boolean } = {}) {
   const exit = opts.exit ?? true;
   if (_draining) return;
   _draining = true;
-  console.log(`[server] ${signal} — draining (up to 90s)…`);
+  console.log(`[server] ${signal} — draining (up to ${Math.round(DRAIN_MS / 1000)}s)…`);
   setShuttingDown();
   stopSidecars();
 
@@ -2007,7 +2009,12 @@ async function gracefulShutdown(signal: string, opts: { exit?: boolean } = {}) {
   // index at shutdown (the crash-recovery marker), so index entries can never go idle mid-drain —
   // polling the index made every restart with an active session (or a stale marker from a prior
   // crash) sit out the full 90s.
-  const deadline = Date.now() + 90_000;
+  // Bounded by what the service manager ACTUALLY grants, not by what we'd like. launchd's default
+  // ExitTimeOut is 20s and our power-guard wrapper SIGKILLs the child 10s after SIGTERM, so a 90s
+  // drain was fiction: we never reached the clean exit below, and the in-flight turn was shredded
+  // mid-write instead of aborted and persisted as a resumable partial. Override with
+  // SHRAGA_DRAIN_MS where the manager really does grant longer.
+  const deadline = Date.now() + DRAIN_MS;
   while (Date.now() < deadline) {
     const running = getActiveLockCount();
     if (running === 0) break;
@@ -2071,7 +2078,17 @@ await new Promise<void>((resolve) => {
   // EADDRINUSE is the common case: `kickstart -k` starts the replacement while the old process is
   // still draining (up to 90s). Exiting non-zero is the correct answer — the manager restarts us,
   // and by then the port is free.
+  //
+  // EXCEPT when the holder is an ORPHANED copy of ourselves: nothing will ever signal it, so it
+  // holds the port forever and every respawn dies here while the orphan serves stale code. That is
+  // not a transient drain and exiting cannot fix it — reclaim the port once, then bind.
+  let reclaimed = false;
   server.once('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE' && !reclaimed && reclaimStalePort(PORT)) {
+      reclaimed = true; // once only: a second EADDRINUSE means a live owner we must not fight
+      server.listen(PORT);
+      return;
+    }
     const why = err.code === 'EADDRINUSE'
       ? `port ${PORT} is already in use (previous instance still draining?)`
       : (err.message ?? String(err));
