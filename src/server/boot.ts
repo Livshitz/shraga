@@ -1134,10 +1134,41 @@ if (!PASSIVE) {
 // runs in passive too. Otherwise a standby instance reports empty stats and /api/stats is a lie.
 statsSampler.start(broadcast);
 registerEventRoutes(app, requireAuth);
+/** How long an out-of-band wake turn waits for a busy session before giving up (see runTurn). */
+const WAKE_LOCK_WAIT_MS = 5 * 60_000;
 initPolls({
   broadcast,
-  runTurn: ({ prompt, sessionId, uid, userEmail }) =>
-    consumeStream(streamChat({ prompt, sessionId, uid, userEmail, mcpServers: getMcpConfig(uid), abortController: new AbortController(), onPermissionRequest: async () => ({ allow: true }) })),
+  // The out-of-band turn runner (polls + background-job follow-ups). It TAKES THE SESSION LOCK, and
+  // that is load-bearing: `streamChat` never acquires one itself, so before this every guard written
+  // against `isSessionLocked` — including background-jobs.ts's "never start a turn on top of a live
+  // one" — was reading a lock that this path never took. Two jobs finishing minutes apart then ran
+  // two concurrent wake turns in one session, each free to dispatch the next leg of the same
+  // workflow: two writers on one browser instance, which is the failure these workflows are built to
+  // prevent. Waiting (bounded) rather than failing fast, because the whole point of a wake is that
+  // the outcome gets told: a busy session usually means another wake is mid-turn and will be done in
+  // seconds.
+  runTurn: async ({ prompt, sessionId, uid, userEmail }) => {
+    const abortController = new AbortController();
+    const deadline = Date.now() + WAKE_LOCK_WAIT_MS;
+    while (!acquireSessionLock(sessionId, 'api', abortController)) {
+      if (Date.now() >= deadline) {
+        // Give up by returning NOTHING, never by throwing. A throw propagates out of wake.ts's
+        // unguarded `await runTurn` into background-jobs' catch, which records `reported: 'failed'`
+        // — the one delivery path with no raw fallback, so the job's outcome would reach the user in
+        // no form at all, after wake.ts had already appended the trigger prompt (a question with no
+        // answer in the transcript). Empty blocks are the 'no-output' contract callers already
+        // handle: the job store then delivers its raw report instead. Degraded, but never silent.
+        console.warn(`[wake] session ${sessionId} stayed busy for ${Math.round(WAKE_LOCK_WAIT_MS / 1000)}s — skipping the turn; the caller falls back to a raw report`);
+        return [];
+      }
+      await new Promise((r) => setTimeout(r, 2_000));
+    }
+    try {
+      return await consumeStream(streamChat({ prompt, sessionId, uid, userEmail, mcpServers: getMcpConfig(uid), abortController, onPermissionRequest: async () => ({ allow: true }) }));
+    } finally {
+      if (releaseSessionLock(sessionId, abortController)) setRunStatus(sessionId, 'idle');
+    }
+  },
 });
 // Background jobs outlive the turn that started them, so their follow-up must too. Must run AFTER
 // initPolls (which wires wake.ts's turn runner) — boot adoption can report a job that finished

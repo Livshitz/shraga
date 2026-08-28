@@ -6,7 +6,8 @@ import { streamChat, type PermissionHandler } from '../claude.ts';
 import { getMcpConfig } from '../mcp.ts';
 import { appendMessage, createScheduledSession, updateScheduledSessionStatus, setRunStatus, registerLivePartial, unregisterLivePartial, writePartial, clearPartial, acquireSessionLock, releaseSessionLock, type ConvBlock } from '../sessions.ts';
 import type { Schedule, ScheduleRunSummary } from './types.ts';
-import { updateRunLockPid, clearRunningMarker } from './storage.ts';
+import { updateRunLockPid, clearRunningMarker, loadSchedules } from './storage.ts';
+import { readOutcome, clearOutcome, pendingDeadline, outcomePrompt, MAX_PENDING_MS } from './outcome.ts';
 import { addUnread } from '../unread.ts';
 
 export interface RunContext {
@@ -87,6 +88,70 @@ const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) 
   signal?.addEventListener('abort', done, { once: true });
 });
 
+/** How often a `pending` run is re-checked while it waits for its terminal declaration. */
+const OUTCOME_POLL_MS = 10_000;
+
+/**
+ * Resolve what the run itself declared, once its turn has ended.
+ *
+ * Returns null when the run declared nothing — that is the legacy path and stays exactly as it was
+ * (turn returned ⇒ ok). A `pending` declaration keeps the run open until a terminal one lands; each
+ * fresh `pending` extends the wait (leg 2 re-declaring after leg 1 finished), bounded absolutely by
+ * MAX_PENDING_MS from the first one so an agent cannot extend forever. Silence past the deadline is
+ * a FAILURE — that is the whole point: a run that never came back must alert, not read as success.
+ */
+/**
+ * The schedule's CURRENT next fire time, read live from disk each time it is needed.
+ *
+ * Deliberately not the caller's snapshot: `fireDue()` starts the run in its first loop and only
+ * advances `nextRun` in its second, and `startRun` deep-copies the schedule BEFORE that advance —
+ * so the snapshot this run was handed still carries the window it is running FOR (already in the
+ * past), which would make the ceiling below `Infinity` and inert. The engine persists the advanced
+ * value (`saveSchedules` at the end of `fireDue`), so disk is the source of truth here. Reading it
+ * per poll also picks up an edit made while the run waits.
+ */
+function liveNextWindow(scheduleId: string): number | undefined {
+  try { return loadSchedules().find((s) => s.id === scheduleId)?.nextRun; }
+  catch { return undefined; }
+}
+
+async function resolveDeclaredOutcome(
+  sessionId: string,
+  ac: AbortController,
+  /** Schedule whose next window caps the wait — looked up live, never from the run's snapshot. */
+  scheduleId: string,
+): Promise<{ status: Exclude<ScheduleRunSummary['status'], 'running'>; error?: string } | null> {
+  let declared = readOutcome(sessionId);
+  if (!declared) return null;
+  // Waiting happens INSIDE the run promise, and engine.startRun only does `state.running.delete()`
+  // when that promise settles — so a pending run keeps its schedule marked running, and the next
+  // fire of the same schedule is QUEUED behind it rather than run on time. Verified in
+  // engine.ts (`state.running.delete` sits in `.finally`, and `fire()` queues when `state.running`
+  // has the id). For a 3×-daily schedule a multi-hour pending wait would therefore eat the next
+  // slot. So the wait ends at the next window at the latest: the run is then recorded as failed
+  // (the notifier fires) and the new window starts clean and on time.
+  const windowStop = (): number => {
+    const next = liveNextWindow(scheduleId);
+    return next && next > Date.now() ? next - 60_000 : Infinity;
+  };
+  const absoluteStop = Date.now() + MAX_PENDING_MS;
+  while (declared?.status === 'pending' && !ac.signal.aborted) {
+    const stop = windowStop();
+    const deadline = Math.min(pendingDeadline(declared, Date.now()), absoluteStop, stop);
+    if (Date.now() >= deadline) {
+      const why = deadline === stop ? 'its next scheduled window arrived first' : `deadline ${new Date(deadline).toISOString()}`;
+      return { status: 'error', error: `Run declared itself still in flight and never reported a terminal outcome (${why}).` };
+    }
+    await sleep(Math.min(OUTCOME_POLL_MS, deadline - Date.now()), ac.signal);
+    declared = readOutcome(sessionId);
+  }
+  if (ac.signal.aborted) return { status: 'aborted' };
+  if (!declared) return { status: 'error', error: 'Run outcome declaration disappeared before it reported a terminal state.' };
+  return declared.status === 'error'
+    ? { status: 'error', error: declared.error ? `Run reported failure: ${declared.error}` : 'Run reported failure with no detail.' }
+    : { status: 'ok' };
+}
+
 function formatEventBlock(e: EventContext): string {
   let body: string;
   try { body = JSON.stringify(e.payload, null, 2); } catch { body = String(e.payload); }
@@ -140,6 +205,17 @@ export async function runSchedule(
     if (eventCtx) base = `${base}\n\n---\n${formatEventBlock(eventCtx)}`;
     prompt = base;
   }
+  // Tell the run how to report its own truthful outcome (scheduler/outcome.ts). Prompt tasks only:
+  // a `bash` task's permission handler allows nothing but the task's own command, so such a run
+  // could not write the file even if it wanted to — its exit code is already the truth there.
+  if (task.kind === 'prompt') {
+    // Cleared on RESUME too: a resume reuses the interrupted run's session id, so a declaration left
+    // by the attempt that crashed would be adopted as this attempt's verdict. The contract is
+    // re-stated for the same reason — the resumed turn must be able to declare for itself.
+    clearOutcome(sessionId);
+    prompt = `${prompt}\n\n---\n${outcomePrompt(sessionId)}`;
+  }
+
   // task.engine/task.model ride the same prompt-directive channel users type by hand —
   // parseDirectives strips them and resolves aliases. Prepending (vs new plumbing) also persists the
   // choice into the saved prompt, so the session UI shows what the schedule actually requested.
@@ -320,6 +396,27 @@ export async function runSchedule(
       onEvent({ type: 'session_busy', sessionId, busy: false });
     }
     updateScheduledSessionStatus(sessionId, status);
+  }
+
+  // The run's OWN verdict beats "the turn returned" — see scheduler/outcome.ts. Deliberately after
+  // the finally: the session lock is released by now, so a run that declared `pending` can be closed
+  // by a later turn in this session (a background job's wake, a follow-up message) while we wait.
+  if (status === 'ok' && task.kind === 'prompt') {
+    const declared = await resolveDeclaredOutcome(sessionId, abortController, schedule.id);
+    if (declared) {
+      status = declared.status;
+      error = declared.error;
+      updateScheduledSessionStatus(sessionId, status);
+      if (status !== 'ok') {
+        appendMessage(sessionId, {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          blocks: [{ type: 'error', text: error ?? `Run reported status ${status}` }],
+        });
+        onEvent({ type: 'session_messages_changed', sessionId });
+      }
+    }
+    clearOutcome(sessionId);
   }
 
   const preview = assistantText.slice(0, 120) || (status === 'ok' ? 'Schedule completed' : `Schedule ${status}`);
