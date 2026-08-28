@@ -9,7 +9,7 @@ import path from 'node:path';
 import { dataPath } from './paths.ts';
 import { getSession } from './sessions.ts';
 import { slackPost, getUserName, buildPollBlocks, type PollSpec } from './slack/api.ts';
-import { initWake, wakeSession, type TurnRunner } from './wake.ts';
+import { initWake, wakeSession, deliverToSession, type TurnRunner } from './wake.ts';
 
 const PREFIX = '[polls]';
 
@@ -155,5 +155,18 @@ async function wakeAgent(p: PollRecord, reason: string): Promise<void> {
   const headline = p.kind === 'question' ? 'Your question was answered' : `Your poll closed (${reason})`;
   const prompt = `[Poll result] ${headline}. Title: "${p.title}". ${voterCount(p)} participant(s).\n${lines}\n\nFollow up appropriately (summarize, take the next action, or notify the relevant people). Do not re-post the poll.`;
 
-  await wakeSession({ sessionId: p.sessionId, uid: p.uid, userEmail: p.userEmail, prompt, channel: 'poll', title: p.title, unreadFallback: 'Poll closed' });
+  // The return value is NOT decoration: a wake that could not run a turn ('no-output' — no runner
+  // wired, or the session stayed busy past the wake lock's wait) leaves this poll CLOSED, already
+  // re-rendered as closed in Slack, and the transcript holding a `[Poll result]` prompt with no
+  // answer. The tally would then be lost for good (the record is pruned after 7 days). So when no
+  // turn ran, deliver the lines we already built — the same raw-report fallback the background-job
+  // caller makes. `unreadFallback` above cannot cover this: wake.ts returns before it consults it.
+  const outcome = await wakeSession({ sessionId: p.sessionId, uid: p.uid, userEmail: p.userEmail, prompt, channel: 'poll', title: p.title, unreadFallback: 'Poll closed' });
+  if (outcome !== 'woke') {
+    console.warn(`${PREFIX} wake for ${p.pollId} returned '${outcome}' — delivering the tally as plain text instead`);
+    await deliverToSession({
+      sessionId: p.sessionId, uid: p.uid, title: p.title,
+      text: `${headline} — "${p.title}" (${voterCount(p)} participant(s)).\n${lines}`,
+    }).catch((e) => console.error(`${PREFIX} raw tally deliver failed:`, (e as Error)?.message));
+  }
 }
