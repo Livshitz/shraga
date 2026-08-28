@@ -42,8 +42,12 @@ afterEach(() => { hits = 0; status = 200; payload = BODY; delayMs = 0; });
 async function reader(creds: unknown, name = `c${Math.random().toString(36).slice(2)}.json`) {
   const p = path.join(dir, name);
   await writeFile(p, typeof creds === 'string' ? creds : JSON.stringify(creds));
-  return new ClaudeUsageReader({ credentialsPath: p, endpoint });
+  // No keychain seam is ever the real `security` binary in this suite.
+  return new ClaudeUsageReader({ credentialsPath: p, endpoint, readKeychain: NEVER_KEYCHAIN });
 }
+
+const MISSING = () => path.join(dir, 'does-not-exist.json');
+const NEVER_KEYCHAIN = async () => { throw new Error('keychain must not be consulted here'); };
 
 const OK_CREDS = { claudeAiOauth: { accessToken: 'tok', scopes: ['user:inference', 'user:profile'], subscriptionType: 'max' } };
 
@@ -69,7 +73,7 @@ describe('subscription gate', () => {
   });
 
   it('makes ZERO upstream calls when there is no credentials file (API-key deployment)', async () => {
-    const r = new ClaudeUsageReader({ credentialsPath: path.join(dir, 'does-not-exist.json'), endpoint });
+    const r = new ClaudeUsageReader({ credentialsPath: MISSING(), endpoint, platform: 'linux', readKeychain: NEVER_KEYCHAIN });
     expect(await r.get()).toBeNull();
     expect(hits).toBe(0);
   });
@@ -149,6 +153,70 @@ describe('cache + in-flight dedupe', () => {
     await Bun.sleep(10);
     status = 200;
     expect((await r.get())?.subscriptionType).toBe('max');
+    expect(hits).toBe(2);
+  });
+});
+
+// macOS keeps Claude Code's OAuth credentials in the login Keychain and writes NO credentials file,
+// so on darwin an absent file is not proof of an API-key deployment.
+describe('macOS keychain fallback', () => {
+  const KC = (secret: unknown) => async () => (typeof secret === 'string' || secret === null ? secret : JSON.stringify(secret));
+  const darwin = (readKeychain: any, credentialsPath = MISSING()) =>
+    new ClaudeUsageReader({ credentialsPath, endpoint, platform: 'darwin', readKeychain });
+
+  it('reads usage from the keychain when the credentials file is absent', async () => {
+    const u = await darwin(KC(OK_CREDS)).get();
+    expect(u?.subscriptionType).toBe('max');
+    expect(u?.limits.map(l => l.kind)).toEqual(['session', 'weekly_all']);
+    expect(hits).toBe(1);
+  });
+
+  it('never consults the keychain on linux — the file is the only source there', async () => {
+    let consulted = false;
+    const r = new ClaudeUsageReader({
+      credentialsPath: MISSING(), endpoint, platform: 'linux',
+      readKeychain: async () => { consulted = true; return JSON.stringify(OK_CREDS); },
+    });
+    expect(await r.get()).toBeNull();
+    expect(consulted).toBe(false);
+    expect(hits).toBe(0);
+  });
+
+  it('prefers the file: a present, valid file means the keychain is never consulted', async () => {
+    const p = path.join(dir, 'prefer.json');
+    await writeFile(p, JSON.stringify(OK_CREDS));
+    let consulted = false;
+    const r = darwin(async () => { consulted = true; return null; }, p);
+    expect((await r.get())?.subscriptionType).toBe('max');
+    expect(consulted).toBe(false);
+  });
+
+  it('applies the SAME user:profile gate to a keychain token — zero upstream calls', async () => {
+    const r = darwin(KC({ claudeAiOauth: { accessToken: 'tok', scopes: ['user:inference'], subscriptionType: 'max' } }));
+    expect(await r.get()).toBeNull();
+    expect(hits).toBe(0);
+  });
+
+  it.each([
+    ['an empty read (locked keychain / missing binary / no such item)', KC(null)],
+    ['whitespace-only output', KC('   \n ')],
+    ['unparseable JSON', KC('{ not json')],
+    ['a keychain payload with no claudeAiOauth', KC({ other: 1 })],
+    ['a reader that rejects (spawn failure / timeout)', async () => { throw new Error('timed out'); }],
+  ])('fails closed on %s', async (_label, readKeychain) => {
+    const r = darwin(readKeychain);
+    expect(await r.get()).toBeNull();
+    expect(hits).toBe(0);
+  });
+
+  it('re-reads the keychain every poll — a rotated token is never served from a field', async () => {
+    let n = 0;
+    const r = darwin(async () => { n++; return JSON.stringify(OK_CREDS); });
+    r.options.ttlMs = 1;
+    await r.get();
+    await Bun.sleep(10);
+    await r.get();
+    expect(n).toBe(2);
     expect(hits).toBe(2);
   });
 });
