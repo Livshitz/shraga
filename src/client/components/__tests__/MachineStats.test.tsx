@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { UsageCard, UsageMetric, binding, untilLabel, windowLabel, type Usage } from '../MachineStats';
+import { CLOSED, UsageCard, UsageMetric, binding, nextCardState, untilLabel, windowLabel, type CardEvent, type Usage } from '../MachineStats';
 
 // Captured verbatim from a live 200 on the prod box (api.anthropic.com/api/oauth/usage).
 const REAL: Usage = {
@@ -187,5 +187,60 @@ describe('untilLabel compound precision', () => {
 describe('the native title is gone from the usage metric', () => {
   it('does not duplicate the card as a browser tooltip', () => {
     expect(renderToStaticMarkup(<UsageMetric usage={REAL} />)).not.toContain('title=');
+  });
+});
+
+describe('the breakdown is reachable by TAP, not only by hover', () => {
+  // The shipped bug: Radix HoverCard is pointer-only, so on a phone the card could not be opened at
+  // all. The trigger must therefore be an activatable, focusable control.
+  const trigger = () => renderToStaticMarkup(<UsageMetric usage={REAL} />);
+
+  it('renders a real button, not an inert span', () => {
+    const h = trigger();
+    expect(h).toContain('<button');
+    expect(h).toContain('type="button"');
+  });
+
+  it('is keyboard-reachable and not tab-trapped out', () => {
+    expect(trigger()).not.toContain('tabindex="-1"');
+  });
+
+  it('names itself for a screen reader', () => {
+    expect(trigger()).toContain('aria-label="claude usage breakdown"');
+  });
+});
+
+describe('nextCardState — who may open and close the card', () => {
+  const hover = (t: string) => ({ type: 'pointerenter', pointerType: t }) as CardEvent;
+  const leave = (t: string) => ({ type: 'pointerleave', pointerType: t }) as CardEvent;
+
+  it('a TAP opens the card (the whole point of the fix)', () => {
+    expect(nextCardState(CLOSED, { type: 'activate' })).toEqual({ open: true, byHover: false });
+  });
+
+  it('a second activation / Escape / outside press dismisses it', () => {
+    expect(nextCardState({ open: true, byHover: false }, { type: 'dismiss' })).toEqual(CLOSED);
+  });
+
+  it('a MOUSE hover still opens and closes it — desktop is not degraded to click-only', () => {
+    const opened = nextCardState(CLOSED, hover('mouse'));
+    expect(opened.open).toBe(true);
+    expect(nextCardState(opened, leave('mouse'))).toEqual(CLOSED);
+  });
+
+  it('a TOUCH pointerenter does NOT open it — the tap does', () => {
+    expect(nextCardState(CLOSED, hover('touch'))).toEqual(CLOSED);
+  });
+
+  it('a touch pointerleave does not slam a tap-opened card shut', () => {
+    // A tap emits pointerenter/leave around the click; honouring the leave would close the card
+    // in the same gesture that opened it, which is exactly the "card never opens on mobile" bug.
+    const tapped = nextCardState(CLOSED, { type: 'activate' });
+    expect(nextCardState(tapped, leave('touch'))).toEqual(tapped);
+  });
+
+  it('a deliberately opened card survives the mouse wandering off', () => {
+    const clicked = nextCardState(CLOSED, { type: 'activate' });
+    expect(nextCardState(clicked, leave('mouse'))).toEqual(clicked);
   });
 });
