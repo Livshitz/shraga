@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { UsageMetric, binding, untilLabel, type Usage } from '../MachineStats';
+import { UsageCard, UsageMetric, binding, untilLabel, windowLabel, type Usage } from '../MachineStats';
 
 // Captured verbatim from a live 200 on the prod box (api.anthropic.com/api/oauth/usage).
 const REAL: Usage = {
@@ -110,5 +110,82 @@ describe('severity colouring survives an unknown vocabulary', () => {
     const html = renderToStaticMarkup(<UsageMetric usage={at(10, 'allow_with_warning_v2')} />);
     expect(html).not.toContain('text-amber-500');
     expect(html).toContain('text-emerald-500');
+  });
+});
+
+
+describe('the hover breakdown card', () => {
+  const html = () => renderToStaticMarkup(<UsageCard usage={REAL} />);
+
+  it('lists every reported window, not just the headline one', () => {
+    const h = html();
+    expect(h).toContain('current session');
+    expect(h).toContain('all models');
+    expect(h).toContain('Fable window'); // scopeLabel names WHICH model the scoped window covers
+  });
+
+  it('never prints the weekly_* kinds as "weekly" or "7 days" — that window rolls on ~72h', () => {
+    const h = html().toLowerCase();
+    expect(h).not.toContain('weekly');
+    expect(h).not.toContain('7 days');
+    expect(h).not.toContain('week');
+  });
+
+  it('shows the plan', () => {
+    expect(html()).toContain('max');
+  });
+
+  it('shows a per-window countdown derived from resetsAt', () => {
+    const soon = new Date(Date.now() + (76 * 60 + 12) * 60_000).toISOString();
+    const h = renderToStaticMarkup(
+      <UsageCard usage={{ subscriptionType: 'max', limits: [{ kind: 'session', group: 'session', percent: 6, severity: 'normal', resetsAt: soon }] }} />
+    );
+    expect(h).toContain('resets in 3d 4h');
+  });
+
+  it('shows NO countdown for a window with resetsAt: null', () => {
+    const h = renderToStaticMarkup(
+      <UsageCard usage={{ subscriptionType: 'max', limits: [{ kind: 'weekly_scoped', group: 'weekly', percent: 0, severity: 'normal', resetsAt: null, scopeLabel: 'Fable' }] }} />
+    );
+    expect(h).toContain('no reset reported');
+    expect(h).not.toContain('resets in');
+  });
+
+  it('marks which row the headline gauge is showing', () => {
+    // The marker must sit on the FULLEST window, not simply the first row.
+    const hot: Usage = { ...REAL, limits: REAL.limits.map(l => (l.kind === 'weekly_all' ? { ...l, percent: 85 } : l)) };
+    const rows = renderToStaticMarkup(<UsageCard usage={hot} />).split('data-headline="true"');
+    expect(rows.length).toBe(2);             // exactly one row is marked
+    expect(rows[1]).toContain('▸');          // it carries the visible marker
+    expect(rows[1].slice(0, 400)).toContain('all models'); // and it is the 85% window, not the first row
+  });
+
+  it('colours a hot window without recolouring the calm ones', () => {
+    const hot: Usage = { ...REAL, limits: REAL.limits.map(l => (l.kind === 'weekly_all' ? { ...l, percent: 85 } : l)) };
+    const h = renderToStaticMarkup(<UsageCard usage={hot} />);
+    expect(h).toContain('text-amber-500');
+    expect(h).toContain('text-emerald-500');
+  });
+});
+
+describe('windowLabel', () => {
+  it('prefers the scope label so a scoped window says WHICH model it covers', () => {
+    expect(windowLabel({ kind: 'weekly_scoped', group: 'weekly', percent: 0, severity: 'normal', resetsAt: null, scopeLabel: 'Fable' })).toBe('Fable window');
+  });
+  it('falls back to a de-underscored kind for a vocabulary we have not seen', () => {
+    expect(windowLabel({ kind: 'five_hour_burst', group: 'x', percent: 0, severity: 'normal', resetsAt: null })).toBe('five hour burst');
+  });
+});
+
+describe('untilLabel compound precision', () => {
+  const inMin = (m: number) => untilLabel(new Date(Date.now() + m * 60_000).toISOString());
+  it('reads hours AND minutes under two days', () => expect(inMin(72)).toBe('1h 12m'));
+  it('reads days AND hours beyond two days', () => expect(inMin(4 * 24 * 60 + 2 * 60)).toBe('4d 2h'));
+  it('drops a zero remainder', () => { expect(inMin(120)).toBe('2h'); expect(inMin(3 * 24 * 60)).toBe('3d'); });
+});
+
+describe('the native title is gone from the usage metric', () => {
+  it('does not duplicate the card as a browser tooltip', () => {
+    expect(renderToStaticMarkup(<UsageMetric usage={REAL} />)).not.toContain('title=');
   });
 });

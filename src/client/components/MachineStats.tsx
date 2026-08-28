@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { AgentSocket, ServerEvent } from '@/lib/ws';
 import { cn } from '@/lib/utils';
+import { HoverCard, HoverCardContent, HoverCardTrigger } from './ui/hover-card';
 
 type Sample = Extract<ServerEvent, { type: 'stats' }>['sample'];
 
@@ -98,15 +99,66 @@ export function UsageMetric({ usage }: { usage: Usage | null }) {
   const top = usage && binding(usage.limits);
   if (!usage || !top) return null;
 
-  // Every window, each labelled from its OWN resets_at — the `weekly_*` kinds do NOT reset weekly.
-  const detail = usage.limits
-    .map(l => `${l.scopeLabel ?? l.kind} ${l.percent}%${untilLabel(l.resetsAt) ? ` (resets in ${untilLabel(l.resetsAt)})` : ''}`)
-    .join('\n');
-  const plan = usage.subscriptionType ? `claude ${usage.subscriptionType} — ` : 'claude ';
-
   // No `series`: usage has no server-side history to seed from, so it renders a GAUGE (full from the
   // first paint) instead of a sparkline that would plot tab-uptime and be empty for the first minutes.
-  return <Metric label="usage" value={top.percent} title={`${plan}${top.percent}% of the binding limit\n${detail}`} severity={top.severity} />;
+  // No `title` either — the breakdown lives in the hover card below; a native tooltip on the same
+  // element would race it, appear a second late, and repeat the card word for word.
+  return (
+    <HoverCard openDelay={120} closeDelay={80}>
+      <HoverCardTrigger asChild>
+        <span className="cursor-default">
+          <Metric label="usage" value={top.percent} severity={top.severity} />
+        </span>
+      </HoverCardTrigger>
+      <HoverCardContent>
+        <UsageCard usage={usage} />
+      </HoverCardContent>
+    </HoverCard>
+  );
+}
+
+/** The hover breakdown: one row per reported window. Exported bare so the rows can be asserted
+ *  without driving a real hover (Radix only mounts the content once open). */
+export function UsageCard({ usage }: { usage: Usage }) {
+  const top = binding(usage.limits);
+  return (
+    <div className="text-[11px] leading-tight">
+      <div className="flex items-baseline justify-between gap-2 pb-2 text-muted-foreground">
+        <span className="uppercase tracking-wide">claude usage</span>
+        {usage.subscriptionType && <span className="tabular-nums">{usage.subscriptionType} plan</span>}
+      </div>
+      <div className="flex flex-col gap-3">
+        {usage.limits.map((l, i) => {
+          const until = untilLabel(l.resetsAt);
+          const isTop = l === top;
+          return (
+            <div key={`${l.kind}-${i}`} data-headline={isTop || undefined} className={cn('flex flex-col gap-1', !isTop && 'opacity-60')}>
+              <div className="flex items-baseline justify-between gap-2">
+                <span className={cn('truncate', isTop && 'font-medium')}>
+                  {isTop && <span className="mr-1 text-muted-foreground" aria-hidden>▸</span>}
+                  {windowLabel(l)}
+                </span>
+                <span className={cn('tabular-nums shrink-0', level(l.percent, l.severity))}>{l.percent}%</span>
+              </div>
+              <Gauge value={l.percent} className={cn('w-full', level(l.percent, l.severity))} />
+              <span className="text-[10px] text-muted-foreground">{until ? `resets in ${until}` : 'no reset reported'}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-3 border-t pt-2 text-[10px] text-muted-foreground">▸ is the window the strip is showing</div>
+    </div>
+  );
+}
+
+/** Human name for a window, derived ONLY from what the payload actually states. `weekly_*` is never
+ *  printed as "weekly"/"7 days": that window rolls on a ~72h cadence, so the kind name is a lie and
+ *  only resets_at (rendered separately) tells the truth about its length. */
+export function windowLabel(l: UsageLimit): string {
+  if (l.scopeLabel) return `${l.scopeLabel} window`;
+  if (l.kind === 'session') return 'current session';
+  if (l.kind === 'weekly_all') return 'all models';
+  return l.kind.replace(/_/g, ' ');
 }
 
 /** The window that gates you first is simply the FULLEST one, whichever kind it is.
@@ -118,15 +170,20 @@ export function binding(limits: UsageLimit[]): UsageLimit | null {
   return limits.reduce<UsageLimit | null>((best, l) => (!best || l.percent > best.percent ? l : best), null);
 }
 
-/** Human "time until reset", derived from resets_at only — never from the limit's kind name. */
+/** Human "time until reset", derived from resets_at only — never from the limit's kind name.
+ *  Rounded to whole minutes FIRST so a value handed in as exactly 4h does not render "3h 59m"
+ *  because a few milliseconds elapsed between building it and reading the clock. */
 export function untilLabel(iso: string | null): string | null {
   if (!iso) return null;
   const ms = new Date(iso).getTime() - Date.now();
   if (!Number.isFinite(ms) || ms <= 0) return null;
-  const h = ms / 3_600_000;
-  if (h < 1) return `${Math.max(1, Math.round(ms / 60_000))}m`;
-  if (h < 48) return `${Math.round(h)}h`;
-  return `${Math.round(h / 24)}d`;
+  const min = Math.round(ms / 60_000);
+  if (min < 1) return '1m';
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60), m = min % 60;
+  if (h < 48) return m ? `${h}h ${m}m` : `${h}h`;
+  const d = Math.floor(h / 24), rh = h % 24;
+  return rh ? `${d}d ${rh}h` : `${d}d`;
 }
 
 /** Only severities we have actually SEEN mean something here. The vendor's vocabulary is not
@@ -143,8 +200,11 @@ function level(v: number, severity?: string) {
 
 function Metric({ label, value, series, title, severity }: { label: string; value: number; series?: number[]; title?: string; severity?: string }) {
   const tone = level(value, severity);
+  // Plain-text fallback only where nothing richer exists (cpu/mem). The usage metric passes no title:
+  // it owns a hover card, and a native tooltip on the same element would double up on it.
+  const tip = title ?? (series ? `${label} ${value}% — last ${series.length} samples` : undefined);
   return (
-    <span className="flex items-center gap-1" title={title ?? `${label} ${value}%${series ? ` — last ${series.length} samples` : ''}`}>
+    <span className="flex items-center gap-1" title={tip}>
       <span className="uppercase tracking-wide">{label}</span>
       {series ? <Sparkline series={series} className={tone} /> : <Gauge value={value} className={tone} />}
       <span className={cn('tabular-nums', tone)}>{value}%</span>
