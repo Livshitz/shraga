@@ -34,8 +34,22 @@ export interface ParaStreamerOptions {
   msgId?: string;
   flushInterval?: number;
   flushThreshold?: number;
-  /** Show a transient inline marker per tool call, as the Slack streamer does. Default on. */
+  /** Show a transient inline marker per tool call, as the Slack streamer does. Default on.
+   *  Ignored when `sendSegments` is on — see `ParaStreamerOptions.sendSegments`. */
   toolMarkers?: boolean;
+  /**
+   * Emit STRUCTURED segments (`text` + `tool`) alongside the accumulated text.
+   *
+   * OFF BY DEFAULT, AND THAT IS THE POINT. This is a negotiated capability, not a preference: the
+   * receiver tells us per turn (`accepts: ['segments']` on the turn request) whether it can store
+   * and render them. A receiver that cannot gets the flattened `_🔧 Tool_` markers in the text, as
+   * it always did. So the fallback is EXPLICIT — one flag, decided by the receiver — instead of
+   * "the field is there, hopefully they ignore it".
+   *
+   * The two representations are mutually exclusive on purpose. Sending both would double-render on
+   * a receiver that shows segments AND falls back to text for a preview.
+   */
+  sendSegments?: boolean;
   /** Per-POST wall clock. See `POST_TIMEOUT_MS`. Overridable for tests. */
   postTimeout?: number;
 }
@@ -58,6 +72,71 @@ export interface ParaStreamerOptions {
  *  length-prefix the material instead of relying on this. */
 export function signPara(secret: string, connId: string, deliveryId: string, ts: number, rawBody: string): string {
   return 'v1=' + createHmac('sha256', secret).update(`${connId}.${deliveryId}.${ts}.${rawBody}`).digest('hex');
+}
+
+// ── Structured segments ──────────────────────────────────────────────────────
+//
+// SHAPE-COMPATIBLE WITH para-li's OWN `MessageSegment`/`ToolCallInfo` (`lib/para-relay.ts`), which
+// its `ConversationChannel` already renders as collapsible tool pills. This is a deliberate reuse:
+// the external-agent lane emits the SAME shape the Para's own turns do, so no second renderer, no
+// second row field, and no second thing to keep in sync. Duplicated here rather than imported for
+// the same reason `signPara` is — the two repos publish separately.
+
+export interface ToolCallInfo {
+  id: string;
+  tool: string;
+  status: 'running' | 'completed' | 'error';
+  args?: Record<string, unknown>;
+  result?: string;
+}
+
+export type MessageSegment =
+  | { type: 'text'; content: string }
+  | { type: 'tool'; tool: ToolCallInfo };
+
+/**
+ * SIZE DISCIPLINE. A `Read` of a big file or a chatty `Bash` produces tool input/output measured in
+ * hundreds of KB, and every flush re-sends the WHOLE accumulated state (see ACCUMULATE, DON'T
+ * APPEND at the top). Unclamped, one such call would be re-uploaded on every subsequent delta for
+ * the rest of the turn and then parked in a database row forever.
+ *
+ * The caps are chosen against what the pill actually shows: para-li's `ToolPill` renders args as
+ * one JSON line and slices the result at 500 chars, so anything past a few KB is invisible detail
+ * that still costs bandwidth and storage. Truncation is MARKED with the true length — a silently
+ * shortened `Bash` output is a lie the reader cannot detect.
+ *
+ * These are the SENDER's caps. para-li re-clamps on ingest (`parseSegments`) because a cap that
+ * only exists on the sender is not a cap.
+ */
+export const MAX_TOOL_ARGS_CHARS = 2_000;
+export const MAX_TOOL_RESULT_CHARS = 4_000;
+/** Beyond this many tool calls in one turn, later calls stop being recorded as segments (the text
+ *  reply is unaffected). A 100-call turn is already unreadable as pills; the cap is what stops a
+ *  runaway loop from growing the row without bound. */
+export const MAX_TOOL_SEGMENTS = 100;
+
+/** Truncate with an honest marker naming the TRUE length. */
+export function clampText(s: string, cap: number): string {
+  return s.length <= cap ? s : `${s.slice(0, cap)}… [truncated, ${s.length} chars total]`;
+}
+
+/** Clamp a tool's input to `MAX_TOOL_ARGS_CHARS` across all its values, preserving the key
+ *  structure (that is what makes the pill readable) and marking every truncation. */
+export function clampArgs(input: unknown): Record<string, unknown> | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (typeof input !== 'object' || Array.isArray(input)) {
+    return { value: clampText(String(input), MAX_TOOL_ARGS_CHARS) };
+  }
+  const out: Record<string, unknown> = {};
+  let budget = MAX_TOOL_ARGS_CHARS;
+  for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
+    if (budget <= 0) { out['…'] = 'more arguments omitted'; break; }
+    const s = typeof v === 'string' ? v : (JSON.stringify(v) ?? String(v));
+    if (s.length > budget) out[k] = clampText(s, budget);
+    else out[k] = v;
+    budget -= Math.min(s.length, budget);
+  }
+  return out;
 }
 
 /**
@@ -121,35 +200,88 @@ export class ParaStreamer {
   private flushChain: Promise<void> = Promise.resolve();
   private aborted = false;
   private afterTool = false;
+  /** Structured mirror of the turn. Empty unless `sendSegments`. */
+  private segments: MessageSegment[] = [];
+  /** toolUseId → the live `ToolCallInfo` inside `segments`, so a `tool_result` can flip the status
+   *  of the call it belongs to rather than of whichever ran last. */
+  private readonly toolById = new Map<string, ToolCallInfo>();
+  private toolCount = 0;
 
   private readonly flushInterval: number;
   private readonly flushThreshold: number;
   private readonly toolMarkers: boolean;
+  private readonly sendSegments: boolean;
   private readonly postTimeout: number;
 
   constructor(private readonly opts: ParaStreamerOptions) {
     this.flushInterval = opts.flushInterval ?? 300;
     this.flushThreshold = opts.flushThreshold ?? 30;
-    this.toolMarkers = opts.toolMarkers ?? true;
+    this.sendSegments = opts.sendSegments ?? false;
+    // The marker is the FALLBACK, so it is off exactly when segments are on. Not "both, harmless" —
+    // a receiver that renders segments and also derives a preview from the text would show the
+    // markers in the preview of a reply whose body has real pills.
+    this.toolMarkers = this.sendSegments ? false : (opts.toolMarkers ?? true);
     this.postTimeout = opts.postTimeout ?? POST_TIMEOUT_MS;
   }
 
-  feed(ev: { type: string; text?: string; tool?: string }): void {
+  feed(ev: { type: string; text?: string; tool?: string; toolUseId?: string; input?: unknown; output?: string; isError?: boolean }): void {
     if (this.aborted || !this.opts.msgId) return;
 
     if (ev.type === 'text_delta' && ev.text) {
       if (this.afterTool) { this.fullText += '\n'; this.afterTool = false; }
       this.buffer += ev.text;
       this.fullText += ev.text;
+      this.appendSegmentText(ev.text);
       if (this.buffer.length >= this.flushThreshold) this.enqueueFlush();
       else this.scheduleTimer();
-    } else if (ev.type === 'tool_use' && ev.tool && this.toolMarkers) {
-      // In-band, transient: `finish()` sends the clean final text, which replaces the row wholesale
-      // (para-li writes the whole row), so the marker disappears on its own.
-      this.afterTool = true;
-      this.fullText += `\n\n_🔧 ${ev.tool.slice(0, 200)}_\n\n`;
+    } else if (ev.type === 'tool_use' && ev.tool) {
+      if (this.sendSegments) {
+        // A tool call is progress the reader wants IMMEDIATELY, at `running` — that is the whole
+        // point of the pill. So it flushes rather than waiting for the text threshold.
+        if (this.toolCount < MAX_TOOL_SEGMENTS) {
+          const id = ev.toolUseId || `tool_${this.toolCount}`;
+          const info: ToolCallInfo = { id, tool: ev.tool.slice(0, 200), status: 'running', ...(clampArgs(ev.input) ? { args: clampArgs(ev.input) } : {}) };
+          this.toolById.set(id, info);
+          this.segments.push({ type: 'tool', tool: info });
+        }
+        this.toolCount++;
+        this.enqueueFlush();
+      } else if (this.toolMarkers) {
+        // In-band, transient: `finish()` sends the clean final text, which replaces the row wholesale
+        // (para-li writes the whole row), so the marker disappears on its own.
+        this.afterTool = true;
+        this.fullText += `\n\n_🔧 ${ev.tool.slice(0, 200)}_\n\n`;
+        this.enqueueFlush();
+      }
+    } else if (ev.type === 'tool_result' && this.sendSegments && ev.toolUseId) {
+      const info = this.toolById.get(ev.toolUseId);
+      // A result for a call past MAX_TOOL_SEGMENTS (or for one we never saw) has nothing to settle;
+      // dropping it is correct — inventing a segment for it would put the pill out of order.
+      if (!info) return;
+      info.status = ev.isError ? 'error' : 'completed';
+      if (ev.output) info.result = clampText(ev.output, MAX_TOOL_RESULT_CHARS);
       this.enqueueFlush();
     }
+  }
+
+  /** Grow the trailing text segment, or start one. Mirrors `buildSegmentHost` in para-li's own
+   *  `lib/para-agent.ts` — consecutive text stays ONE segment, so the pills sit between paragraphs
+   *  instead of shredding the answer into a segment per delta. */
+  private appendSegmentText(text: string): void {
+    if (!this.sendSegments) return;
+    const last = this.segments[this.segments.length - 1];
+    if (last && last.type === 'text') last.content += text;
+    else this.segments.push({ type: 'text', content: text });
+  }
+
+  /** A deep copy with empty text segments dropped. Deep because `toolById` holds live references
+   *  into `segments`: a flush snapshot that shared them would be MUTATED by a later `tool_result`
+   *  while its POST was still in flight, so an in-order pair of deltas could show the same call as
+   *  `completed` and then `running`. */
+  private segmentSnapshot(): MessageSegment[] {
+    return this.segments
+      .filter((s) => s.type === 'tool' || s.content.trim().length > 0)
+      .map((s) => (s.type === 'tool' ? { type: 'tool' as const, tool: { ...s.tool } } : { type: 'text' as const, content: s.content }));
   }
 
   /** Settle the row with the final text. Returns the text actually sent. */
@@ -159,7 +291,10 @@ export class ParaStreamer {
     await this.flushChain;
     if (this.aborted || !this.opts.msgId) return this.fullText;
     const text = this.fullText.trim() || '(no output)';
-    await postPara(this.opts.callback, { type: 'final', convId: this.opts.convId, msgId: this.opts.msgId, text }, this.postTimeout);
+    await postPara(this.opts.callback, {
+      type: 'final', convId: this.opts.convId, msgId: this.opts.msgId, text,
+      ...(this.sendSegments ? { segments: this.segmentSnapshot() } : {}),
+    }, this.postTimeout);
     return text;
   }
 
@@ -174,13 +309,18 @@ export class ParaStreamer {
 
   private enqueueFlush(): void {
     this.clearTimer();
-    if (!this.fullText) return;
+    // `segments` matters here too: a turn that opens with a tool call has produced NO text yet, and
+    // the old guard would have swallowed that flush — so the first pill would not appear until the
+    // model started talking, and, worse, the delta that bumps para-li's stall watchdog
+    // (`lastActivityAt`) would never be sent for a long tool-only stretch.
+    if (!this.fullText && !this.segments.length) return;
     this.buffer = '';
     const snapshot = this.fullText;
+    const segs = this.sendSegments ? this.segmentSnapshot() : null;
     // Serialized: a later, longer snapshot must never be overtaken by an earlier one, or the row
     // visibly rewinds mid-stream.
     this.flushChain = this.flushChain
-      .then(async () => { await postPara(this.opts.callback, { type: 'delta', convId: this.opts.convId, msgId: this.opts.msgId, text: snapshot }, this.postTimeout); })
+      .then(async () => { await postPara(this.opts.callback, { type: 'delta', convId: this.opts.convId, msgId: this.opts.msgId, text: snapshot, ...(segs ? { segments: segs } : {}) }, this.postTimeout); })
       .catch((err) => console.warn('[para-streamer] flush error:', (err as Error).message));
   }
 

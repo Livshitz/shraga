@@ -86,10 +86,10 @@ function rememberLink(link: Link): void {
  *  be left watching a "typing…" placeholder that will never resolve. */
 async function runParaTurn(args: {
   callback: ParaCallback; convId: string; msgId: string; sessionId: string; prompt: string;
-  uid: string; userEmail: string;
+  uid: string; userEmail: string; sendSegments: boolean;
 }): Promise<void> {
-  const { callback, convId, msgId, sessionId, prompt, uid, userEmail } = args;
-  const streamer = new ParaStreamer({ callback, convId, msgId });
+  const { callback, convId, msgId, sessionId, prompt, uid, userEmail, sendSegments } = args;
+  const streamer = new ParaStreamer({ callback, convId, msgId, sendSegments });
   const abortController = new AbortController();
 
   // Lock origin is 'api': the union in sessions.ts is a closed set ('web'|'slack'|'scheduler'|
@@ -119,9 +119,14 @@ async function runParaTurn(args: {
       else if (ev.type === 'tool_use') {
         if (text) { blocks.push({ type: 'text', text }); text = ''; }
         blocks.push({ type: 'tool_use', tool: ev.tool, toolUseId: ev.toolUseId, input: ev.input });
-        streamer.feed({ type: 'tool_use', tool: ev.tool });
+        streamer.feed({ type: 'tool_use', tool: ev.tool, toolUseId: ev.toolUseId, input: ev.input });
       }
-      else if (ev.type === 'tool_result') blocks.push({ type: 'tool_result', toolUseId: ev.toolUseId, output: ev.output });
+      else if (ev.type === 'tool_result') {
+        blocks.push({ type: 'tool_result', toolUseId: ev.toolUseId, output: ev.output });
+        // The `running` → `completed`/`error` transition. Fed unconditionally; the streamer ignores
+        // it unless the receiver negotiated segments.
+        streamer.feed({ type: 'tool_result', toolUseId: ev.toolUseId, output: ev.output, isError: ev.isError });
+      }
       else if (ev.type === 'done') break;
       else if (ev.type === 'error') {
         if (text) { blocks.push({ type: 'text', text }); text = ''; }
@@ -188,9 +193,14 @@ export const paraFeature: ServerFeature = {
       const caller = bearer ? validateApiKey(bearer) : null;
       if (!caller) return void res.status(401).json({ error: 'unauthorized' });
 
-      const { connId, convId, sessionId, msgId, prompt, callback } = req.body as {
+      const { connId, convId, sessionId, msgId, prompt, callback, accepts } = req.body as {
         connId?: string; convId?: string; sessionId?: string; msgId?: string; prompt?: string;
         callback?: { url?: string; secret?: string };
+        /** Receiver capability negotiation. `'segments'` means "I can store and render structured
+         *  tool segments" — see `ParaStreamerOptions.sendSegments`. ABSENT means no: a para-li that
+         *  predates this field, and a lane (groups) that deliberately declines, both fall back to
+         *  the flattened `_🔧 Tool_` markers in the text. */
+        accepts?: unknown;
       };
       if (!connId || !convId || !msgId || !prompt) return void res.status(400).json({ error: 'connId, convId, msgId and prompt are required' });
       if (!callback?.url || !callback?.secret) return void res.status(400).json({ error: 'callback.url and callback.secret are required' });
@@ -210,6 +220,7 @@ export const paraFeature: ServerFeature = {
       void runParaTurn({
         callback: cb, convId, msgId, sessionId: sessionId || convId, prompt,
         uid: caller.uid, userEmail: caller.email,
+        sendSegments: Array.isArray(accepts) && accepts.includes('segments'),
       });
     });
 

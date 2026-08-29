@@ -7,7 +7,7 @@
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { createHmac } from 'node:crypto';
-import { ParaStreamer, postProactive, postPara, signPara, type ParaCallback } from '../para/streamer.ts';
+import { ParaStreamer, postProactive, postPara, signPara, clampText, clampArgs, MAX_TOOL_ARGS_CHARS, MAX_TOOL_RESULT_CHARS, MAX_TOOL_SEGMENTS, type ParaCallback } from '../para/streamer.ts';
 
 type Received = { body: any; headers: Record<string, string> };
 let received: Received[] = [];
@@ -255,5 +255,115 @@ describe('a hung receiver', () => {
     stuck.feed({ type: 'text_delta', text: 'the first half' });
     const marker = Symbol('pending');
     expect(await Promise.race([stuck.finish(), new Promise((r) => setTimeout(() => r(marker), 1_000))])).toBe(marker);
+  }, 20_000);
+});
+
+// ── Structured tool segments ────────────────────────────────────────────────
+//
+// The property under test is the one the FEATURE rests on: an external agent's turn arrives at
+// para-li as `{type,tool}` segments with real status transitions, and — crucially — arrives
+// PROGRESSIVELY, not only at `final`. Asserted on the bodies a real receiver saw.
+describe('tool segments', () => {
+  const drain = () => new Promise((r) => setTimeout(r, 50));
+
+  test('OFF by default: the flattened marker, no segments — a 0.1.69 receiver sees exactly what it did', async () => {
+    reset();
+    const s = new ParaStreamer({ callback: cb, convId: 'c1', msgId: 'm1', flushThreshold: 1 });
+    s.feed({ type: 'tool_use', tool: 'Bash', toolUseId: 't1', input: { command: 'ls' } });
+    s.feed({ type: 'tool_result', toolUseId: 't1', output: 'a\nb' });
+    const text = await s.finish();
+    expect(text).toContain('_🔧 Bash_');
+    for (const r of received) expect(r.body.segments).toBeUndefined();
+  });
+
+  test('ON: a running tool is delivered as `running` BEFORE its result exists', async () => {
+    reset();
+    const s = new ParaStreamer({ callback: cb, convId: 'c1', msgId: 'm1', sendSegments: true, flushThreshold: 1 });
+    s.feed({ type: 'text_delta', text: 'Checking.' });
+    s.feed({ type: 'tool_use', tool: 'Bash', toolUseId: 't1', input: { command: 'ls -la' } });
+    await drain();
+    // Streaming, not batched-at-the-end: this delta was on the wire while the tool was still going.
+    const live = received[received.length - 1].body;
+    expect(live.type).toBe('delta');
+    const running = live.segments.find((x: any) => x.type === 'tool');
+    expect(running.tool).toEqual({ id: 't1', tool: 'Bash', status: 'running', args: { command: 'ls -la' } });
+
+    s.feed({ type: 'tool_result', toolUseId: 't1', output: 'total 0' });
+    s.feed({ type: 'text_delta', text: 'Empty.' });
+    await s.finish();
+    const fin = received[received.length - 1].body;
+    expect(fin.type).toBe('final');
+    expect(fin.segments).toEqual([
+      { type: 'text', content: 'Checking.' },
+      { type: 'tool', tool: { id: 't1', tool: 'Bash', status: 'completed', args: { command: 'ls -la' }, result: 'total 0' } },
+      { type: 'text', content: 'Empty.' },
+    ]);
+    // The text stays CLEAN — no markers — so para-li's `lastPreview` is the reply, not decoration.
+    expect(fin.text).toBe('Checking.Empty.');
+  });
+
+  test('a failing tool reads as `error`, and results are matched by toolUseId not by order', async () => {
+    reset();
+    const s = new ParaStreamer({ callback: cb, convId: 'c1', msgId: 'm1', sendSegments: true, flushThreshold: 1 });
+    s.feed({ type: 'tool_use', tool: 'Read', toolUseId: 'a' });
+    s.feed({ type: 'tool_use', tool: 'Bash', toolUseId: 'b' });
+    // Results arrive out of order — the SECOND call settles first.
+    s.feed({ type: 'tool_result', toolUseId: 'b', output: 'boom', isError: true });
+    s.feed({ type: 'tool_result', toolUseId: 'a', output: 'file body' });
+    await s.finish();
+    const segs = received[received.length - 1].body.segments;
+    expect(segs.map((x: any) => [x.tool.tool, x.tool.status, x.tool.result]))
+      .toEqual([['Read', 'completed', 'file body'], ['Bash', 'error', 'boom']]);
+  });
+
+  test('a tool call with no text yet still flushes — the pill appears, and the stall watchdog is fed', async () => {
+    reset();
+    const s = new ParaStreamer({ callback: cb, convId: 'c1', msgId: 'm1', sendSegments: true, flushThreshold: 1 });
+    s.feed({ type: 'tool_use', tool: 'Bash', toolUseId: 't1' });
+    await drain();
+    // Pre-fix, `enqueueFlush` returned early on empty `fullText`: no delta at all, so para-li's
+    // `lastActivityAt` was never bumped for a tool-only stretch and the turn could be reaped.
+    expect(received.length).toBe(1);
+    expect(received[0].body.type).toBe('delta');
+    await s.finish();
+  });
+
+  test('an in-flight delta is not mutated by a later result — the row cannot rewind', async () => {
+    reset();
+    const s = new ParaStreamer({ callback: cb, convId: 'c1', msgId: 'm1', sendSegments: true, flushThreshold: 1 });
+    s.feed({ type: 'tool_use', tool: 'Bash', toolUseId: 't1' });
+    s.feed({ type: 'tool_result', toolUseId: 't1', output: 'done' });
+    await s.finish();
+    // The FIRST delta must still say `running`. Sharing the object with `toolById` would have let
+    // the result mutate a payload already queued behind it.
+    expect(received[0].body.segments[0].tool.status).toBe('running');
+    expect(received[received.length - 1].body.segments[0].tool.status).toBe('completed');
+  });
+
+  test('args and results are clamped with an honest marker naming the true length', async () => {
+    reset();
+    const big = 'x'.repeat(50_000);
+    const s = new ParaStreamer({ callback: cb, convId: 'c1', msgId: 'm1', sendSegments: true, flushThreshold: 1 });
+    s.feed({ type: 'tool_use', tool: 'Bash', toolUseId: 't1', input: { command: big } });
+    s.feed({ type: 'tool_result', toolUseId: 't1', output: big });
+    await s.finish();
+    const t = received[received.length - 1].body.segments[0].tool;
+    expect(t.args.command.length).toBeLessThanOrEqual(MAX_TOOL_ARGS_CHARS + 40);
+    expect(t.args.command).toContain('truncated, 50000 chars total');
+    expect(t.result.length).toBeLessThanOrEqual(MAX_TOOL_RESULT_CHARS + 40);
+    expect(t.result).toContain('truncated, 50000 chars total');
+    expect(clampText('short', 100)).toBe('short');
+    // A whole payload of small args is preserved verbatim — the cap is a budget, not a rewrite.
+    expect(clampArgs({ a: 1, b: 'two' })).toEqual({ a: 1, b: 'two' });
+  });
+
+  test('a runaway turn stops growing the row at MAX_TOOL_SEGMENTS, and stray results are dropped', async () => {
+    reset();
+    const s = new ParaStreamer({ callback: cb, convId: 'c1', msgId: 'm1', sendSegments: true, flushThreshold: 1 });
+    for (let i = 0; i < MAX_TOOL_SEGMENTS + 25; i++) s.feed({ type: 'tool_use', tool: 'Bash', toolUseId: `t${i}` });
+    // A result for a call past the cap has no segment to settle; it must not invent one.
+    s.feed({ type: 'tool_result', toolUseId: `t${MAX_TOOL_SEGMENTS + 5}`, output: 'ignored' });
+    await s.finish();
+    expect(received[received.length - 1].body.segments.length).toBe(MAX_TOOL_SEGMENTS);
   }, 20_000);
 });
