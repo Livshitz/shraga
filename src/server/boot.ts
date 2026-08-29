@@ -25,6 +25,7 @@ import { streamChat, consumeStream, getAgentConfig, saveAgentConfig, getClaudeAu
 import { mountFeatures, registerFeature, resumeFeatureSession, collectFeatureFlags, collectSidecarRoutes } from './features.ts';
 import { registerSpaCatchAll } from './spa-catchall.ts';
 import { slackFeature } from './slack/feature.ts';
+import { paraFeature } from './para/feature.ts';
 import { dataPath } from './paths.ts';
 import { getAllSessions, getSession, getSessionHistory, upsertSession, appendMessage, saveConversation, loadConversation, setSessionDirectives, getAutoApprove, setAutoApprove, getSessionsByScheduleId, getSessionsVisibleTo, isSessionVisibleTo, setRunStatus, incrementRetryCount, getRunningSessions, getActiveLockCount, updateScheduledSessionStatus, setShuttingDown, backfillSessionVisibility, writePartial, readPartial, clearPartial, registerLivePartial, unregisterLivePartial, readLivePartial, acquireSessionLock, releaseSessionLock, replaceSessionLock, isSessionLocked, getSessionAbortController, forkSession, generateSessionTitle, type ConvBlock, type ConvMessage, type SessionMeta } from './sessions.ts';
 import { setBroadcaster } from './session-bus.ts';
@@ -1203,6 +1204,9 @@ if (process.env.SHRAGA_OVERLAY) {
 // so their routes mount ahead of the SPA fallback, identical to the overlay path.
 for (const f of __reg.features ?? []) registerFeature(f);
 registerFeature(slackFeature);
+// para-li external-agent lane — a second medium alongside Slack; both subscribe the owner-notice
+// bus independently, so neither affects the other.
+registerFeature(paraFeature);
 mountFeatures({ app, requireAuth, broadcast, passive: PASSIVE });
 // Fold in feature-contributed sidecar WS proxy routes (the core names none; each add-on adds its own).
 Object.assign(WS_PROXY_ROUTES, collectSidecarRoutes());
