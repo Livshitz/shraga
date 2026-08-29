@@ -149,7 +149,9 @@ let busSubscribed = false;
 export const paraFeature: ServerFeature = {
   name: 'para',
 
-  flags: { para: true },
+  // No capability flag. `flags` is the seam's way to tell the CLIENT a surface exists, and nothing
+  // in the client gates on para — the lane is driven entirely by para.li calling in. Declaring one
+  // would be dead public surface on /api/features (slackFeature declares none for the same reason).
 
   register(ctx: FeatureContext): void {
     // Owner notices → the linked para conversations OF THIS DEPLOYMENT'S OWNERS. Keyed on the
