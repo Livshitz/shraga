@@ -36,6 +36,8 @@ export interface ParaStreamerOptions {
   flushThreshold?: number;
   /** Show a transient inline marker per tool call, as the Slack streamer does. Default on. */
   toolMarkers?: boolean;
+  /** Per-POST wall clock. See `POST_TIMEOUT_MS`. Overridable for tests. */
+  postTimeout?: number;
 }
 
 /** Signature contract, mirrored byte-for-byte in para-li's `lib/agent-conn.ts#signPayload`.
@@ -58,17 +60,36 @@ export function signPara(secret: string, connId: string, deliveryId: string, ts:
   return 'v1=' + createHmac('sha256', secret).update(`${connId}.${deliveryId}.${ts}.${rawBody}`).digest('hex');
 }
 
-/** One signed POST. Returns false on any non-2xx or network error, having logged it — the caller
- *  keeps streaming rather than aborting the agent's turn over a transport hiccup. */
-export async function postPara(cb: ParaCallback, payload: object): Promise<boolean> {
+/**
+ * Wall clock on ONE delivery. Mirrors the 20s AbortController on para-li's own `dispatchAgentTurn`,
+ * which is the other half of this lane.
+ *
+ * WHY A TIMEOUT IS LOAD-BEARING HERE AND NOT A NICETY: flushes are serialized through `flushChain`,
+ * and `finish()` awaits that chain. `fetch` has no default timeout, so ONE POST that connects and
+ * then never answers (a stalled proxy, a receiver wedged mid-handler, a half-open socket a dead NAT
+ * entry never RSTs) blocks every later delta AND the `final` — for the process's lifetime. The
+ * visible symptom is not an error: the reply freezes mid-sentence, no `final` ever lands, and
+ * nothing is logged, because the failure never returns. A bounded POST turns that permanent wedge
+ * into one logged, skipped delta and a `final` that still arrives.
+ */
+export const POST_TIMEOUT_MS = 20_000;
+
+/** One signed POST. Returns false on any non-2xx, timeout, or network error, having logged it — the
+ *  caller keeps streaming rather than aborting the agent's turn over a transport hiccup. */
+export async function postPara(cb: ParaCallback, payload: object, timeoutMs: number = POST_TIMEOUT_MS): Promise<boolean> {
   const raw = JSON.stringify(payload);
   const ts = Date.now();
   // Per-DELIVERY id, not per-turn: para-li's replay guard dedupes on this, so a shared id across
   // the deltas of one turn would drop every delta after the first. Minted here so the exact same
   // value goes into the header AND the signature — they must not be able to diverge.
   const delivery = randomUUID();
+  // Abort on a timer rather than `AbortSignal.timeout`: the same shape para-li uses, and the timer
+  // is cleared in `finally` so a fast POST leaves nothing pending on the event loop.
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
     const res = await fetch(cb.url, {
+      signal: ac.signal,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -85,8 +106,11 @@ export async function postPara(cb: ParaCallback, payload: object): Promise<boole
     }
     return true;
   } catch (err) {
-    console.warn('[para-streamer] delivery failed:', (err as Error).message);
+    const e = err as Error;
+    console.warn('[para-streamer] delivery failed:', e.name === 'AbortError' ? `no response within ${timeoutMs}ms` : e.message);
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -101,11 +125,13 @@ export class ParaStreamer {
   private readonly flushInterval: number;
   private readonly flushThreshold: number;
   private readonly toolMarkers: boolean;
+  private readonly postTimeout: number;
 
   constructor(private readonly opts: ParaStreamerOptions) {
     this.flushInterval = opts.flushInterval ?? 300;
     this.flushThreshold = opts.flushThreshold ?? 30;
     this.toolMarkers = opts.toolMarkers ?? true;
+    this.postTimeout = opts.postTimeout ?? POST_TIMEOUT_MS;
   }
 
   feed(ev: { type: string; text?: string; tool?: string }): void {
@@ -133,7 +159,7 @@ export class ParaStreamer {
     await this.flushChain;
     if (this.aborted || !this.opts.msgId) return this.fullText;
     const text = this.fullText.trim() || '(no output)';
-    await postPara(this.opts.callback, { type: 'final', convId: this.opts.convId, msgId: this.opts.msgId, text });
+    await postPara(this.opts.callback, { type: 'final', convId: this.opts.convId, msgId: this.opts.msgId, text }, this.postTimeout);
     return text;
   }
 
@@ -143,7 +169,7 @@ export class ParaStreamer {
     this.clearTimer();
     await this.flushChain;
     if (!this.opts.msgId) return;
-    await postPara(this.opts.callback, { type: 'error', convId: this.opts.convId, msgId: this.opts.msgId, message });
+    await postPara(this.opts.callback, { type: 'error', convId: this.opts.convId, msgId: this.opts.msgId, message }, this.postTimeout);
   }
 
   private enqueueFlush(): void {
@@ -154,7 +180,7 @@ export class ParaStreamer {
     // Serialized: a later, longer snapshot must never be overtaken by an earlier one, or the row
     // visibly rewinds mid-stream.
     this.flushChain = this.flushChain
-      .then(async () => { await postPara(this.opts.callback, { type: 'delta', convId: this.opts.convId, msgId: this.opts.msgId, text: snapshot }); })
+      .then(async () => { await postPara(this.opts.callback, { type: 'delta', convId: this.opts.convId, msgId: this.opts.msgId, text: snapshot }, this.postTimeout); })
       .catch((err) => console.warn('[para-streamer] flush error:', (err as Error).message));
   }
 

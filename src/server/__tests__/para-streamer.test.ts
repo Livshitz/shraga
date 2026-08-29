@@ -205,3 +205,55 @@ describe('cross-repo signature contract', () => {
     expect(seen[CONTRACT.connHeader]).toBe(CONTRACT.connId);
   });
 });
+
+// ── The wedge ────────────────────────────────────────────────────────────────
+//
+// `fetch` has no default timeout, and flushes are serialized through `flushChain` which `finish()`
+// awaits. So a receiver that ACCEPTS the connection and then never answers does not fail a delta —
+// it stops the turn, permanently and silently: no `final`, no log line, the row frozen mid-sentence.
+// These tests are written against a receiver that does exactly that, and each one carries its own
+// in-process NEGATIVE CONTROL (the same assertion with the bound removed, which must NOT hold).
+describe('a hung receiver', () => {
+  let hangServer: ReturnType<typeof Bun.serve>;
+  let releaseHang: () => void;
+  const held = new Promise<void>((r) => { releaseHang = r; });
+  let hangCb: ParaCallback;
+
+  beforeAll(() => {
+    hangServer = Bun.serve({
+      port: 0,
+      async fetch() { await held; return new Response('late', { status: 200 }); },
+    });
+    hangCb = { url: `http://127.0.0.1:${hangServer.port}/hook`, secret: 's', connId: 'cd'.repeat(12) };
+  });
+  afterAll(() => { releaseHang(); hangServer.stop(true); });
+
+  test('postPara gives up on the clock instead of waiting forever', async () => {
+    const t0 = Date.now();
+    expect(await postPara(hangCb, { type: 'post', convId: 'c', text: 'hi' }, 250)).toBe(false);
+    expect(Date.now() - t0).toBeLessThan(3_000);
+
+    // NEGATIVE CONTROL — the pre-fix behaviour. With an effectively unbounded timeout the same
+    // call has still not resolved after 1s; `false` here would mean the receiver isn't hanging and
+    // the test above proves nothing.
+    const unbounded = postPara(hangCb, { type: 'post', convId: 'c', text: 'hi' }, 3_600_000);
+    const marker = Symbol('pending');
+    expect(await Promise.race([unbounded, new Promise((r) => setTimeout(() => r(marker), 1_000))])).toBe(marker);
+  }, 15_000);
+
+  test('finish() still settles after a delta hangs — the turn does not freeze mid-sentence', async () => {
+    const s = new ParaStreamer({ callback: hangCb, convId: 'c1', msgId: 'm1', postTimeout: 250, flushThreshold: 1 });
+    s.feed({ type: 'text_delta', text: 'the first half' });
+    const t0 = Date.now();
+    // `finish()` awaits the serialized chain, so this only returns if the hung delta was bounded.
+    expect(await s.finish()).toBe('the first half');
+    expect(Date.now() - t0).toBeLessThan(5_000);
+
+    // NEGATIVE CONTROL — an unbounded streamer's `finish()` never settles. This is the observed
+    // symptom: the transcript says the turn completed, the row is stuck on the partial text.
+    const stuck = new ParaStreamer({ callback: hangCb, convId: 'c1', msgId: 'm1', postTimeout: 3_600_000, flushThreshold: 1 });
+    stuck.feed({ type: 'text_delta', text: 'the first half' });
+    const marker = Symbol('pending');
+    expect(await Promise.race([stuck.finish(), new Promise((r) => setTimeout(() => r(marker), 1_000))])).toBe(marker);
+  }, 20_000);
+});
