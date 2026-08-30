@@ -122,11 +122,14 @@ export class ClaudeUsageReader {
         signal: AbortSignal.timeout(this.options.timeoutMs),
       });
       if (res.status === 429) {
-        this.enterCooldown(res.headers.get('retry-after'));
+        // The reason lives in the BODY, not the status: "too many requests" (our own poll rate) and
+        // an account/org-level throttle read identically from the outside, and only the first one is
+        // ours to fix. Backing off blind once cost a day of a hidden gauge, so surface it.
+        this.enterCooldown(res.headers.get('retry-after'), await describeError(res));
         return null;
       }
       if (!res.ok) {
-        console.warn(`${TAG} usage endpoint returned ${res.status}; hiding widget`);
+        console.warn(`${TAG} usage endpoint returned ${res.status}; hiding widget — ${await describeError(res)}`);
         return null;
       }
       const body: any = await res.json();
@@ -145,14 +148,17 @@ export class ClaudeUsageReader {
 
   /** Climb the backoff ladder one rung per consecutive 429, capped at the last rung. `Retry-After`
    *  (seconds, or an HTTP-date) only ever EXTENDS the wait — never shortens the rung we earned. */
-  private enterCooldown(retryAfter: string | null) {
+  private enterCooldown(retryAfter: string | null, detail: string) {
     const ladder = this.options.rateLimitBackoffMs;
     const rung = ladder[Math.min(this.rateLimitStreak, ladder.length - 1)] ?? 60_000;
     this.rateLimitStreak++;
     const hinted = parseRetryAfter(retryAfter);
     const waitMs = Math.max(rung, hinted ?? 0);
     this.cooldownUntil = Date.now() + waitMs;
-    console.warn(`${TAG} usage endpoint returned 429; hiding widget and backing off ${Math.round(waitMs / 1000)}s`);
+    console.warn(
+      `${TAG} usage endpoint returned 429 (ua=claude-code/${claudeCodeVersion()}, retry-after=${retryAfter ?? 'none'}); ` +
+      `hiding widget and backing off ${Math.round(waitMs / 1000)}s — ${detail}`,
+    );
   }
 
   /** Re-read per poll from whichever source holds them — the token lives ~8h and Claude Code
@@ -206,6 +212,18 @@ function parseCredentials(raw: string, source: string): { accessToken: string; s
     return null;
   }
   return { accessToken: oauth.accessToken, subscriptionType: oauth.subscriptionType ?? null };
+}
+
+/** Anthropic answers errors as `{ error: { type, message } }`. Never throws and never returns more
+ *  than a line: this only ever lands in a log, next to a status we already decided to fail on. */
+async function describeError(res: Response): Promise<string> {
+  try {
+    const raw = (await res.text()).slice(0, 300);
+    const parsed = JSON.parse(raw)?.error;
+    return parsed?.message ? `${parsed.type ?? 'error'}: ${parsed.message}` : raw || '(empty body)';
+  } catch (err) {
+    return `(unreadable body: ${(err as Error).message})`;
+  }
 }
 
 /** `Retry-After` is either delta-seconds or an HTTP-date. Anything unparseable => no hint. */
