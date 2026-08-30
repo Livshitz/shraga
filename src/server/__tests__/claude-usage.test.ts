@@ -21,6 +21,7 @@ let hits = 0;
 let status = 200;
 let payload: unknown = BODY;
 let delayMs = 0;
+let retryAfter: string | null = null;
 let dir = '';
 
 beforeAll(async () => {
@@ -29,14 +30,16 @@ beforeAll(async () => {
     async fetch() {
       hits++;
       if (delayMs) await Bun.sleep(delayMs);
-      return new Response(JSON.stringify(payload), { status, headers: { 'content-type': 'application/json' } });
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      if (retryAfter) headers['retry-after'] = retryAfter;
+      return new Response(JSON.stringify(payload), { status, headers });
     },
   });
   endpoint = `http://127.0.0.1:${server.port}/usage`;
   dir = await mkdtemp(path.join(tmpdir(), 'claude-usage-'));
 });
 afterAll(async () => { server.stop(true); await rm(dir, { recursive: true, force: true }); });
-afterEach(() => { hits = 0; status = 200; payload = BODY; delayMs = 0; });
+afterEach(() => { hits = 0; status = 200; payload = BODY; delayMs = 0; retryAfter = null; });
 
 /** Write a credentials file and return a reader pointed at it + the fake upstream. */
 async function reader(creds: unknown, name = `c${Math.random().toString(36).slice(2)}.json`) {
@@ -142,6 +145,39 @@ describe('cache + in-flight dedupe', () => {
     await Bun.sleep(10);
     await r.get();
     expect(hits).toBe(2);
+  });
+
+  // A 429 is the one failure that must NOT be retried on the ordinary TTL: doing so is what pinned a
+  // prod box to 25 straight 429s in a day. It gets its own escalating cooldown instead.
+  it('backs off past the TTL after a 429, and escalates on each consecutive one', async () => {
+    status = 429;
+    const r = await reader(OK_CREDS);
+    r.options.ttlMs = 1;
+    r.options.rateLimitBackoffMs = [50, 10_000];
+
+    expect(await r.get()).toBeNull();
+    await Bun.sleep(10); // TTL expired, cooldown has not
+    expect(await r.get()).toBeNull();
+    expect(hits).toBe(1);
+
+    await Bun.sleep(50); // first rung elapsed -> one more probe, which climbs to the second rung
+    expect(await r.get()).toBeNull();
+    expect(hits).toBe(2);
+    await Bun.sleep(60);
+    expect(await r.get()).toBeNull();
+    expect(hits).toBe(2);
+  });
+
+  it('honours a longer Retry-After, and a success resets the ladder', async () => {
+    const r = await reader(OK_CREDS);
+    r.options.ttlMs = 1;
+    r.options.rateLimitBackoffMs = [10];
+
+    status = 429; retryAfter = '1'; // 1s beats the 10ms rung
+    expect(await r.get()).toBeNull();
+    await Bun.sleep(30);
+    expect(await r.get()).toBeNull();
+    expect(hits).toBe(1);
   });
 
   it('does not wedge: a failed in-flight call is cleared, the next TTL window fetches again', async () => {
