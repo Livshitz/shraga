@@ -41,8 +41,12 @@ export class ClaudeUsageOptions {
    *  deduped separately onto one in-flight request, so a reload storm or a wall of open tabs costs at
    *  most one upstream call per window — this endpoint answers 429 aggressively. Failures are cached
    *  on the same terms, so a 403/API-key box does not retry on every client poll. */
-  ttlMs = 60_000;
+  ttlMs = 300_000;
   timeoutMs = 8_000;
+  /** A 429 is not a transient blip here: retrying it on the ordinary TTL is what keeps a box wedged in
+   *  the penalty box all day (25 straight 429s on prod). Each consecutive 429 climbs this ladder and a
+   *  success drops back to the first rung; a `Retry-After` header wins over the rung when it is longer. */
+  rateLimitBackoffMs = [60_000, 300_000, 900_000, 1_800_000];
   /** macOS stores Claude Code's OAuth credentials in the login Keychain and writes NO credentials
    *  file, so on darwin an absent file is not proof of an API-key deployment — we look there second.
    *  Linux keeps the file as the only source; we never shell out there. */
@@ -79,6 +83,9 @@ export class ClaudeUsageReader {
    *  Without this the TTL is useless against a stampede: the cache is only written once the request
    *  RESOLVES, so N simultaneous callers all miss and all hit upstream. */
   private inflight: Promise<ClaudeUsage | null> | null = null;
+  /** While set in the future, `get()` answers null WITHOUT touching upstream — see rateLimitBackoffMs. */
+  private cooldownUntil = 0;
+  private rateLimitStreak = 0;
 
   public constructor(options?: Partial<ClaudeUsageOptions>) {
     this.options = { ...new ClaudeUsageOptions(), ...options };
@@ -87,6 +94,7 @@ export class ClaudeUsageReader {
   /** null => this box is not on a Claude subscription, or we could not prove that it is. */
   async get(): Promise<ClaudeUsage | null> {
     const now = Date.now();
+    if (now < this.cooldownUntil) return null;
     if (this.cache && now - this.cache.at < this.options.ttlMs) return this.cache.value;
     if (this.inflight) return this.inflight;
     // Clear inflight before the value is handed out, so a rejection can never wedge the reader:
@@ -113,6 +121,10 @@ export class ClaudeUsageReader {
         },
         signal: AbortSignal.timeout(this.options.timeoutMs),
       });
+      if (res.status === 429) {
+        this.enterCooldown(res.headers.get('retry-after'));
+        return null;
+      }
       if (!res.ok) {
         console.warn(`${TAG} usage endpoint returned ${res.status}; hiding widget`);
         return null;
@@ -123,11 +135,24 @@ export class ClaudeUsageReader {
         console.warn(`${TAG} usage response carried no limits[]; hiding widget`);
         return null;
       }
+      this.rateLimitStreak = 0;
       return { subscriptionType: creds.subscriptionType, limits };
     } catch (err) {
       console.warn(`${TAG} usage lookup failed:`, (err as Error).message);
       return null;
     }
+  }
+
+  /** Climb the backoff ladder one rung per consecutive 429, capped at the last rung. `Retry-After`
+   *  (seconds, or an HTTP-date) only ever EXTENDS the wait — never shortens the rung we earned. */
+  private enterCooldown(retryAfter: string | null) {
+    const ladder = this.options.rateLimitBackoffMs;
+    const rung = ladder[Math.min(this.rateLimitStreak, ladder.length - 1)] ?? 60_000;
+    this.rateLimitStreak++;
+    const hinted = parseRetryAfter(retryAfter);
+    const waitMs = Math.max(rung, hinted ?? 0);
+    this.cooldownUntil = Date.now() + waitMs;
+    console.warn(`${TAG} usage endpoint returned 429; hiding widget and backing off ${Math.round(waitMs / 1000)}s`);
   }
 
   /** Re-read per poll from whichever source holds them — the token lives ~8h and Claude Code
@@ -181,6 +206,16 @@ function parseCredentials(raw: string, source: string): { accessToken: string; s
     return null;
   }
   return { accessToken: oauth.accessToken, subscriptionType: oauth.subscriptionType ?? null };
+}
+
+/** `Retry-After` is either delta-seconds or an HTTP-date. Anything unparseable => no hint. */
+function parseRetryAfter(raw: string | null): number | null {
+  if (!raw) return null;
+  const secs = Number(raw.trim());
+  if (Number.isFinite(secs) && secs >= 0) return secs * 1000;
+  const at = Date.parse(raw);
+  if (!Number.isNaN(at)) return Math.max(0, at - Date.now());
+  return null;
 }
 
 function toLimit(l: any): ClaudeUsageLimit | null {

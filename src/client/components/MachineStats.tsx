@@ -16,7 +16,10 @@ export interface UsageLimit {
 export interface Usage { subscriptionType: string | null; limits: UsageLimit[] }
 
 const WINDOW = 120;
-const USAGE_POLL_MS = 60_000;
+// The upstream usage endpoint rate-limits hard and the numbers move slowly, so poll lazily: every
+// 5 min, and ONLY while this tab is visible. A wall of forgotten tabs was what kept the server in a
+// permanent 429 penalty box.
+const USAGE_POLL_MS = 300_000;
 
 interface Props {
   socket: AgentSocket | null;
@@ -69,10 +72,12 @@ function ClaudeUsageMetric({ getToken }: { getToken: () => Promise<string | null
 
   useEffect(() => {
     let alive = true;
+    let last = 0;
     const poll = async () => {
       try {
         const t = await getToken();
         if (!t) return;
+        last = Date.now();
         const r = await fetch('/api/claude-usage', { headers: { Authorization: `Bearer ${t}` } });
         if (!alive) return;
         // 204 = not a subscription deployment. Anything non-OK = fail closed, same outcome.
@@ -85,9 +90,20 @@ function ClaudeUsageMetric({ getToken }: { getToken: () => Promise<string | null
         if (alive) setUsage(null);
       }
     };
-    void poll();
-    const id = setInterval(poll, USAGE_POLL_MS);
-    return () => { alive = false; clearInterval(id); };
+    // A hidden tab is nobody watching: skip the tick entirely rather than paying an upstream call.
+    const tick = () => { if (document.visibilityState === 'visible') void poll(); };
+    // Coming back to the tab shows a stale gauge otherwise — refresh only if the interval was missed.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && Date.now() - last >= USAGE_POLL_MS) void poll();
+    };
+    tick();
+    const id = setInterval(tick, USAGE_POLL_MS);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      alive = false;
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [getToken]);
 
   return <UsageMetric usage={usage} />;
