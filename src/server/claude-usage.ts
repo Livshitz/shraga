@@ -249,14 +249,18 @@ function toLimit(l: any): ClaudeUsageLimit | null {
 }
 
 let cachedVersion: string | null = null;
-/** Best effort — the endpoint gates on the `claude-code/` PREFIX, not the exact number, so a stale
- *  fallback still keeps us out of the throttled bucket. */
+/** The UA this endpoint gates on is the Claude Code CLI's, and prod proved the gate is real: we were
+ *  sending `claude-code/0.2.141` — the AGENT SDK's version, which is not a Claude Code version at all
+ *  (those are 2.x) — and drew a sustained rate_limit_error with ~40min Retry-Afters. Read the CLI's
+ *  own package when it is installed; otherwise send a plausible CURRENT version, never the SDK's. */
+const FALLBACK_CLI_VERSION = '2.0.0';
 function claudeCodeVersion(): string {
   if (cachedVersion) return cachedVersion;
   try {
     const require = createRequire(import.meta.url);
-    cachedVersion = require('@anthropic-ai/claude-agent-sdk/package.json').version || '2.0.0';
-  } catch { cachedVersion = '2.0.0'; }
+    const v = require('@anthropic-ai/claude-code/package.json').version;
+    cachedVersion = typeof v === 'string' && /^\d+\./.test(v) ? v : FALLBACK_CLI_VERSION;
+  } catch { cachedVersion = FALLBACK_CLI_VERSION; }
   return cachedVersion!;
 }
 
