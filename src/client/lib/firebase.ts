@@ -20,7 +20,11 @@ export async function signInWithGoogle() {
     await signInWithGoogleNative(auth);
     return;
   }
-  await signInWithPopup(auth, new GoogleAuthProvider());
+  const provider = new GoogleAuthProvider();
+  // Force the account chooser — without it Google silently re-uses the single signed-in
+  // account, so signing out and back in can never land on a different user.
+  provider.setCustomParameters({ prompt: 'select_account' });
+  await signInWithPopup(auth, provider);
 }
 
 export async function signOutUser() {
