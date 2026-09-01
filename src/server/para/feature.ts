@@ -50,9 +50,9 @@ const LINKS_PATH = dataPath('para-links.json');
  *  taken from `validateApiKey`, never from the request body. A link written before this field
  *  existed has no email and is therefore not an owner: it receives no notices until its next turn
  *  refreshes the entry. */
-type Link = ParaCallback & { convId: string; at: number; uid: string; email?: string };
+export type Link = ParaCallback & { convId: string; at: number; uid: string; email?: string };
 
-function loadLinks(): Record<string, Link> {
+export function loadLinks(): Record<string, Link> {
   if (!existsSync(LINKS_PATH)) return {};
   try { return JSON.parse(readFileSync(LINKS_PATH, 'utf-8')); } catch (err) {
     console.warn('[para] links file unreadable, starting empty:', (err as Error).message);
