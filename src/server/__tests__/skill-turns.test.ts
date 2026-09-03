@@ -65,8 +65,11 @@ describe('per-skill turn budget', () => {
   });
 
   test('a TRIGGERED skill supplies it too (the pipeline is invoked by phrase, not only by slash)', async () => {
-    saveSkill('triggered-long', '---\nname: triggered-long\ndescription: x\nturns: 120\ntriggers:\n  - "make a video ad"\n---\n\nbody\n');
-    expect((await run('please make a video ad for us')).turns).toBe(120);
+    // NOT a video-ad phrase: trigger-matching.test.ts registers the real video-ad-pipeline skill
+    // (turns: 250) into the same shared DATA_DIR, and resolveSkillTurns takes the MAX across the
+    // matched set — a colliding phrase here would silently assert that file's number, not this one's.
+    saveSkill('triggered-long', '---\nname: triggered-long\ndescription: x\nturns: 120\ntriggers:\n  - "reticulate the splines"\n---\n\nbody\n');
+    expect((await run('please reticulate the splines for us')).turns).toBe(120);
   });
 
   test('a skill with no `turns` leaves the gap for config.maxTurns — it must NOT invent a number', async () => {
