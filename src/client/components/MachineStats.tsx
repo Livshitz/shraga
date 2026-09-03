@@ -13,7 +13,14 @@ export interface UsageLimit {
   resetsAt: string | null;
   scopeLabel?: string;
 }
-export interface Usage { subscriptionType: string | null; limits: UsageLimit[] }
+export interface Usage {
+  subscriptionType: string | null;
+  limits: UsageLimit[];
+  /** When the server last actually read these numbers from upstream (ISO). */
+  fetchedAt?: string;
+  /** Server is serving its last known-good reading because the live attempt failed. */
+  stale?: boolean;
+}
 
 const WINDOW = 120;
 // The upstream usage endpoint rate-limits hard and the numbers move slowly, so poll lazily: every
@@ -80,14 +87,16 @@ function ClaudeUsageMetric({ getToken }: { getToken: () => Promise<string | null
         last = Date.now();
         const r = await fetch('/api/claude-usage', { headers: { Authorization: `Bearer ${t}` } });
         if (!alive) return;
-        // 204 = not a subscription deployment. Anything non-OK = fail closed, same outcome.
-        if (r.status !== 200) { setUsage(null); return; }
+        // 204 = this box was never proven to be on a subscription: render nothing. Any OTHER non-OK is
+        // a transient failure — KEEP the reading on screen (labelled with its age) rather than making
+        // the gauge blink out of existence, which is what made it look broken.
+        if (r.status === 204) { setUsage(null); return; }
+        if (r.status !== 200) return;
         const d: Usage = await r.json();
         if (!alive || !d?.limits?.length) return;
         setUsage(d);
       } catch (err) {
         console.warn('[MachineStats] claude usage poll failed', err);
-        if (alive) setUsage(null);
       }
     };
     // A hidden tab is nobody watching: skip the tick entirely rather than paying an upstream call.
@@ -204,6 +213,7 @@ export function UsageCard({ usage }: { usage: Usage }) {
         <span className="uppercase tracking-wide">claude usage</span>
         {usage.subscriptionType && <span className="tabular-nums">{usage.subscriptionType} plan</span>}
       </div>
+      <div className="-mt-1 pb-2 text-[10px] text-muted-foreground">{ageLabel(usage)}</div>
       <div className="flex flex-col gap-3">
         {usage.limits.map((l, i) => {
           const until = untilLabel(l.resetsAt);
@@ -250,6 +260,27 @@ export function binding(limits: UsageLimit[]): UsageLimit | null {
 /** Human "time until reset", derived from resets_at only — never from the limit's kind name.
  *  Rounded to whole minutes FIRST so a value handed in as exactly 4h does not render "3h 59m"
  *  because a few milliseconds elapsed between building it and reading the clock. */
+/** Between polls the numbers are, by definition, a past reading — say WHEN, so a still gauge reads as
+ *  "last checked 3m ago" instead of "stuck". `stale` additionally means the last attempt failed. */
+export function ageLabel(usage: Pick<Usage, 'fetchedAt' | 'stale'>): string {
+  const ago = agoLabel(usage.fetchedAt);
+  if (!ago) return usage.stale ? 'last reading — refresh failed' : 'updated just now';
+  return usage.stale ? `${ago} old — refresh failed` : `updated ${ago} ago`;
+}
+
+/** Compact "how long since" for a past ISO timestamp. null when absent or unparseable. */
+export function agoLabel(iso: string | undefined): string | null {
+  if (!iso) return null;
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return null;
+  const min = Math.round(Math.max(0, ms) / 60_000);
+  if (min < 1) return null;
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60), m = min % 60;
+  if (h < 24) return m ? `${h}h ${m}m` : `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
 export function untilLabel(iso: string | null): string | null {
   if (!iso) return null;
   const ms = new Date(iso).getTime() - Date.now();

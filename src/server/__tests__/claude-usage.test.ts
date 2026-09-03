@@ -115,6 +115,49 @@ describe('upstream failure is fail-closed', () => {
   });
 });
 
+describe('last known-good reading survives a failure', () => {
+  /** Reader over a real creds file with a short TTL, so a second get() actually re-fetches. */
+  async function shortTtl() {
+    const p = path.join(dir, `lg${Math.random().toString(36).slice(2)}.json`);
+    await writeFile(p, JSON.stringify(OK_CREDS));
+    return new ClaudeUsageReader({ credentialsPath: p, endpoint, ttlMs: 1, readKeychain: NEVER_KEYCHAIN });
+  }
+
+  it('stamps a fresh reading with fetchedAt and no stale flag', async () => {
+    const u = await (await shortTtl()).get();
+    expect(u?.stale).toBeUndefined();
+    expect(Number.isNaN(Date.parse(u!.fetchedAt))).toBe(false);
+  });
+
+  it('keeps serving the last good numbers, flagged stale, after a 500', async () => {
+    const r = await shortTtl();
+    const first = await r.get();
+    await Bun.sleep(5);
+    status = 500;
+    const second = await r.get();
+    expect(second?.limits).toEqual(first!.limits);
+    expect(second?.stale).toBe(true);
+    expect(second?.fetchedAt).toBe(first!.fetchedAt); // the AGE is the point — not re-stamped
+  });
+
+  it('keeps serving the last good numbers while in 429 cooldown, without touching upstream', async () => {
+    const r = await shortTtl();
+    await r.get();
+    await Bun.sleep(5);
+    status = 429;
+    expect((await r.get())?.stale).toBe(true);
+    const afterCooldown = hits;
+    expect((await r.get())?.stale).toBe(true);
+    expect(hits).toBe(afterCooldown); // cooldown short-circuits before any request
+  });
+
+  it('still answers null when there was never a good reading', async () => {
+    status = 500;
+    const r = await shortTtl();
+    expect(await r.get()).toBeNull();
+  });
+});
+
 describe('cache + in-flight dedupe', () => {
   it('collapses a concurrent stampede into ONE upstream call', async () => {
     delayMs = 25; // hold every caller inside fetchUsage at once

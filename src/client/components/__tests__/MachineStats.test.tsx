@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { CLOSED, UsageCard, UsageMetric, binding, nextCardState, untilLabel, windowLabel, type CardEvent, type Usage } from '../MachineStats';
+import { CLOSED, UsageCard, ageLabel, UsageMetric, binding, nextCardState, untilLabel, windowLabel, type CardEvent, type Usage } from '../MachineStats';
 
 // Captured verbatim from a live 200 on the prod box (api.anthropic.com/api/oauth/usage).
 const REAL: Usage = {
@@ -242,5 +242,27 @@ describe('nextCardState — who may open and close the card', () => {
   it('a deliberately opened card survives the mouse wandering off', () => {
     const clicked = nextCardState(CLOSED, { type: 'activate' });
     expect(nextCardState(clicked, leave('mouse'))).toEqual(clicked);
+  });
+});
+
+describe('reading age', () => {
+  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+
+  it('says how long ago a fresh reading was taken', () => {
+    expect(ageLabel({ fetchedAt: ago(3) })).toBe('updated 3m ago');
+    expect(ageLabel({ fetchedAt: ago(0) })).toBe('updated just now');
+    expect(ageLabel({ fetchedAt: ago(150) })).toBe('updated 2h 30m ago');
+  });
+
+  it('says the refresh failed when the server is serving its last known-good numbers', () => {
+    expect(ageLabel({ fetchedAt: ago(12), stale: true })).toBe('12m old — refresh failed');
+    expect(ageLabel({ stale: true })).toBe('last reading — refresh failed');
+  });
+
+  it('renders the age inside the card', () => {
+    const html = renderToStaticMarkup(
+      <UsageCard usage={{ subscriptionType: 'max', fetchedAt: ago(4), limits: [{ kind: 'session', group: 'session', percent: 6, severity: 'normal', resetsAt: null }] }} />,
+    );
+    expect(html).toContain('updated 4m ago');
   });
 });

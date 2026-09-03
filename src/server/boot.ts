@@ -229,8 +229,10 @@ app.get('/api/stats', requireAuth, (_req, res) => {
 });
 
 // Claude Code subscription usage for this box. 204 (not an error, not an empty object) is the
-// deliberate answer whenever we cannot PROVE a subscription — no credentials file, no user:profile
-// scope, or any upstream failure — so the client renders nothing rather than a misleading gauge.
+// deliberate answer whenever we cannot PROVE a subscription — no credentials anywhere, or no
+// user:profile scope — so the client renders nothing rather than a misleading gauge. A LATER upstream
+// failure does not 204: the reader keeps serving its last known-good reading marked `stale`, with
+// `fetchedAt`, so the gauge stays put and states its age instead of blinking out.
 // Deliberately NOT gated on the active engine: the question is whether Claude Code is configured
 // with a subscription on this host, not which runtime happens to be selected right now.
 app.get('/api/claude-usage', requireAuth, async (_req, res) => {
