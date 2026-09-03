@@ -2,7 +2,7 @@
 // the Claude Code CLI maintains on this box. Fails CLOSED: every error path returns null, and the
 // caller renders nothing — a broken or zeroed gauge is worse than no gauge.
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -32,6 +32,11 @@ export interface ClaudeUsageLimit {
 export interface ClaudeUsage {
   subscriptionType: string | null;
   limits: ClaudeUsageLimit[];
+  /** When these numbers were actually read from upstream (ISO). The client labels the gauge with it. */
+  fetchedAt: string;
+  /** True when this is the last known-good reading being served because the current attempt failed
+   *  (429 cooldown, 403, network). The gauge stays VISIBLE and says how old it is. */
+  stale?: boolean;
 }
 
 export class ClaudeUsageOptions {
@@ -51,6 +56,9 @@ export class ClaudeUsageOptions {
    *  file, so on darwin an absent file is not proof of an API-key deployment — we look there second.
    *  Linux keeps the file as the only source; we never shell out there. */
   platform: string = process.platform;
+  /** Claude Code writes its OAuth blob under this service — but NEWER CLIs suffix it per profile
+   *  (`Claude Code-credentials-<hash>`), leaving the bare name holding only mcpOAuth. Reading just the
+   *  bare name is why the gauge silently vanished on an otherwise healthy box, so we enumerate. */
   keychainService = 'Claude Code-credentials';
   /** A locked keychain can block (or prompt) indefinitely — never let that stall a client poll. */
   keychainTimeoutMs = 3_000;
@@ -62,18 +70,54 @@ export class ClaudeUsageOptions {
 /** `security` writes the secret to stdout with -w. The value is never logged or returned upward;
  *  only the parsed, scope-gated accessToken leaves this module. */
 async function readKeychainSecret(options: ClaudeUsageOptions): Promise<string | null> {
+  for (const service of await keychainServices(options)) {
+    try {
+      const { stdout } = await execFileAsync('security', ['find-generic-password', '-s', service, '-w'], {
+        timeout: options.keychainTimeoutMs,
+        killSignal: 'SIGKILL',
+        encoding: 'utf8',
+        maxBuffer: 8 * 1024 * 1024,
+      });
+      const raw = stdout.trim();
+      // The bare service often exists but holds only mcpOAuth — keep looking rather than failing here.
+      if (raw && hasOauthToken(raw)) return raw;
+    } catch (err) {
+      // Missing binary, non-zero exit (no such item), locked keychain, timeout — all the same answer.
+      console.debug(`${TAG} keychain lookup failed for "${service}": ${(err as Error).message}`);
+    }
+  }
+  return null;
+}
+
+function hasOauthToken(raw: string): boolean {
   try {
-    const { stdout } = await execFileAsync('security', ['find-generic-password', '-s', options.keychainService, '-w'], {
+    return typeof JSON.parse(raw)?.claudeAiOauth?.accessToken === 'string';
+  } catch {
+    return false;
+  }
+}
+
+/** The bare service first (cheap, the common case), then any `<service>-<suffix>` items the keychain
+ *  actually holds. `dump-keychain` without -d lists ATTRIBUTES only — no secrets, and no prompt. */
+async function keychainServices(options: ClaudeUsageOptions): Promise<string[]> {
+  const services = [options.keychainService];
+  try {
+    const { stdout } = await execFileAsync('security', ['dump-keychain'], {
       timeout: options.keychainTimeoutMs,
       killSignal: 'SIGKILL',
       encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
     });
-    return stdout.trim() || null;
+    const re = new RegExp(`"svce"<blob>="(${escapeRe(options.keychainService)}[^"]*)"`, 'g');
+    for (const m of stdout.matchAll(re)) if (!services.includes(m[1])) services.push(m[1]);
   } catch (err) {
-    // Missing binary, non-zero exit (no such item), locked keychain, timeout — all the same answer.
-    console.debug(`${TAG} keychain lookup failed: ${(err as Error).message}`);
-    return null;
+    console.debug(`${TAG} keychain enumeration failed: ${(err as Error).message}`);
   }
+  return services;
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 export class ClaudeUsageReader {
@@ -86,26 +130,42 @@ export class ClaudeUsageReader {
   /** While set in the future, `get()` answers null WITHOUT touching upstream — see rateLimitBackoffMs. */
   private cooldownUntil = 0;
   private rateLimitStreak = 0;
+  /** The last reading that actually came back from upstream. Once we have proven this box IS on a
+   *  subscription, a later failure (429 cooldown, 403, network blip) must NOT make the gauge vanish —
+   *  a widget that flickers in and out reads as a bug. We keep serving this, flagged `stale`, and the
+   *  client shows how old it is. Only a box that never had a good reading answers null. */
+  private lastGood: { at: number; value: ClaudeUsage } | null = null;
 
   public constructor(options?: Partial<ClaudeUsageOptions>) {
     this.options = { ...new ClaudeUsageOptions(), ...options };
   }
 
-  /** null => this box is not on a Claude subscription, or we could not prove that it is. */
+  /** null => this box is not on a Claude subscription, or we could not prove that it ever was. */
   async get(): Promise<ClaudeUsage | null> {
     const now = Date.now();
-    if (now < this.cooldownUntil) return null;
-    if (this.cache && now - this.cache.at < this.options.ttlMs) return this.cache.value;
+    if (now < this.cooldownUntil) return this.stale();
+    if (this.cache && now - this.cache.at < this.options.ttlMs) return this.cache.value ?? this.stale();
     if (this.inflight) return this.inflight;
     // Clear inflight before the value is handed out, so a rejection can never wedge the reader:
     // the next call past the TTL starts a fresh request.
     this.inflight = this.fetchUsage()
-      .then((value) => { this.cache = { at: Date.now(), value }; return value; })
+      .then((value) => {
+        const at = Date.now();
+        const stamped = value ? { ...value, fetchedAt: new Date(at).toISOString() } : null;
+        this.cache = { at, value: stamped };
+        if (stamped) this.lastGood = { at, value: stamped };
+        return stamped ?? this.stale();
+      })
       .finally(() => { this.inflight = null; });
     return this.inflight;
   }
 
-  private async fetchUsage(): Promise<ClaudeUsage | null> {
+  /** Last known-good reading, marked stale. Never invents numbers — null when we never had any. */
+  private stale(): ClaudeUsage | null {
+    return this.lastGood ? { ...this.lastGood.value, stale: true } : null;
+  }
+
+  private async fetchUsage(): Promise<Omit<ClaudeUsage, 'fetchedAt'> | null> {
     const creds = await this.readCredentials();
     if (!creds) return null;
 
@@ -162,23 +222,24 @@ export class ClaudeUsageReader {
   }
 
   /** Re-read per poll from whichever source holds them — the token lives ~8h and Claude Code
-   *  refreshes it in place, so nothing here may be cached in a field. File first, Keychain second. */
+   *  refreshes it in place, so nothing here may be cached in a field. Files first, Keychain second.
+   *  Neither source is a single fixed name any more: newer CLIs write a per-profile SUFFIX
+   *  (`.credentials-<hash>.json`, `Claude Code-credentials-<hash>`) and leave the bare name holding
+   *  non-OAuth data, so we try every candidate before concluding "no subscription". */
   private async readCredentials(): Promise<{ accessToken: string; subscriptionType: string | null } | null> {
-    let fileAbsent = false;
-    try {
-      return parseCredentials(await readFile(this.options.credentialsPath, 'utf8'), 'credentials file');
-    } catch (err) {
-      // ENOENT is the ordinary API-key deployment on Linux, not a fault — keep it quiet at debug level.
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT') {
-        fileAbsent = true;
-        console.debug(`${TAG} no credentials file at ${this.options.credentialsPath}`);
-      } else {
-        console.warn(`${TAG} could not read credentials:`, (err as Error).message);
+    for (const file of await this.credentialFiles()) {
+      try {
+        const creds = parseCredentials(await readFile(file, 'utf8'), `credentials file ${path.basename(file)}`);
+        if (creds) return creds;
+      } catch (err) {
+        // ENOENT is the ordinary API-key deployment on Linux, not a fault — keep it quiet at debug level.
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') console.debug(`${TAG} no credentials file at ${file}`);
+        else console.warn(`${TAG} could not read ${file}:`, (err as Error).message);
       }
     }
 
-    if (!fileAbsent || this.options.platform !== 'darwin') return null;
+    if (this.options.platform !== 'darwin') return null;
     // The seam is contractually fail-closed, but readCredentials runs OUTSIDE fetchUsage's try —
     // an unexpected rejection here would surface as a 500 rather than a hidden widget.
     const secret = await this.options.readKeychain(this.options).catch((err: Error) => {
@@ -186,10 +247,26 @@ export class ClaudeUsageReader {
       return null;
     });
     if (!secret) {
-      console.debug(`${TAG} keychain held no "${this.options.keychainService}" secret (API-key deployment)`);
+      console.debug(`${TAG} keychain held no "${this.options.keychainService}*" secret (API-key deployment)`);
       return null;
     }
     return parseCredentials(secret, 'keychain');
+  }
+
+  /** The configured path first, then any sibling `.credentials*.json` the CLI may have written. */
+  private async credentialFiles(): Promise<string[]> {
+    const configured = this.options.credentialsPath;
+    const files = [configured];
+    const base = path.basename(configured).replace(/\.json$/, '');
+    try {
+      for (const name of await readdir(path.dirname(configured))) {
+        const full = path.join(path.dirname(configured), name);
+        if (name.startsWith(base) && name.endsWith('.json') && !files.includes(full)) files.push(full);
+      }
+    } catch (err) {
+      console.debug(`${TAG} could not scan for sibling credential files: ${(err as Error).message}`);
+    }
+    return files;
   }
 }
 
