@@ -2,11 +2,12 @@
 // the Claude Code CLI maintains on this box. Fails CLOSED: every error path returns null, and the
 // caller renders nothing — a broken or zeroed gauge is worse than no gauge.
 import { execFile } from 'node:child_process';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
+import { dataPath } from './paths.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -71,6 +72,10 @@ export class ClaudeUsageOptions {
   keychainService = 'Claude Code-credentials';
   /** A locked keychain can block (or prompt) indefinitely — never let that stall a client poll. */
   keychainTimeoutMs = 3_000;
+  /** Where the last known-good reading is mirrored, so a restart (deploy, self-upgrade) does not
+   *  blank the gauge on a box whose upstream is rate-limited for the next hour. Identity + percentages
+   *  only — never a token. */
+  cachePath = dataPath('claude-usage-last.json');
   /** Seam: hands back the raw secret string, or null on ANY failure. Tests inject here so the suite
    *  never shells out to the real `security` binary. */
   readKeychain: (options: ClaudeUsageOptions) => Promise<string | null> = readKeychainSecret;
@@ -144,6 +149,8 @@ export class ClaudeUsageReader {
    *  a widget that flickers in and out reads as a bug. We keep serving this, flagged `stale`, and the
    *  client shows how old it is. Only a box that never had a good reading answers null. */
   private lastGood: { at: number; value: ClaudeUsage } | null = null;
+  /** One-shot rehydrate of `lastGood` from disk, awaited by the first get(). */
+  private restored: Promise<void> | null = null;
 
   public constructor(options?: Partial<ClaudeUsageOptions>) {
     this.options = { ...new ClaudeUsageOptions(), ...options };
@@ -151,6 +158,7 @@ export class ClaudeUsageReader {
 
   /** null => this box is not on a Claude subscription, or we could not prove that it ever was. */
   async get(): Promise<ClaudeUsage | null> {
+    await (this.restored ??= this.restore());
     const now = Date.now();
     if (now < this.cooldownUntil) return this.stale();
     if (this.cache && now - this.cache.at < this.options.ttlMs) return this.cache.value ?? this.stale();
@@ -162,11 +170,34 @@ export class ClaudeUsageReader {
         const at = Date.now();
         const stamped = value ? { ...value, fetchedAt: new Date(at).toISOString() } : null;
         this.cache = { at, value: stamped };
-        if (stamped) this.lastGood = { at, value: stamped };
+        if (stamped) { this.lastGood = { at, value: stamped }; void this.persist(this.lastGood); }
         return stamped ?? this.stale();
       })
       .finally(() => { this.inflight = null; });
     return this.inflight;
+  }
+
+  /** Rehydrate the last reading a previous process wrote. Never throws: a missing or corrupt file
+   *  just means we start with nothing, exactly as before. */
+  private async restore(): Promise<void> {
+    try {
+      const saved = JSON.parse(await readFile(this.options.cachePath, 'utf8'));
+      if (Array.isArray(saved?.value?.limits) && saved.value.limits.length && typeof saved.at === 'number') {
+        this.lastGood = { at: saved.at, value: saved.value };
+      }
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') console.debug(`${TAG} could not restore the last reading: ${(err as Error).message}`);
+    }
+  }
+
+  /** Mirror a fresh reading to disk. Best-effort — a write failure must never break the response. */
+  private async persist(entry: { at: number; value: ClaudeUsage }) {
+    try {
+      await writeFile(this.options.cachePath, JSON.stringify(entry));
+    } catch (err) {
+      console.debug(`${TAG} could not persist the last reading: ${(err as Error).message}`);
+    }
   }
 
   /** Last known-good reading, marked stale. Never invents numbers — null when we never had any. */
