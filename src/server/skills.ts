@@ -18,12 +18,33 @@ export interface SkillMeta {
   model?: string;
   allowedTools?: string[];
   argumentHint?: string;
+  /** Per-skill turn budget. Gap-fills `directives.turns` for the turn that invokes the skill —
+   * inline `[turns:N]` and a session-pinned value both still win. Capped at MAX_SKILL_TURNS. */
+  turns?: number;
   triggers?: string[];
   expires?: string;
   origin?: string;
   reviewed?: boolean;
   /** `managed-by: <module>@<version>` — set on skills rendered by a data-plane module. */
   managedBy?: string;
+}
+
+/** Ceiling on a skill's self-declared turn budget. A skill file is data — it is edited without a
+ * deploy and shipped by rsync — so an unbounded number there is an unattended spend hazard. 300 is
+ * one step above the 250 the video-ad pipeline needs in practice, so no real skill is clipped,
+ * while a typo'd `turns: 30000` costs a bounded worst case instead of an open-ended one. A human
+ * typing `[turns:N]` inline is NOT capped — that is a deliberate, attended choice. */
+export const MAX_SKILL_TURNS = 300;
+
+/** Largest turn budget declared by any of the named skills, clamped to MAX_SKILL_TURNS. */
+export function resolveSkillTurns(names: (string | undefined)[]): number | undefined {
+  let best = 0;
+  for (const name of names) {
+    if (!name) continue;
+    const t = getSkill(name)?.meta.turns;
+    if (t && t > best) best = t;
+  }
+  return best ? Math.min(best, MAX_SKILL_TURNS) : undefined;
 }
 
 export function isExpired(meta: SkillMeta): boolean {
@@ -61,6 +82,7 @@ export function parseSkillFrontmatter(content: string): { meta: SkillMeta; body:
     if (key === 'model') meta.model = val;
     if (key === 'allowed-tools') meta.allowedTools = val.split(',').map(s => s.trim());
     if (key === 'argument-hint') meta.argumentHint = val;
+    if ((key === 'turns' || key === 'max-turns') && /^\d+$/.test(val)) meta.turns = parseInt(val, 10);
     if (key === 'triggers' && val) {
       try { meta.triggers = JSON.parse(val); } catch {
         meta.triggers = val.split(',').map(s => s.trim());

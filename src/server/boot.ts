@@ -21,7 +21,7 @@ import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import { requireAuth, verifyBearer, authenticateToken, AUTH_PROVIDER, localLogin, addLocalUser, localUserCount } from './auth.ts';
 import { getMcpConfig, getRawMcpConfig, getResolvedMcpConfig, getGlobalMcpConfig, saveMcpConfig, maskEnvValues, mergeWithOriginal, type McpConfig } from './mcp.ts';
-import { streamChat, consumeStream, getAgentConfig, saveAgentConfig, getClaudeAuthSource, type AgentConfig, type PermissionHandler, type QuestionHandler, type QuestionAnswers, type AttachmentMeta, type WsEvent } from './claude.ts';
+import { streamChat, consumeStream, getAgentConfig, saveAgentConfig, getClaudeAuthSource, type AgentConfig, type PermissionHandler, type QuestionHandler, type QuestionAnswers, type AttachmentMeta, type WsEvent, MAX_TURNS_NOTICE } from './claude.ts';
 import { mountFeatures, registerFeature, resumeFeatureSession, collectFeatureFlags, collectSidecarRoutes } from './features.ts';
 import { registerSpaCatchAll } from './spa-catchall.ts';
 import { slackFeature } from './slack/feature.ts';
@@ -576,7 +576,7 @@ app.get('/api/schedules/:id/runs', requireAuth, (req, res) => {
  */
 type RunChatTurnResult =
   | { status: 'busy' }
-  | { sessionId: string; text: string; blocks: ConvBlock[] }
+  | { sessionId: string; text: string; blocks: ConvBlock[]; stopReason?: string }
   | { sessionId: string; error: string };
 
 async function runChatTurn(
@@ -604,6 +604,14 @@ async function runChatTurn(
   appendMessage(sid, { id: crypto.randomUUID(), role: 'user', blocks: [{ type: 'text', text: prompt }], channel: 'api', senderName: userName });
   setRunStatus(sid, 'running', 'web');
 
+  let stopReason: string | undefined;
+  const onEvent = (ev: WsEvent) => {
+    // consumeStream() drops the `done` event's stopReason, so every non-WS transport lost the fact
+    // that the turn was TRUNCATED and returned the partial answer as if it were complete.
+    if (ev.type === 'done') stopReason = (ev as any).stopReason;
+    hooks?.onEvent?.(ev);
+  };
+
   try {
     const blocks = await consumeStream(streamChat({
       prompt,
@@ -615,7 +623,7 @@ async function runChatTurn(
       abortController,
       context: opts.context ?? { source: 'api', user: userEmail },
       onPermissionRequest: async () => ({ allow: true }),
-    }), hooks?.onEvent);
+    }), onEvent);
     if (blocks.length) {
       appendMessage(sid, { id: crypto.randomUUID(), role: 'assistant', blocks });
     }
@@ -623,7 +631,7 @@ async function runChatTurn(
     const meta = getSession(sid);
     notifyUnread(uid, sid, text.slice(0, 120) || '(completed)', 'response', meta?.title);
     broadcast({ type: 'session_messages_changed', sessionId: sid });
-    return { sessionId: sid, text, blocks };
+    return { sessionId: sid, text, blocks, stopReason };
   } catch (err: any) {
     console.error(`[chat-turn] error:`, err.message);
     return { sessionId: sid, error: err.message };
@@ -1460,7 +1468,7 @@ async function runStream(ws: WebSocket, session: WsSession, sid: string, promptT
       } else if (event.type === 'done') {
         stopReason = event.stopReason ?? 'end_turn';
         if (stopReason === 'max_turns_reached') {
-          assistantBlocks.push({ type: 'text', text: '\n\n---\n⚠️ Reached the maximum number of steps for this turn. Send "continue" to pick up where I left off.' });
+          assistantBlocks.push({ type: 'text', text: MAX_TURNS_NOTICE });
         }
         if (!assistantText && !thinkingText && assistantBlocks.length === 0 && !event.builtinHandled) {
           const fallback = '⚠️ No response was generated. Try rephrasing or sending again.';
