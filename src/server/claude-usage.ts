@@ -50,8 +50,12 @@ export class ClaudeUsageOptions {
   timeoutMs = 8_000;
   /** A 429 is not a transient blip here: retrying it on the ordinary TTL is what keeps a box wedged in
    *  the penalty box all day (25 straight 429s on prod). Each consecutive 429 climbs this ladder and a
-   *  success drops back to the first rung; a `Retry-After` header wins over the rung when it is longer. */
-  rateLimitBackoffMs = [60_000, 300_000, 900_000, 1_800_000];
+   *  success drops back to the first rung; a `Retry-After` header wins over the rung when it is longer.
+   *  Capped at 15m, not 30m: on a busy box (many CLI sessions sharing one account quota) upstream can
+   *  answer 429 for hours with a ~73s Retry-After, and every attempt is a chance at the first reading
+   *  that unhides the gauge. A failed attempt no longer costs the user anything — the last known-good
+   *  reading stays on screen — so a slightly shorter ceiling is the better trade. */
+  rateLimitBackoffMs = [60_000, 300_000, 600_000, 900_000];
   /** macOS stores Claude Code's OAuth credentials in the login Keychain and writes NO credentials
    *  file, so on darwin an absent file is not proof of an API-key deployment — we look there second.
    *  Linux keeps the file as the only source; we never shell out there. */
