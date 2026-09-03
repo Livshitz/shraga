@@ -323,6 +323,83 @@ export function buildSkillIndexBlock(): string {
   return `<available-skills>\nSkills available in data/skills/. Use Read to load full skill content when needed.\n${lines.join('\n')}\n</available-skills>`;
 }
 
+/* ── Trigger matching ─────────────────────────────────────────────────────────
+ * Triggers are authored as natural phrases ("make a video ad"), but real briefs
+ * insert words into them ("make a NEW video ad variant"). A plain substring test
+ * missed those, and a missed trigger silently costs more than the skill text —
+ * it also drops the skill's `turns` budget (see resolveSkillTurns).
+ *
+ * So: match on WORD TOKENS, not raw characters.
+ *  - Short triggers (< MIN_TOKENS_FOR_GAPS) must still match as a contiguous run.
+ *    This is strictly NARROWER than `includes` — "cost per" no longer fires on
+ *    "cost performance", "ad" no longer fires on "adding".
+ *  - Longer triggers (3+ tokens) tolerate a few inserted words, bounded hard so
+ *    the phrase cannot smear across a whole message.
+ * A trailing plural on either side is tolerated at every position ("video ads").
+ */
+
+/** Words, keeping decimal numbers whole so "wan 2.2" is [wan, 2.2] and not [wan, 2, 2]. */
+const TRIGGER_TOKEN_RE = /[a-z0-9]+(?:\.[0-9]+)*/g;
+/** Triggers with fewer tokens than this must match contiguously — too short to be safely loosened. */
+const MIN_TOKENS_FOR_GAPS = 3;
+/** Words that may be inserted across the WHOLE trigger phrase. This one bound is what stops a
+ * phrase smearing over a long message: "make a video ad" reaches "make a NEW video ad" and
+ * "make me a new video ad", but not "make something. later, a video. then an ad.". */
+const MAX_INSERTED = 3;
+/** Articles the trigger's AUTHOR typed that the asker may not ("make SOME video ads"). Skipping
+ * one costs an insertion, so it is not free. */
+const TRIGGER_FILLER = new Set(['a', 'an', 'the']);
+
+function tokenizeTrigger(s: string): string[] {
+  return s.toLowerCase().match(TRIGGER_TOKEN_RE) ?? [];
+}
+
+/** Token equality with a tolerated trailing plural on either side ("ad" ~ "ads", "match" ~ "matches"). */
+function tokenEq(a: string, b: string): boolean {
+  if (a === b) return true;
+  const [long, short] = a.length > b.length ? [a, b] : [b, a];
+  return long === `${short}s` || long === `${short}es`;
+}
+
+function matchTokens(hay: string[], needle: string[]): boolean {
+  if (!needle.length || needle.length > hay.length) return false;
+  for (let start = 0; start + needle.length <= hay.length; start++) {
+    if (!tokenEq(hay[start], needle[0])) continue;
+    if (needle.length < MIN_TOKENS_FOR_GAPS) {
+      // Too short to loosen. Contiguous whole words only — strictly NARROWER than `includes`,
+      // which fired "ad set" on "ad settings" and "cost per" on "cost performance".
+      if (needle.every((t, k) => tokenEq(hay[start + k], t))) return true;
+      continue;
+    }
+    // Leftmost-greedy subsequence, then bound the SPAN it consumed.
+    let i = start + 1, n = 1, inserted = 0;
+    while (n < needle.length && i < hay.length && inserted <= MAX_INSERTED) {
+      if (tokenEq(hay[i], needle[n])) { n++; i++; continue; }
+      i++; inserted++;
+    }
+    if (n === needle.length && inserted <= MAX_INSERTED) return true;
+  }
+  return false;
+}
+
+/**
+ * True when `trigger` occurs in `text` as an in-order run of whole words spanning at most
+ * MAX_INSERTED extra words. Exported for tests — a trigger layer is easy to widen by accident.
+ *
+ * Two passes rather than one clever one: the trigger as authored, then the trigger with its
+ * articles dropped ("make a video ad" -> make/video/ad, so "make SOME video ads" lands). A single
+ * pass that skipped articles inline had to guess, greedily and wrongly, whether the article ahead
+ * in the message was the one the trigger meant.
+ */
+export function triggerMatches(text: string, trigger: string): boolean {
+  const hay = tokenizeTrigger(text);
+  const needle = tokenizeTrigger(trigger);
+  if (matchTokens(hay, needle)) return true;
+  const stripped = needle.filter(t => !TRIGGER_FILLER.has(t));
+  return stripped.length !== needle.length && stripped.length >= MIN_TOKENS_FOR_GAPS
+    && matchTokens(hay, stripped);
+}
+
 /**
  * Match message text against skill triggers. Returns matched skill names.
  * Skips skills already in the defaults list (they're already injected).
@@ -343,7 +420,7 @@ export function matchTriggeredSkillNames(message: string, context?: Record<strin
     if (isExpired(meta)) continue;
     if (!meta.triggers?.length) continue;
     if (meta.origin === 'auto' && meta.reviewed === false) continue;
-    const hit = meta.triggers.some(t => lower.includes(t.toLowerCase()));
+    const hit = meta.triggers.some(t => triggerMatches(lower, t));
     if (hit) {
       console.log(`[skills] Trigger matched: ${name}${ctxPrefix ? ` (context: ${ctxPrefix})` : ''}`);
       matched.push(name);
