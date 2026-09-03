@@ -31,6 +31,9 @@ export interface ClaudeUsageLimit {
 
 export interface ClaudeUsage {
   subscriptionType: string | null;
+  /** Which Claude account these numbers belong to (email, else display name). A box can be signed in
+   *  as somebody other than the person reading the gauge — say whose quota this is. */
+  account: string | null;
   limits: ClaudeUsageLimit[];
   /** When these numbers were actually read from upstream (ISO). The client labels the gauge with it. */
   fetchedAt: string;
@@ -42,6 +45,8 @@ export interface ClaudeUsage {
 export class ClaudeUsageOptions {
   credentialsPath = path.join(homedir(), '.claude', '.credentials.json');
   endpoint = 'https://api.anthropic.com/api/oauth/usage';
+  /** Claude Code's own config, the only place the signed-in account's identity is written. */
+  accountPath = path.join(homedir(), '.claude.json');
   /** How long a completed upstream result (success OR failure) is reused for. Concurrent callers are
    *  deduped separately onto one in-flight request, so a reload storm or a wall of open tabs costs at
    *  most one upstream call per window — this endpoint answers 429 aggressively. Failures are cached
@@ -203,7 +208,7 @@ export class ClaudeUsageReader {
         return null;
       }
       this.rateLimitStreak = 0;
-      return { subscriptionType: creds.subscriptionType, limits };
+      return { subscriptionType: creds.subscriptionType, account: await this.readAccount(), limits };
     } catch (err) {
       console.warn(`${TAG} usage lookup failed:`, (err as Error).message);
       return null;
@@ -255,6 +260,18 @@ export class ClaudeUsageReader {
       return null;
     }
     return parseCredentials(secret, 'keychain');
+  }
+
+  /** Whose account this box is signed in as. Identity only — never a token, and never fatal: an
+   *  unreadable config just means the card omits the line. */
+  private async readAccount(): Promise<string | null> {
+    try {
+      const account = JSON.parse(await readFile(this.options.accountPath, 'utf8'))?.oauthAccount;
+      return account?.emailAddress ?? account?.displayName ?? null;
+    } catch (err) {
+      console.debug(`${TAG} could not read the signed-in account: ${(err as Error).message}`);
+      return null;
+    }
   }
 
   /** The configured path first, then any sibling `.credentials*.json` the CLI may have written. */

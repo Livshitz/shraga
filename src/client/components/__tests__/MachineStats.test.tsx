@@ -259,6 +259,13 @@ describe('reading age', () => {
     expect(ageLabel({ stale: true })).toBe('last reading — refresh failed');
   });
 
+  it('names the account whose quota this is', () => {
+    const html = renderToStaticMarkup(
+      <UsageCard usage={{ subscriptionType: 'max', account: 'agent@7chairs.org', limits: [{ kind: 'session', group: 'session', percent: 6, severity: 'normal', resetsAt: null }] }} />,
+    );
+    expect(html).toContain('agent@7chairs.org');
+  });
+
   it('renders the age inside the card', () => {
     const html = renderToStaticMarkup(
       <UsageCard usage={{ subscriptionType: 'max', fetchedAt: ago(4), limits: [{ kind: 'session', group: 'session', percent: 6, severity: 'normal', resetsAt: null }] }} />,
