@@ -13,6 +13,7 @@ import {
   getSkill,
   getMcpCommandPrompt,
   parseSkillFrontmatter,
+  resolveSkillTurns,
 } from './skills.ts';
 
 import { buildWorkspaceContextBlock, expandWorkspaceMentions } from './workspace.ts';
@@ -306,6 +307,22 @@ export async function* streamChat(opts: {
   const newTriggerNames = discoveryEnabled ? matchTriggeredSkillNames(effectivePrompt, opts.context) : [];
   const triggeredNames = [...new Set([...stickyNames, ...newTriggerNames])];
   const triggeredSkills = skillInjectionBlocks(triggeredNames);
+
+  // Per-skill turn budget. Resolved HERE, once every invoked skill is known (the slash command and
+  // the triggered/sticky set), and GAP-FILLING only: an inline `[turns:N]` or a session-pinned
+  // value already sits in `directives` and is left alone. The global `config.maxTurns` is applied
+  // later still, by the engine (`directives.turns ?? config.maxTurns`), so a skill budget slots
+  // cleanly between the two without touching the global default.
+  // NOTE the deliberate asymmetry with `model` above, which OVERWRITES an inline directive: a
+  // long-running skill needs a floor, not the last word — the human who typed `[turns:5]` to probe
+  // it cheaply must still get 5.
+  if (!directives.turns) {
+    const skillTurns = resolveSkillTurns([slashCmd?.command, ...triggeredNames]);
+    if (skillTurns) {
+      directives.turns = skillTurns;
+      console.log(`[claude] Directives: ${JSON.stringify(directives)} (turns from skill frontmatter)`);
+    }
+  }
   const workspaceTree = buildWorkspaceContextBlock();
   const contact = opts.userEmail ? contacts.find({ email: opts.userEmail }) : null;
   const userBlock = contacts.formatUserBlock(contact);
@@ -365,6 +382,10 @@ export async function* streamChat(opts: {
     config,
   });
 }
+
+/** The notice appended to a turn that ran out of steps. Shared so every transport says the same
+ * thing — the MCP path said NOTHING at all, so a truncated turn arrived looking finished. */
+export const MAX_TURNS_NOTICE = '\n\n---\n⚠️ Reached the maximum number of steps for this turn. Send "continue" to pick up where I left off.';
 
 export async function consumeStream(stream: AsyncGenerator<WsEvent>, onEvent?: (ev: WsEvent) => void): Promise<ConvBlock[]> {
   let text = '';

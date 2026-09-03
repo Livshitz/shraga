@@ -10,7 +10,7 @@ import { listSkills, getSkill, saveSkill } from './skills.ts';
 import { getAllSessions, loadConversation, isSessionLocked } from './sessions.ts';
 import * as scheduler from './scheduler/index.ts';
 import { buildReport } from './downtime.ts';
-import { getAgentConfig } from './claude.ts';
+import { getAgentConfig, MAX_TURNS_NOTICE } from './claude.ts';
 import { validateApiKey } from './api-keys.ts';
 import { verifyMcpToken } from './auth.ts';
 import { makeProgressEmitter } from './mcp-progress.ts';
@@ -19,7 +19,7 @@ import type { WsEvent } from './claude.ts';
 
 export type RunChatTurnResult =
   | { status: 'busy' }
-  | { sessionId: string; text: string; blocks: unknown[] }
+  | { sessionId: string; text: string; blocks: unknown[]; stopReason?: string }
   | { sessionId: string; error: string };
 
 export type RunChatTurn = (
@@ -318,7 +318,16 @@ export function createShragaMcp(deps: McpServerDeps) {
       const result = await deps.runChatTurn(turn, { onEvent: makeProgressEmitter(captureMcpProgress()) });
       if ('status' in result) return json({ error: 'Session is already processing a request' }, { status: 409 });
       if ('error' in result) return json({ error: result.error, sessionId: result.sessionId }, { status: 500 });
-      return json({ sessionId: result.sessionId, text: result.text, blocks: result.blocks });
+      // A turn that hit the step ceiling is a PARTIAL answer. Without this the MCP caller got the
+      // partial text and no signal at all, which is what "the agent stalled" reports actually were.
+      const truncated = result.stopReason === 'max_turns_reached';
+      return json({
+        sessionId: result.sessionId,
+        text: truncated ? result.text + MAX_TURNS_NOTICE : result.text,
+        blocks: result.blocks,
+        ...(result.stopReason ? { stopReason: result.stopReason } : {}),
+        ...(truncated ? { truncated: true } : {}),
+      });
     } catch (e) { return json({ error: errMessage(e) }, { status: 500 }); }
   });
 
