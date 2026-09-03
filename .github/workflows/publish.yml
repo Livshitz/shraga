@@ -68,5 +68,12 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ env.NODE_AUTH_TOKEN }}
 
+      # REBASE before pushing. Without it, a commit landing on main during this ~2min run makes the
+      # branch push non-fast-forward and it is REJECTED — but `--follow-tags` had already pushed the
+      # tag, so main kept the old version while the tag existed. Every later run then bumped to the
+      # SAME number and died at `git tag` ("tag v0.1.75 already exists"), silently stopping releases
+      # for two runs. Rebasing the release commit makes it land instead.
       - name: Push commit + tag
-        run: git push --follow-tags
+        run: |
+          git pull --rebase origin main
+          git push --follow-tags
