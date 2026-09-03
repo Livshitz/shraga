@@ -15,6 +15,8 @@ export interface UsageLimit {
 }
 export interface Usage {
   subscriptionType: string | null;
+  /** The Claude account whose quota this is (email, else display name). */
+  account?: string | null;
   limits: UsageLimit[];
   /** When the server last actually read these numbers from upstream (ISO). */
   fetchedAt?: string;
@@ -213,7 +215,10 @@ export function UsageCard({ usage }: { usage: Usage }) {
         <span className="uppercase tracking-wide">claude usage</span>
         {usage.subscriptionType && <span className="tabular-nums">{usage.subscriptionType} plan</span>}
       </div>
-      <div className="-mt-1 pb-2 text-[10px] text-muted-foreground">{ageLabel(usage)}</div>
+      <div className="-mt-1 flex items-baseline justify-between gap-2 pb-2 text-[10px] text-muted-foreground">
+        {usage.account && <span className="truncate" title={usage.account}>{usage.account}</span>}
+        <span className="shrink-0">{ageLabel(usage)}</span>
+      </div>
       <div className="flex flex-col gap-3">
         {usage.limits.map((l, i) => {
           const until = untilLabel(l.resetsAt);
