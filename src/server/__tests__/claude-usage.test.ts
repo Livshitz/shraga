@@ -46,10 +46,12 @@ async function reader(creds: unknown, name = `c${Math.random().toString(36).slic
   const p = path.join(dir, name);
   await writeFile(p, typeof creds === 'string' ? creds : JSON.stringify(creds));
   // No keychain seam is ever the real `security` binary in this suite.
-  return new ClaudeUsageReader({ credentialsPath: p, endpoint, readKeychain: NEVER_KEYCHAIN });
+  return new ClaudeUsageReader({ credentialsPath: p, endpoint, cachePath: CACHE(), readKeychain: NEVER_KEYCHAIN });
 }
 
 const MISSING = () => path.join(dir, 'does-not-exist.json');
+/** A private mirror file per reader: the suite must never read or write the real DATA_DIR one. */
+const CACHE = () => path.join(dir, `cache-${Math.random().toString(36).slice(2)}.json`);
 const NEVER_KEYCHAIN = async () => { throw new Error('keychain must not be consulted here'); };
 
 const OK_CREDS = { claudeAiOauth: { accessToken: 'tok', scopes: ['user:inference', 'user:profile'], subscriptionType: 'max' } };
@@ -76,7 +78,7 @@ describe('subscription gate', () => {
   });
 
   it('makes ZERO upstream calls when there is no credentials file (API-key deployment)', async () => {
-    const r = new ClaudeUsageReader({ credentialsPath: MISSING(), endpoint, platform: 'linux', readKeychain: NEVER_KEYCHAIN });
+    const r = new ClaudeUsageReader({ credentialsPath: MISSING(), endpoint, platform: 'linux', cachePath: CACHE(), readKeychain: NEVER_KEYCHAIN });
     expect(await r.get()).toBeNull();
     expect(hits).toBe(0);
   });
@@ -120,7 +122,7 @@ describe('last known-good reading survives a failure', () => {
   async function shortTtl() {
     const p = path.join(dir, `lg${Math.random().toString(36).slice(2)}.json`);
     await writeFile(p, JSON.stringify(OK_CREDS));
-    return new ClaudeUsageReader({ credentialsPath: p, endpoint, ttlMs: 1, readKeychain: NEVER_KEYCHAIN });
+    return new ClaudeUsageReader({ credentialsPath: p, endpoint, ttlMs: 1, cachePath: CACHE(), readKeychain: NEVER_KEYCHAIN });
   }
 
   it('stamps a fresh reading with fetchedAt and no stale flag', async () => {
@@ -149,6 +151,19 @@ describe('last known-good reading survives a failure', () => {
     const afterCooldown = hits;
     expect((await r.get())?.stale).toBe(true);
     expect(hits).toBe(afterCooldown); // cooldown short-circuits before any request
+  });
+
+  it('survives a restart: a new reader serves the previous process\'s reading while upstream is down', async () => {
+    const shared = CACHE();
+    const creds = path.join(dir, `restart-${Math.random().toString(36).slice(2)}.json`);
+    await writeFile(creds, JSON.stringify(OK_CREDS));
+    const first = await new ClaudeUsageReader({ credentialsPath: creds, endpoint, cachePath: shared, readKeychain: NEVER_KEYCHAIN }).get();
+
+    status = 500; // the box comes back up into a rate-limited / failing upstream
+    const afterRestart = await new ClaudeUsageReader({ credentialsPath: creds, endpoint, cachePath: shared, readKeychain: NEVER_KEYCHAIN }).get();
+    expect(afterRestart?.limits).toEqual(first!.limits);
+    expect(afterRestart?.stale).toBe(true);
+    expect(afterRestart?.fetchedAt).toBe(first!.fetchedAt);
   });
 
   it('still answers null when there was never a good reading', async () => {
@@ -241,7 +256,7 @@ describe('cache + in-flight dedupe', () => {
 describe('macOS keychain fallback', () => {
   const KC = (secret: unknown) => async () => (typeof secret === 'string' || secret === null ? secret : JSON.stringify(secret));
   const darwin = (readKeychain: any, credentialsPath = MISSING()) =>
-    new ClaudeUsageReader({ credentialsPath, endpoint, platform: 'darwin', readKeychain });
+    new ClaudeUsageReader({ credentialsPath, endpoint, platform: 'darwin', cachePath: CACHE(), readKeychain });
 
   it('reads usage from the keychain when the credentials file is absent', async () => {
     const u = await darwin(KC(OK_CREDS)).get();
