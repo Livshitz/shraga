@@ -3,6 +3,7 @@
 // they seed from getStats() and then receive live points over WS. N users = 1 sampler.
 import os from 'node:os';
 import { readFileSync } from 'node:fs';
+import { statfs } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -13,12 +14,26 @@ export interface StatSample {
   cpu: number; // 0-100, host CPU utilization since last sample
   mem: number; // 0-100, used / total memory
   load: number; // 1-min load average
+  disk: number; // 0-100, used of the root filesystem (cached, refreshed slowly — see refreshDisk)
+  /** Bytes used / total, for the hover tooltip. Omitted until the first successful refresh. */
+  diskUsedBytes?: number;
+  diskTotalBytes?: number;
 }
+
+/** Hourly ceiling on the disk-failure warning, so a permanently broken mount cannot flood the log. */
+const DISK_FAIL_LOG_INTERVAL_MS = 60 * 60 * 1000;
 
 export class StatsSamplerOptions {
   intervalMs = 5000;
   window = 120; // ring-buffer length (120 × 5s = 10 min trend)
+  // Disk moves in minutes, not seconds, and statfs() stats the whole filesystem — no reason to pay
+  // for it on every 5s tick. Refreshed on its own slow cadence into a cache the sample just reads.
+  diskIntervalMs = 60_000;
 }
+
+// Single source in ../shared/disk.ts, imported by the client widget too — re-exported here so
+// server-side callers (and the tests) keep the same import site.
+export { DISK_WARN_PCT, DISK_CRIT_PCT } from '../shared/disk';
 
 export class StatsSampler {
   public options: StatsSamplerOptions;
@@ -30,6 +45,17 @@ export class StatsSampler {
   // ~1-2s (longer under load) every 5s — stalling /api/version long enough to trip the health watchdog
   // into false-restarting a live server. Seed from the cheap os.freemem fallback until the first refresh.
   private memPct = 100 * (1 - os.freemem() / os.totalmem());
+  // Cached disk %, refreshed on the slow diskIntervalMs cadence. -1 until the first refresh lands, so
+  // an unread disk renders as "unknown" rather than a confident 0% (an empty disk) — and a failed
+  // refresh keeps the LAST known value rather than resetting it.
+  private diskPct = -1;
+  private diskUsedBytes: number | undefined;
+  private diskTotalBytes: number | undefined;
+  /** One refresh at a time — see refreshDisk. */
+  private diskInFlight = false;
+  /** Epoch ms of the last logged disk failure; 0 = none since the last success. */
+  private diskFailLoggedAt = 0;
+  private diskTimer: ReturnType<typeof setInterval> | null = null;
 
   public constructor(options?: Partial<StatsSamplerOptions>) {
     this.options = { ...new StatsSamplerOptions(), ...options };
@@ -38,6 +64,9 @@ export class StatsSampler {
   start(broadcast: (data: object) => void) {
     if (this.timer) return; // singleton — already running
     void this.refreshMem(); // prime the cache; each tick refreshes it async for the NEXT sample
+    void this.refreshDisk();
+    this.diskTimer = setInterval(() => { void this.refreshDisk(); }, this.options.diskIntervalMs);
+    if (typeof this.diskTimer.unref === 'function') this.diskTimer.unref();
     this.timer = setInterval(() => {
       void this.refreshMem(); // async, non-blocking — updates this.memPct without stalling the loop
       const sample = this.sample();
@@ -51,6 +80,7 @@ export class StatsSampler {
 
   stop() {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.diskTimer) { clearInterval(this.diskTimer); this.diskTimer = null; }
   }
 
   getStats(): StatSample[] {
@@ -68,12 +98,46 @@ export class StatsSampler {
       cpu: Math.round(cpu),
       mem: Math.round(this.memPct), // cached; refreshed async each tick (never blocks the loop)
       load: Math.round(os.loadavg()[0] * 100) / 100,
+      disk: this.diskPct, // cached; refreshed every diskIntervalMs — already an integer (see diskUsedPct)
+      diskUsedBytes: this.diskUsedBytes,
+      diskTotalBytes: this.diskTotalBytes,
     };
   }
 
   // Refresh the cached memory %. os.freemem() counts reclaimable memory (page cache on Linux,
   // inactive/purgeable pages on macOS) as "used", so it reads ~95-99% even when healthy — use each OS's
   // notion of *available* (free + reclaimable) instead. Async + bounded so it can NEVER stall the loop.
+  // Refresh the cached disk %. statfs() is the node-native stat — no `df` subprocess, same call on
+  // macOS and Linux. Any failure (unreadable mount, permission) leaves the previous value in place.
+  private async refreshDisk(): Promise<void> {
+    // A hung filesystem must not let refreshes PILE UP: without this guard a never-resolving statfs
+    // accumulates one stuck threadpool task per tick (measured: 5 in-flight at a 50ms cadence),
+    // which starves Bun's fs threadpool for every other async fs consumer.
+    if (this.diskInFlight) return;
+    this.diskInFlight = true;
+    try {
+      const fs = await statfs('/');
+      const pct = diskUsedPct(fs, process.platform);
+      if (pct != null) this.diskPct = pct;
+      const bytes = diskBytes(fs, process.platform);
+      if (bytes) { this.diskUsedBytes = bytes.used; this.diskTotalBytes = bytes.total; }
+      this.diskFailLoggedAt = 0; // a success re-arms the log, so a NEW outage is still reported
+    } catch (err) {
+      // Keep the last known value — a stale number beats a wrong 0. Never swallow silently...
+      // ...but never at one line per tick either: a permission-denied or vanished mount would emit
+      // 1440 identical warnings a day and bury everything else. Log the first failure, then at most
+      // hourly while it persists. (`fs.statfs` also does not exist before Bun 1.2.x, and this
+      // package's engines still allow >=1.0.0 — on such a host this would warn forever from boot.)
+      const now = Date.now();
+      if (now - this.diskFailLoggedAt >= DISK_FAIL_LOG_INTERVAL_MS) {
+        this.diskFailLoggedAt = now;
+        console.warn('[stats] disk refresh failed, keeping last value', err);
+      }
+    } finally {
+      this.diskInFlight = false;
+    }
+  }
+
   private async refreshMem(): Promise<void> {
     try {
       if (process.platform === 'linux') {
@@ -92,6 +156,44 @@ export class StatsSampler {
     } catch { /* fall through to os.freemem */ }
     this.memPct = 100 * (1 - os.freemem() / os.totalmem());
   }
+}
+
+/** Percent USED of a filesystem, from a statfs() result. Exported (and platform passed in) so BOTH
+ *  branches are testable from either OS — the Linux one cannot otherwise be exercised in dev.
+ *  Per-platform on purpose, like refreshMem: each OS's honest notion of "how full is it".
+ *  Linux — exactly `df`'s formula, used/(used+available), so this meter and the box's df-parsing
+ *  watchdog report the same number (both exclude the root-reserved margin from both sides).
+ *  macOS — APFS volumes SHARE one container, so `df /`'s per-volume "used" reads ~25% on a disk that
+ *  is genuinely 92% full; only free-against-container-total tells the truth there.
+ *  Rounding is CEIL, not nearest, because `df` ceils its capacity column: exact 24.6515 prints as
+ *  `25%`, exact 3.2258 prints as `4%`. Nearest would put the meter one point BELOW df on ~half of all
+ *  values, so a root at exact 91.2% would show 91% in emerald "fine" while the df-parsing watchdog
+ *  (which tests df's own `92`) is already paging Slack. Ceiling on the Linux path is what makes the
+ *  two literally the same integer. Darwin ceils too: its number is a container reading that has no df
+ *  column to match, but rounding the same way keeps one rule for both platforms and errs toward
+ *  reporting a disk as fuller, never emptier, than it is.
+ *  Returns null for a nonsense stat, so the caller keeps its last known value. */
+export function diskUsedPct(fs: { blocks: bigint | number; bfree: bigint | number; bavail: bigint | number }, platform: string): number | null {
+  const blocks = Number(fs.blocks), bfree = Number(fs.bfree), bavail = Number(fs.bavail);
+  if (!(blocks > 0)) return null;
+  const pct = platform === 'darwin'
+    ? 100 * (1 - bavail / blocks)
+    : 100 * ((blocks - bfree) / Math.max(1, blocks - bfree + bavail));
+  return Math.ceil(Math.max(0, Math.min(100, pct)));
+}
+
+/**
+ * The same per-platform definition as `diskUsedPct`, in BYTES, for the hover tooltip. Kept adjacent
+ * and derived from the identical numerator/denominator so the percentage and the "X of Y" can never
+ * describe different quantities — on darwin the denominator is the APFS container, on linux it is
+ * df's `used + available` (which excludes root-reserved blocks).
+ */
+export function diskBytes(fs: { bsize: bigint | number; blocks: bigint | number; bfree: bigint | number; bavail: bigint | number }, platform: string): { used: number; total: number } | null {
+  const bsize = Number(fs.bsize), blocks = Number(fs.blocks), bfree = Number(fs.bfree), bavail = Number(fs.bavail);
+  if (!(blocks > 0) || !(bsize > 0)) return null;
+  const used = platform === 'darwin' ? blocks - bavail : blocks - bfree;
+  const total = platform === 'darwin' ? blocks : blocks - bfree + bavail;
+  return { used: used * bsize, total: total * bsize };
 }
 
 function cpuTotals() {
