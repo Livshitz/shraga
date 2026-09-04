@@ -48,7 +48,7 @@ export type ServerEvent =
   | { type: 'unread_cleared'; sessionId: string }
   | { type: 'pty_list_changed'; sessionId: string }
   | { type: 'workspace_layout_changed' }
-  | { type: 'stats'; sample: { t: number; cpu: number; mem: number; load: number } };
+  | { type: 'stats'; sample: { t: number; cpu: number; mem: number; load: number; disk: number } };
 
 type Listener = (event: ServerEvent) => void;
 
