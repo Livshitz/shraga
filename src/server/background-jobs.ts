@@ -231,7 +231,15 @@ export async function startJob(owner: JobOwner, command: string): Promise<string
     // stdin is /dev/null so a child can never block on (or steal) input; stdout+stderr go straight
     // to the fd — nothing is buffered in this process, so a chatty job costs disk, not memory.
     const proc = spawn('/bin/sh', ['-c', buildShell(id, cmd)], {
-      cwd: owner.cwd, env: { ...childEnv(), ...owner.env },
+      cwd: owner.cwd,
+      env: {
+        ...childEnv(),
+        ...owner.env,
+        // A long-running launcher can gate on these: only a REGISTERED job gets a completion wake,
+        // so one started in the foreground orphans silently when its 60s tool call is killed.
+        SHRAGA_JOB_ID: id,
+        SHRAGA_BG_JOB: '1',
+      },
       detached: true, stdio: ['ignore', fd, fd],
     });
     j.pid = proc.pid;
