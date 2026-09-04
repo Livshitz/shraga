@@ -259,6 +259,47 @@ export async function startJob(owner: JobOwner, command: string): Promise<string
   return id;
 }
 
+/** The little of a spawned child this module needs to adopt one (node's ChildProcess satisfies it). */
+type AdoptableProcess = {
+  pid?: number | null;
+  stdout?: { on(ev: 'data', cb: (chunk: unknown) => void): void } | null;
+  stderr?: { on(ev: 'data', cb: (chunk: unknown) => void): void } | null;
+  on(ev: 'close' | 'error', cb: (arg: never) => void): void;
+  unref?: () => void;
+};
+
+/**
+ * Register an ALREADY-RUNNING child as a background job. The Shell tool hands a foreground command
+ * over at its deadline instead of killing it: the work continues, and from here it is an ordinary job
+ * — polled with ShellOutput, and reported back to the session when it ends. Without this the deadline
+ * stays a kill, which is what abandoned a scheduled run midway.
+ */
+export function adoptJob(owner: JobOwner, command: string, proc: AdoptableProcess, seed = ''): string {
+  const id = `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const j: JobRecord = {
+    id, sessionId: owner.sessionId, uid: owner.uid, userEmail: owner.userEmail,
+    command: command.trim(), cwd: owner.cwd, startedAt: Date.now(), status: 'running',
+    pid: proc.pid ?? undefined,
+  };
+  // The child was spawned with pipes by the caller, so output is appended here rather than dup'd to
+  // an fd the way a job we spawn ourselves does it.
+  const append = (chunk: unknown) => {
+    const text = typeof chunk === 'string' ? chunk : String(chunk ?? '');
+    if (!text) return;
+    try { writeFileSync(logFile(id), text, { flag: 'a' }); } catch { /* the job outlives its log */ }
+  };
+  if (seed) append(seed);
+  proc.stdout?.on('data', append);
+  proc.stderr?.on('data', append);
+  proc.on('error', ((err: Error) => finish(id, 'error', undefined, `adopted job error: ${err?.message ?? err}`)) as never);
+  proc.on('close', ((code: number | null) => finish(id, 'exited', code ?? undefined)) as never);
+  proc.unref?.();
+  records.set(id, j);
+  save(j);
+  console.log(`${PREFIX} adopted ${id} pid=${j.pid} session=${j.sessionId.slice(0, 8)} cmd=${j.command.slice(0, 120)}`);
+  return id;
+}
+
 /** Record a terminal state exactly once, then schedule the follow-up. */
 function finish(id: string, status: JobStatus, exitCode?: number, note?: string): void {
   const j = records.get(id);
@@ -487,6 +528,7 @@ export function sessionJobRegistry(owner: JobOwner) {
   };
   return {
     start: (command: string) => startJob(owner, command),
+    adopt: (command: string, proc: AdoptableProcess, seed?: string) => adoptJob(owner, command, proc, seed),
     output(id: string): string | null {
       const j = mine(id);
       if (!j) return null;
