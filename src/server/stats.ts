@@ -173,6 +173,15 @@ export class StatsSampler {
  *  column to match, but rounding the same way keeps one rule for both platforms and errs toward
  *  reporting a disk as fuller, never emptier, than it is.
  *  Returns null for a nonsense stat, so the caller keeps its last known value. */
+export function diskUsedPct(fs: { blocks: bigint | number; bfree: bigint | number; bavail: bigint | number }, platform: string): number | null {
+  const blocks = Number(fs.blocks), bfree = Number(fs.bfree), bavail = Number(fs.bavail);
+  if (!(blocks > 0)) return null;
+  const pct = platform === 'darwin'
+    ? 100 * (1 - bavail / blocks)
+    : 100 * ((blocks - bfree) / Math.max(1, blocks - bfree + bavail));
+  return Math.ceil(Math.max(0, Math.min(100, pct)));
+}
+
 /**
  * The same per-platform definition as `diskUsedPct`, in BYTES, for the hover tooltip. Kept adjacent
  * and derived from the identical numerator/denominator so the percentage and the "X of Y" can never
@@ -185,15 +194,6 @@ export function diskBytes(fs: { bsize: bigint | number; blocks: bigint | number;
   const used = platform === 'darwin' ? blocks - bavail : blocks - bfree;
   const total = platform === 'darwin' ? blocks : blocks - bfree + bavail;
   return { used: used * bsize, total: total * bsize };
-}
-
-export function diskUsedPct(fs: { blocks: bigint | number; bfree: bigint | number; bavail: bigint | number }, platform: string): number | null {
-  const blocks = Number(fs.blocks), bfree = Number(fs.bfree), bavail = Number(fs.bavail);
-  if (!(blocks > 0)) return null;
-  const pct = platform === 'darwin'
-    ? 100 * (1 - bavail / blocks)
-    : 100 * ((blocks - bfree) / Math.max(1, blocks - bfree + bavail));
-  return Math.ceil(Math.max(0, Math.min(100, pct)));
 }
 
 function cpuTotals() {
