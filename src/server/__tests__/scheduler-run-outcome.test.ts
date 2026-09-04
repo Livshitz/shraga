@@ -156,6 +156,29 @@ describe('scheduled run outcome declaration', () => {
     expect(Date.now() - t0).toBeLessThan(30_000); // it did not sit out the 10-minute deadline
   }, 40_000);
 
+  // Every schedule persisted before `task.kind` existed stores only {prompt, model}. The outcome
+  // contract is gated on the discriminant, so a kindless task was never told to declare and was
+  // never checked — i.e. it reported `ok` no matter what the run actually did.
+  test('a task persisted WITHOUT `kind` still gets the outcome contract and can declare error', async () => {
+    script = DONE;
+    declareDuringTurn = { status: 'error', error: 'scout died; nothing delivered' };
+    const sched = makeSchedule();
+    delete (sched.task as { kind?: string }).kind;
+    let sid = '';
+    const summary = await runSchedule(sched, () => {}, (s) => { sid = s; });
+    expect(lastPrompt).toContain(outcomeFile(sid));
+    expect(summary.status).toBe('error');
+    expect(summary.error).toContain('scout died');
+  });
+
+  test('loadSchedules infers the missing task kind from the task shape', async () => {
+    const { loadSchedules } = await import('../scheduler/storage.ts') as any;
+    const sched = makeSchedule();
+    delete (sched.task as { kind?: string }).kind;
+    saveSchedules([sched]);
+    expect(loadSchedules()[0].task.kind).toBe('prompt');
+  });
+
   test('an unparseable declaration is an error, never a silent success', async () => {
     const { summary } = await run({ status: 'delivered-probably' });
     expect(summary.status).toBe('error');
