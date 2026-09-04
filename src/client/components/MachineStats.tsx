@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentSocket, ServerEvent } from '@/lib/ws';
 import { cn } from '@/lib/utils';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
-import { DISK_WARN_PCT, DISK_CRIT_PCT } from '../../shared/disk';
+import { DISK_WARN_PCT, DISK_CRIT_PCT, formatBytes } from '../../shared/disk';
 
 type Sample = Extract<ServerEvent, { type: 'stats' }>['sample'];
 
@@ -74,7 +74,7 @@ export function MachineStats({ socket, getToken }: Props) {
         // Gauge, not sparkline: the server refreshes disk once a minute, so a 10-min trend line would
         // be a near-flat 10-point stair that reads as broken. A current-value bar is the honest shape.
         <Metric label="disk" value={latest.disk} severity={diskSeverity(latest.disk)}
-                title={`disk ${latest.disk}% used — warn at ${DISK_WARN_PCT}%, critical at ${DISK_CRIT_PCT}%`} />
+                title={diskTip(latest)} />
       )}
       <ClaudeUsageMetric getToken={getToken} />
     </div>
@@ -328,6 +328,19 @@ function level(v: number, severity?: string) {
   const known = severity ? ELEVATED[severity] : undefined;
   if (known) return known;
   return v >= 90 ? 'text-red-500' : v >= 75 ? 'text-amber-500' : 'text-emerald-500';
+}
+
+/**
+ * Hover text. The percentage alone cannot tell you whether 93% is 3GB or 300GB left, which is the
+ * first thing anyone asks when they see it amber — so the tooltip carries the actual figures. Falls
+ * back to the bare percentage on a sample from a server too old to send the byte fields.
+ */
+function diskTip(s: { disk: number; diskUsedBytes?: number; diskTotalBytes?: number }): string {
+  const bounds = `warn at ${DISK_WARN_PCT}%, critical at ${DISK_CRIT_PCT}%`;
+  if (s.diskUsedBytes == null || s.diskTotalBytes == null) return `disk ${s.disk}% used — ${bounds}`;
+  const free = Math.max(0, s.diskTotalBytes - s.diskUsedBytes);
+  return `disk ${s.disk}% used — ${formatBytes(s.diskUsedBytes)} of ${formatBytes(s.diskTotalBytes)}, `
+    + `${formatBytes(free)} free — ${bounds}`;
 }
 
 function Metric({ label, value, series, title, severity }: { label: string; value: number; series?: number[]; title?: string; severity?: string }) {

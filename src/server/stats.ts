@@ -15,6 +15,9 @@ export interface StatSample {
   mem: number; // 0-100, used / total memory
   load: number; // 1-min load average
   disk: number; // 0-100, used of the root filesystem (cached, refreshed slowly — see refreshDisk)
+  /** Bytes used / total, for the hover tooltip. Omitted until the first successful refresh. */
+  diskUsedBytes?: number;
+  diskTotalBytes?: number;
 }
 
 /** Hourly ceiling on the disk-failure warning, so a permanently broken mount cannot flood the log. */
@@ -46,6 +49,8 @@ export class StatsSampler {
   // an unread disk renders as "unknown" rather than a confident 0% (an empty disk) — and a failed
   // refresh keeps the LAST known value rather than resetting it.
   private diskPct = -1;
+  private diskUsedBytes: number | undefined;
+  private diskTotalBytes: number | undefined;
   /** One refresh at a time — see refreshDisk. */
   private diskInFlight = false;
   /** Epoch ms of the last logged disk failure; 0 = none since the last success. */
@@ -94,6 +99,8 @@ export class StatsSampler {
       mem: Math.round(this.memPct), // cached; refreshed async each tick (never blocks the loop)
       load: Math.round(os.loadavg()[0] * 100) / 100,
       disk: this.diskPct, // cached; refreshed every diskIntervalMs — already an integer (see diskUsedPct)
+      diskUsedBytes: this.diskUsedBytes,
+      diskTotalBytes: this.diskTotalBytes,
     };
   }
 
@@ -109,8 +116,11 @@ export class StatsSampler {
     if (this.diskInFlight) return;
     this.diskInFlight = true;
     try {
-      const pct = diskUsedPct(await statfs('/'), process.platform);
+      const fs = await statfs('/');
+      const pct = diskUsedPct(fs, process.platform);
       if (pct != null) this.diskPct = pct;
+      const bytes = diskBytes(fs, process.platform);
+      if (bytes) { this.diskUsedBytes = bytes.used; this.diskTotalBytes = bytes.total; }
       this.diskFailLoggedAt = 0; // a success re-arms the log, so a NEW outage is still reported
     } catch (err) {
       // Keep the last known value — a stale number beats a wrong 0. Never swallow silently...
@@ -163,6 +173,20 @@ export class StatsSampler {
  *  column to match, but rounding the same way keeps one rule for both platforms and errs toward
  *  reporting a disk as fuller, never emptier, than it is.
  *  Returns null for a nonsense stat, so the caller keeps its last known value. */
+/**
+ * The same per-platform definition as `diskUsedPct`, in BYTES, for the hover tooltip. Kept adjacent
+ * and derived from the identical numerator/denominator so the percentage and the "X of Y" can never
+ * describe different quantities — on darwin the denominator is the APFS container, on linux it is
+ * df's `used + available` (which excludes root-reserved blocks).
+ */
+export function diskBytes(fs: { bsize: bigint | number; blocks: bigint | number; bfree: bigint | number; bavail: bigint | number }, platform: string): { used: number; total: number } | null {
+  const bsize = Number(fs.bsize), blocks = Number(fs.blocks), bfree = Number(fs.bfree), bavail = Number(fs.bavail);
+  if (!(blocks > 0) || !(bsize > 0)) return null;
+  const used = platform === 'darwin' ? blocks - bavail : blocks - bfree;
+  const total = platform === 'darwin' ? blocks : blocks - bfree + bavail;
+  return { used: used * bsize, total: total * bsize };
+}
+
 export function diskUsedPct(fs: { blocks: bigint | number; bfree: bigint | number; bavail: bigint | number }, platform: string): number | null {
   const blocks = Number(fs.blocks), bfree = Number(fs.bfree), bavail = Number(fs.bavail);
   if (!(blocks > 0)) return null;
