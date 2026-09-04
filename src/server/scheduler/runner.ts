@@ -208,7 +208,7 @@ export async function runSchedule(
   // Tell the run how to report its own truthful outcome (scheduler/outcome.ts). Prompt tasks only:
   // a `bash` task's permission handler allows nothing but the task's own command, so such a run
   // could not write the file even if it wanted to — its exit code is already the truth there.
-  if (task.kind === 'prompt') {
+  if ((task.kind ?? 'prompt') === 'prompt') {
     // Cleared on RESUME too: a resume reuses the interrupted run's session id, so a declaration left
     // by the attempt that crashed would be adopted as this attempt's verdict. The contract is
     // re-stated for the same reason — the resumed turn must be able to declare for itself.
@@ -401,7 +401,7 @@ export async function runSchedule(
   // The run's OWN verdict beats "the turn returned" — see scheduler/outcome.ts. Deliberately after
   // the finally: the session lock is released by now, so a run that declared `pending` can be closed
   // by a later turn in this session (a background job's wake, a follow-up message) while we wait.
-  if (status === 'ok' && task.kind === 'prompt') {
+  if (status === 'ok' && (task.kind ?? 'prompt') === 'prompt') {
     const declared = await resolveDeclaredOutcome(sessionId, abortController, schedule.id);
     if (declared) {
       status = declared.status;

@@ -27,11 +27,28 @@ export function saveThrottleState(state: Record<string, number>): void {
   renameSync(tmp, THROTTLE_FILE);
 }
 
+/**
+ * Schedules persisted before `task.kind` existed carry only the payload fields. Everything
+ * downstream branches on the discriminant, so infer it from the shape once, on load — a task
+ * missing its kind silently skipped the outcome contract and reported every run as `ok`.
+ * Only `prompt` is inferable: `bash` and `job` are both `{ command }`, and guessing between them
+ * would hand a run the wrong permission handler, so a kindless command task is left alone.
+ */
+function normalizeTask(task: Record<string, unknown>): void {
+  if (task.kind) return;
+  if (typeof task.prompt === 'string' || typeof task.promptFile === 'string') task.kind = 'prompt';
+}
+
+function normalizeSchedule(s: Schedule): Schedule {
+  if (s.task && typeof s.task === 'object') normalizeTask(s.task as unknown as Record<string, unknown>);
+  return s;
+}
+
 export function loadSchedules(): Schedule[] {
   if (!existsSync(FILE)) return [];
   try {
     const parsed = JSON.parse(readFileSync(FILE, 'utf-8'));
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed) ? parsed.map((s) => normalizeSchedule(s as Schedule)) : [];
   } catch (err) {
     console.error('[scheduler] failed to parse schedules.json:', err);
     return [];
