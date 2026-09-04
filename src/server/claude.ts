@@ -83,7 +83,7 @@ export type WsEvent =
   | { type: 'done'; sessionId: string; stopReason?: 'end_turn' | 'max_turns_reached' | (string & {}); builtinHandled?: boolean }
   | { type: 'model_resolved'; sessionId: string; model: string }
   | { type: 'error'; message: string }
-  | { type: 'stats'; sample: { t: number; cpu: number; mem: number; load: number } };
+  | { type: 'stats'; sample: { t: number; cpu: number; mem: number; load: number; disk: number } };
 // Add-on engines/features emit their OWN events (e.g. a duplex voice brain's `duplex_*`) through the
 // object-typed `emitToSession()` bus (session-bus.ts) — NOT this union. So the core names none of them
 // here, yet forwards them verbatim to clients. Keep this union the closed set of core-owned events.

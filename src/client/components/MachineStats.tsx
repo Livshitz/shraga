@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentSocket, ServerEvent } from '@/lib/ws';
 import { cn } from '@/lib/utils';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
+import { DISK_WARN_PCT, DISK_CRIT_PCT } from '../../shared/disk';
 
 type Sample = Extract<ServerEvent, { type: 'stats' }>['sample'];
 
@@ -310,10 +311,10 @@ export function untilLabel(iso: string | null): string | null {
  *  thresholds — treating "anything that isn't normal" as elevated would paint the widget a
  *  permanent amber the first time the endpoint adds a benign new word. 'ok' is ours, not the
  *  vendor's: it lets a metric with its OWN bands (disk) say "fine" instead of inheriting 75/90. */
-// Percent-USED thresholds for the disk meter, mirrored from the server (src/server/stats.ts) which in
-// turn mirrors the box's Slack alerting (tools/ec2/box-disk-watchdog.sh in shraga-circles).
-export const DISK_WARN_PCT = 92;
-export const DISK_CRIT_PCT = 96;
+// Thresholds come from the one shared module the server reads too (src/shared/disk.ts) — re-exported
+// here so existing importers of this component keep their import site. Not re-declared: a second
+// literal is a drift waiting to happen.
+export { DISK_WARN_PCT, DISK_CRIT_PCT };
 
 /** Disk has its own bands: 80% full is unremarkable for a disk, so it must NOT inherit the generic
  *  75/90 percent colouring — hence an explicit 'ok' rather than falling through to those. */

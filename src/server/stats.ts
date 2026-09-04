@@ -25,12 +25,9 @@ export class StatsSamplerOptions {
   diskIntervalMs = 60_000;
 }
 
-// Percent-USED thresholds for the disk meter. Kept identical to the box's Slack alerting
-// (tools/ec2/box-disk-watchdog.sh in shraga-circles, BOX_DISK_WARN_PCT/BOX_DISK_CRIT_PCT) so the
-// widget and the pager agree on what "in trouble" means — 92% is where that box's pushes started
-// timing out. Change one, change the other.
-export const DISK_WARN_PCT = 92;
-export const DISK_CRIT_PCT = 96;
+// Single source in ../shared/disk.ts, imported by the client widget too — re-exported here so
+// server-side callers (and the tests) keep the same import site.
+export { DISK_WARN_PCT, DISK_CRIT_PCT } from '../shared/disk';
 
 export class StatsSampler {
   public options: StatsSamplerOptions;
@@ -89,7 +86,7 @@ export class StatsSampler {
       cpu: Math.round(cpu),
       mem: Math.round(this.memPct), // cached; refreshed async each tick (never blocks the loop)
       load: Math.round(os.loadavg()[0] * 100) / 100,
-      disk: this.diskPct < 0 ? -1 : Math.round(this.diskPct), // cached; refreshed every diskIntervalMs
+      disk: this.diskPct, // cached; refreshed every diskIntervalMs — already an integer (see diskUsedPct)
     };
   }
 
@@ -135,6 +132,13 @@ export class StatsSampler {
  *  watchdog report the same number (both exclude the root-reserved margin from both sides).
  *  macOS — APFS volumes SHARE one container, so `df /`'s per-volume "used" reads ~25% on a disk that
  *  is genuinely 92% full; only free-against-container-total tells the truth there.
+ *  Rounding is CEIL, not nearest, because `df` ceils its capacity column: exact 24.6515 prints as
+ *  `25%`, exact 3.2258 prints as `4%`. Nearest would put the meter one point BELOW df on ~half of all
+ *  values, so a root at exact 91.2% would show 91% in emerald "fine" while the df-parsing watchdog
+ *  (which tests df's own `92`) is already paging Slack. Ceiling on the Linux path is what makes the
+ *  two literally the same integer. Darwin ceils too: its number is a container reading that has no df
+ *  column to match, but rounding the same way keeps one rule for both platforms and errs toward
+ *  reporting a disk as fuller, never emptier, than it is.
  *  Returns null for a nonsense stat, so the caller keeps its last known value. */
 export function diskUsedPct(fs: { blocks: bigint | number; bfree: bigint | number; bavail: bigint | number }, platform: string): number | null {
   const blocks = Number(fs.blocks), bfree = Number(fs.bfree), bavail = Number(fs.bavail);
@@ -142,7 +146,7 @@ export function diskUsedPct(fs: { blocks: bigint | number; bfree: bigint | numbe
   const pct = platform === 'darwin'
     ? 100 * (1 - bavail / blocks)
     : 100 * ((blocks - bfree) / Math.max(1, blocks - bfree + bavail));
-  return Math.max(0, Math.min(100, pct));
+  return Math.ceil(Math.max(0, Math.min(100, pct)));
 }
 
 function cpuTotals() {
