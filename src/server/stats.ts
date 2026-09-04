@@ -17,6 +17,9 @@ export interface StatSample {
   disk: number; // 0-100, used of the root filesystem (cached, refreshed slowly — see refreshDisk)
 }
 
+/** Hourly ceiling on the disk-failure warning, so a permanently broken mount cannot flood the log. */
+const DISK_FAIL_LOG_INTERVAL_MS = 60 * 60 * 1000;
+
 export class StatsSamplerOptions {
   intervalMs = 5000;
   window = 120; // ring-buffer length (120 × 5s = 10 min trend)
@@ -43,6 +46,10 @@ export class StatsSampler {
   // an unread disk renders as "unknown" rather than a confident 0% (an empty disk) — and a failed
   // refresh keeps the LAST known value rather than resetting it.
   private diskPct = -1;
+  /** One refresh at a time — see refreshDisk. */
+  private diskInFlight = false;
+  /** Epoch ms of the last logged disk failure; 0 = none since the last success. */
+  private diskFailLoggedAt = 0;
   private diskTimer: ReturnType<typeof setInterval> | null = null;
 
   public constructor(options?: Partial<StatsSamplerOptions>) {
@@ -96,12 +103,28 @@ export class StatsSampler {
   // Refresh the cached disk %. statfs() is the node-native stat — no `df` subprocess, same call on
   // macOS and Linux. Any failure (unreadable mount, permission) leaves the previous value in place.
   private async refreshDisk(): Promise<void> {
+    // A hung filesystem must not let refreshes PILE UP: without this guard a never-resolving statfs
+    // accumulates one stuck threadpool task per tick (measured: 5 in-flight at a 50ms cadence),
+    // which starves Bun's fs threadpool for every other async fs consumer.
+    if (this.diskInFlight) return;
+    this.diskInFlight = true;
     try {
       const pct = diskUsedPct(await statfs('/'), process.platform);
       if (pct != null) this.diskPct = pct;
+      this.diskFailLoggedAt = 0; // a success re-arms the log, so a NEW outage is still reported
     } catch (err) {
-      // Keep the last known value — a stale number beats a wrong 0. Never swallow silently.
-      console.warn('[stats] disk refresh failed, keeping last value', err);
+      // Keep the last known value — a stale number beats a wrong 0. Never swallow silently...
+      // ...but never at one line per tick either: a permission-denied or vanished mount would emit
+      // 1440 identical warnings a day and bury everything else. Log the first failure, then at most
+      // hourly while it persists. (`fs.statfs` also does not exist before Bun 1.2.x, and this
+      // package's engines still allow >=1.0.0 — on such a host this would warn forever from boot.)
+      const now = Date.now();
+      if (now - this.diskFailLoggedAt >= DISK_FAIL_LOG_INTERVAL_MS) {
+        this.diskFailLoggedAt = now;
+        console.warn('[stats] disk refresh failed, keeping last value', err);
+      }
+    } finally {
+      this.diskInFlight = false;
     }
   }
 
