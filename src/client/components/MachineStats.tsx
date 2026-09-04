@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentSocket, ServerEvent } from '@/lib/ws';
 import { cn } from '@/lib/utils';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
+import { DISK_WARN_PCT, DISK_CRIT_PCT, formatBytes } from '../../shared/disk';
 
 type Sample = Extract<ServerEvent, { type: 'stats' }>['sample'];
 
@@ -69,6 +70,12 @@ export function MachineStats({ socket, getToken }: Props) {
     <div className="w-full flex flex-wrap items-center justify-center gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground/60">
       <Metric label="cpu" value={latest.cpu} series={samples.map(s => s.cpu)} />
       <Metric label="mem" value={latest.mem} series={samples.map(s => s.mem)} />
+      {latest.disk >= 0 && (
+        // Gauge, not sparkline: the server refreshes disk once a minute, so a 10-min trend line would
+        // be a near-flat 10-point stair that reads as broken. A current-value bar is the honest shape.
+        <Metric label="disk" value={latest.disk} severity={diskSeverity(latest.disk)}
+                title={diskTip(latest)} />
+      )}
       <ClaudeUsageMetric getToken={getToken} />
     </div>
   );
@@ -302,13 +309,38 @@ export function untilLabel(iso: string | null): string | null {
 /** Only severities we have actually SEEN mean something here. The vendor's vocabulary is not
  *  documented and not fully observed, so an unrecognised value falls through to the percentage
  *  thresholds — treating "anything that isn't normal" as elevated would paint the widget a
- *  permanent amber the first time the endpoint adds a benign new word. */
-const ELEVATED: Record<string, string> = { critical: 'text-red-500', exceeded: 'text-red-500', warning: 'text-amber-500', warn: 'text-amber-500' };
+ *  permanent amber the first time the endpoint adds a benign new word. 'ok' is ours, not the
+ *  vendor's: it lets a metric with its OWN bands (disk) say "fine" instead of inheriting 75/90. */
+// Thresholds come from the one shared module the server reads too (src/shared/disk.ts) — re-exported
+// here so existing importers of this component keep their import site. Not re-declared: a second
+// literal is a drift waiting to happen.
+export { DISK_WARN_PCT, DISK_CRIT_PCT };
+
+/** Disk has its own bands: 80% full is unremarkable for a disk, so it must NOT inherit the generic
+ *  75/90 percent colouring — hence an explicit 'ok' rather than falling through to those. */
+export function diskSeverity(pct: number): string {
+  return pct >= DISK_CRIT_PCT ? 'critical' : pct >= DISK_WARN_PCT ? 'warning' : 'ok';
+}
+
+const ELEVATED: Record<string, string> = { critical: 'text-red-500', exceeded: 'text-red-500', warning: 'text-amber-500', warn: 'text-amber-500', ok: 'text-emerald-500' };
 
 function level(v: number, severity?: string) {
   const known = severity ? ELEVATED[severity] : undefined;
   if (known) return known;
   return v >= 90 ? 'text-red-500' : v >= 75 ? 'text-amber-500' : 'text-emerald-500';
+}
+
+/**
+ * Hover text. The percentage alone cannot tell you whether 93% is 3GB or 300GB left, which is the
+ * first thing anyone asks when they see it amber — so the tooltip carries the actual figures. Falls
+ * back to the bare percentage on a sample from a server too old to send the byte fields.
+ */
+function diskTip(s: { disk: number; diskUsedBytes?: number; diskTotalBytes?: number }): string {
+  const bounds = `warn at ${DISK_WARN_PCT}%, critical at ${DISK_CRIT_PCT}%`;
+  if (s.diskUsedBytes == null || s.diskTotalBytes == null) return `disk ${s.disk}% used — ${bounds}`;
+  const free = Math.max(0, s.diskTotalBytes - s.diskUsedBytes);
+  return `disk ${s.disk}% used — ${formatBytes(s.diskUsedBytes)} of ${formatBytes(s.diskTotalBytes)}, `
+    + `${formatBytes(free)} free — ${bounds}`;
 }
 
 function Metric({ label, value, series, title, severity }: { label: string; value: number; series?: number[]; title?: string; severity?: string }) {
