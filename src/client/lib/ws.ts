@@ -61,6 +61,12 @@ export class AgentSocket {
   private authRetries = 0;
   private pendingMessage: object | null = null;
   private connectAttempts = 0;
+  /** Handle for the scheduled reconnect. Held so `disconnect()` can cancel it — without
+   *  this a timer that fires after teardown revives the DISCARDED instance and opens a
+   *  socket nobody can close. */
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Set once `disconnect()` is called. A late reconnect must not resurrect this instance. */
+  private closedForGood = false;
 
   /**
    * @param tokenProvider returns a *fresh* token on every call. Called on each
@@ -68,6 +74,10 @@ export class AgentSocket {
    * stale one being resent forever.
    */
   connect(tokenProvider: () => Promise<string | null>) {
+    // A reconnect scheduled before `disconnect()` can still fire after it. Honouring it
+    // would clear `intentionalClose` and open an unreachable socket, so refuse outright.
+    if (this.closedForGood) return;
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.tokenProvider = tokenProvider;
     this.intentionalClose = false;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -132,7 +142,10 @@ export class AgentSocket {
         const jitter = Math.random() * 1000;
         const delay = base + jitter;
         console.log(`[ws] reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${this.connectAttempts})`);
-        setTimeout(() => this.connect(this.tokenProvider), delay);
+        this.reconnectTimer = setTimeout(() => {
+          this.reconnectTimer = null;
+          this.connect(this.tokenProvider);
+        }, delay);
       }
     };
 
@@ -152,6 +165,8 @@ export class AgentSocket {
 
   disconnect() {
     this.intentionalClose = true;
+    this.closedForGood = true;
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.ws?.close();
     this.ws = null;
   }
@@ -163,6 +178,11 @@ export class AgentSocket {
       return true;
     }
     console.warn('[ws] send failed, readyState=', this.ws?.readyState);
+    // Kick a reconnect rather than leaving the tab mute until someone reloads it: this is
+    // the path a user hits when a turn 'starts' and nothing ever happens.
+    if (!this.closedForGood && !this.reconnecting && !this.reconnectTimer) {
+      this.connect(this.tokenProvider);
+    }
     return false;
   }
 
