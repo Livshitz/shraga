@@ -180,7 +180,12 @@ export class AgentSocket {
     console.warn('[ws] send failed, readyState=', this.ws?.readyState);
     // Kick a reconnect rather than leaving the tab mute until someone reloads it: this is
     // the path a user hits when a turn 'starts' and nothing ever happens.
-    if (!this.closedForGood && !this.reconnecting && !this.reconnectTimer) {
+    //
+    // CONNECTING is excluded deliberately. A socket that is still opening will fire `onopen`
+    // and flush the queued message on its own; calling connect() here would drop the reference
+    // to it and open a SECOND socket — precisely the orphan this commit exists to prevent.
+    const connecting = this.ws?.readyState === WebSocket.CONNECTING;
+    if (!this.closedForGood && !this.reconnecting && !this.reconnectTimer && !connecting) {
       this.connect(this.tokenProvider);
     }
     return false;
