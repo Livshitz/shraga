@@ -20,6 +20,21 @@ describe('background job child env', () => {
     expect(readFileSync(out, 'utf-8')).toBe(`${id} 1`);
     expect(getJob(id)?.id).toBe(id);
   }, 20_000);
+
+  // A launcher that needs the session id used to be HANDED it in the command string, and a plain
+  // `SHRAGA_SESSION_ID=... sh script.sh` written as two statements never reaches the child — which
+  // is how every scheduled social run failed for a day. The runner knows the owner; it passes it.
+  test('the child inherits the owning session id, through a nested shell', async () => {
+    const { startJob } = await import('../background-jobs.ts');
+    const dir = mkdtempSync(path.join(tmpdir(), 'bgjob-sid-'));
+    const out = path.join(dir, 'sid.txt');
+    await startJob(
+      { sessionId: 'sched-abc-123', uid: 'u1', userEmail: 'u1@example.com', cwd: dir },
+      `sh -c 'printf %s "$SHRAGA_SESSION_ID"' > ${out}`,
+    );
+    for (let i = 0; i < 100 && !existsSync(out); i++) await new Promise((r) => setTimeout(r, 50));
+    expect(readFileSync(out, 'utf-8')).toBe('sched-abc-123');
+  }, 20_000);
 });
 
 // The Shell tool hands a foreground command over at its deadline instead of killing it. That only

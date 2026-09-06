@@ -239,6 +239,11 @@ export async function startJob(owner: JobOwner, command: string): Promise<string
         // so one started in the foreground orphans silently when its 60s tool call is killed.
         SHRAGA_JOB_ID: id,
         SHRAGA_BG_JOB: '1',
+        // The owning session, so a launcher never has to be HANDED it. A model writing the command
+        // has to remember `export` for a var to survive into `sh script.sh`; a plain assignment
+        // silently doesn't, which failed every scheduled social run for a day. The runner already
+        // knows whose job this is — passing it removes the caller from the loop entirely.
+        SHRAGA_SESSION_ID: owner.sessionId,
       },
       detached: true, stdio: ['ignore', fd, fd],
     });
