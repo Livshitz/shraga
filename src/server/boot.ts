@@ -44,6 +44,7 @@ import { hydrateSlackUserToken } from './slack/oauth.ts';
 import { registerMcpOAuthRoutes } from './mcp-oauth.ts';
 import { registerEventRoutes } from './events/routes.ts';
 import { reclaimStalePort } from './port-reclaim.ts';
+import { listenWithRetry } from './listen-retry.ts';
 import { startHeartbeat, recordBootGap, buildReport } from './downtime.ts';
 import { registerWebhook } from './events/webhook.ts';
 import { startEventDispatcher } from './events/dispatcher.ts';
@@ -2127,26 +2128,18 @@ await new Promise<void>((resolve) => {
   // forever: process running, port unbound, nothing served. The service manager sees a healthy job
   // and a port watchdog sees a dead one, so it kickstarts on a loop and shreds in-flight runs.
   // EADDRINUSE is the common case: `kickstart -k` starts the replacement while the old process is
-  // still draining (up to 90s). Exiting non-zero is the correct answer — the manager restarts us,
-  // and by then the port is free.
+  // still draining (up to 90s). Exiting used to be the answer, but the manager respawns on a ~10s
+  // throttle and meets the same owner: MEASURED 2026-09-06, one watchdog kick became ~20 start/exit
+  // cycles across five minutes, and every scheduled run in that window died with them. Wait the
+  // drain out here instead — one process holding still, rather than N racing (see listen-retry.ts).
   //
   // EXCEPT when the holder is an ORPHANED copy of ourselves: nothing will ever signal it, so it
-  // holds the port forever and every respawn dies here while the orphan serves stale code. That is
-  // not a transient drain and exiting cannot fix it — reclaim the port once, then bind.
+  // holds the port forever and waiting alone cannot fix it — reclaim it, then the next retry binds.
   let reclaimed = false;
-  server.once('error', (err: NodeJS.ErrnoException) => {
-    if (err.code === 'EADDRINUSE' && !reclaimed && reclaimStalePort(PORT)) {
-      reclaimed = true; // once only: a second EADDRINUSE means a live owner we must not fight
-      server.listen(PORT);
-      return;
-    }
-    const why = err.code === 'EADDRINUSE'
-      ? `port ${PORT} is already in use (previous instance still draining?)`
-      : (err.message ?? String(err));
-    console.error(`[server] FATAL: cannot listen on ${PORT} — ${why}. Exiting so the service manager restarts us.`);
-    process.exit(1);
-  });
-  server.listen(PORT, () => {
+  listenWithRetry(server, PORT, {
+    onBusy: () => { if (!reclaimed) reclaimed = reclaimStalePort(PORT); },
+    onWaiting: (ms) => console.warn(`[server] port ${PORT} is held (previous instance draining?) — waiting up to ${Math.round(ms / 1000)}s for it`),
+  }).then(() => {
     console.log(`[server] Running on http://0.0.0.0:${PORT}`);
     resolve();
     if (PASSIVE) return; // no sidecars, recovery, or MCP warmers in passive mode
@@ -2160,6 +2153,12 @@ await new Promise<void>((resolve) => {
     // The disk MCP catalog is warmed off the turn path by whichever engine consumes it — the CE default
     // (Claude Code) hands MCP servers straight to its SDK and needs no catalog. An add-on engine that
     // uses the shared catalog registers its own boot/interval warm-up through the overlay.
+  }, (err: NodeJS.ErrnoException) => {
+    const why = err.code === 'EADDRINUSE'
+      ? `port ${PORT} is still in use after waiting for the previous instance to drain`
+      : (err.message ?? String(err));
+    console.error(`[server] FATAL: cannot listen on ${PORT} — ${why}. Exiting so the service manager restarts us.`);
+    process.exit(1);
   });
 });
 
