@@ -20,7 +20,12 @@ export function reclaimStalePort(port: number, opts: { entrypoint?: string; cwd?
   const cwd = opts.cwd ?? process.cwd();
   const grace = opts.termGraceMs ?? 5000;
 
-  const holders = listeners(port).filter((pid) => pid !== process.pid && isStaleSelf(pid, entrypoint, cwd));
+  // Any state, not just LISTEN: an orphan that closed its listener inside a drain it never finished
+  // still OWNS the socket, and looking only for LISTEN made it invisible while it blocked every
+  // replacement (feedox 2026-09-06: ppid-1 orphan, listener closed, port held for six minutes and
+  // counting). `isStaleSelf` is what keeps this narrow — a bystander is never a candidate.
+  const holders = [...new Set([...listeners(port), ...portUsers(port)])]
+    .filter((pid) => pid !== process.pid && isStaleSelf(pid, entrypoint, cwd));
   if (!holders.length) return false;
 
   for (const pid of holders) {
@@ -32,9 +37,15 @@ export function reclaimStalePort(port: number, opts: { entrypoint?: string; cwd?
       waitGone(pid, 2000);
     }
   }
-  const free = listeners(port).filter((pid) => pid !== process.pid).length === 0;
+  const free = [...new Set([...listeners(port), ...portUsers(port)])].filter((pid) => pid !== process.pid).length === 0;
   console.warn(`[server] port ${port} ${free ? 'reclaimed' : 'STILL held after reclaim'}`);
   return free;
+}
+
+/** Every process holding the port in ANY socket state (a half-closed orphan included). */
+function portUsers(port: number): number[] {
+  return sh('lsof', ['-ti', `tcp:${port}`])
+    .split('\n').map((l) => Number(l.trim())).filter((n) => Number.isInteger(n) && n > 0);
 }
 
 function listeners(port: number): number[] {
