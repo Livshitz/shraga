@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentSocket, ServerEvent } from '@/lib/ws';
 import { cn } from '@/lib/utils';
+// Shared with the chat transcript's rate-limit error annotation — one duration formatter, one home.
+import { untilLabel } from '@/lib/limit-reset';
+export { untilLabel };
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { DISK_WARN_PCT, DISK_CRIT_PCT, formatBytes } from '../../shared/disk';
 
@@ -291,19 +294,6 @@ export function agoLabel(iso: string | undefined): string | null {
   const h = Math.floor(min / 60), m = min % 60;
   if (h < 24) return m ? `${h}h ${m}m` : `${h}h`;
   return `${Math.floor(h / 24)}d`;
-}
-
-export function untilLabel(iso: string | null): string | null {
-  if (!iso) return null;
-  const ms = new Date(iso).getTime() - Date.now();
-  if (!Number.isFinite(ms) || ms <= 0) return null;
-  const min = Math.round(ms / 60_000);
-  if (min < 1) return '1m';
-  if (min < 60) return `${min}m`;
-  const h = Math.floor(min / 60), m = min % 60;
-  if (h < 48) return m ? `${h}h ${m}m` : `${h}h`;
-  const d = Math.floor(h / 24), rh = h % 24;
-  return rh ? `${d}d ${rh}h` : `${d}d`;
 }
 
 /** Only severities we have actually SEEN mean something here. The vendor's vocabulary is not
