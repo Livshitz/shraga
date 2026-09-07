@@ -52,6 +52,14 @@ async function reader(creds: unknown, name = `c${Math.random().toString(36).slic
 const MISSING = () => path.join(dir, 'does-not-exist.json');
 /** A private mirror file per reader: the suite must never read or write the real DATA_DIR one. */
 const CACHE = () => path.join(dir, `cache-${Math.random().toString(36).slice(2)}.json`);
+/** Poll a condition to a hard deadline — for state a best-effort background write produces. */
+async function until(cond: () => boolean | Promise<boolean>, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await cond())) {
+    if (Date.now() > deadline) throw new Error('timed out waiting for the condition');
+    await Bun.sleep(2);
+  }
+}
 const NEVER_KEYCHAIN = async () => { throw new Error('keychain must not be consulted here'); };
 
 const OK_CREDS = { claudeAiOauth: { accessToken: 'tok', scopes: ['user:inference', 'user:profile'], subscriptionType: 'max' } };
@@ -158,6 +166,9 @@ describe('last known-good reading survives a failure', () => {
     const creds = path.join(dir, `restart-${Math.random().toString(36).slice(2)}.json`);
     await writeFile(creds, JSON.stringify(OK_CREDS));
     const first = await new ClaudeUsageReader({ credentialsPath: creds, endpoint, cachePath: shared, readKeychain: NEVER_KEYCHAIN }).get();
+    // The mirror is written fire-and-forget so a disk stall can never delay a client poll — which
+    // means get() can resolve BEFORE the file exists. A restart is only observable once it does.
+    await until(() => Bun.file(shared).exists());
 
     status = 500; // the box comes back up into a rate-limited / failing upstream
     const afterRestart = await new ClaudeUsageReader({ credentialsPath: creds, endpoint, cachePath: shared, readKeychain: NEVER_KEYCHAIN }).get();
