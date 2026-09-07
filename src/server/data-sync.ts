@@ -179,8 +179,31 @@ export class DataSync {
       await this.untrackIgnored();
       this.ready = true;
     }
+  }
 
-    await this.pull();
+  /**
+   * Boot-time NETWORK sync: the remote fetch/merge plus the deferred conflict-scan + integrity audit.
+   * Split out of init() so the HTTP port can bind BEFORE any of this runs.
+   *
+   * Why: this used to be the tail of init(), which bootServer awaits before listen(). A stalled pull
+   * (observed on liv-mac-1: `Could not resolve host: github.com`, plus a 60s LLM commit-message
+   * timeout) therefore held the ENTIRE boot — process alive, no listener on any port, 502s for
+   * minutes. The port watchdog then SIGTERM/SIGKILLed the boot (LastExitStatus=9) and the next boot
+   * re-entered the same stall. Serving possibly-stale data and refreshing a moment later is strictly
+   * better than not serving at all.
+   *
+   * Never rejects: the caller runs this detached, and an unhandled rejection here would reach the
+   * process-level handler.
+   */
+  async syncOnBoot(): Promise<void> {
+    if (!this.ready) return; // init() disabled/aborted — nothing to sync against
+    console.log(`${TAG} Boot sync started (background — the server is already serving)`);
+    try {
+      await this.pull();
+      console.log(`${TAG} Boot sync complete`);
+    } catch (err) {
+      console.error(`${TAG} Boot sync FAILED — serving stale data until the next pull:`, (err as Error).message);
+    }
     // Defer heavy sync I/O (reads all tracked files + execSync) to avoid blocking
     // WS connections and page loads during startup.
     setTimeout(() => {
@@ -189,7 +212,8 @@ export class DataSync {
         // execSync inside the audit blocks too — keep it off the scan's tick so the two
         // never add up into one long freeze.
         .then(() => new Promise<void>(r => setImmediate(r)))
-        .then(() => this.runIntegrityAudit());
+        .then(() => this.runIntegrityAudit())
+        .catch(err => console.warn(`${TAG} Post-init integrity audit failed:`, (err as Error).message));
     }, 60_000);
   }
 

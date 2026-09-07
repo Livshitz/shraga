@@ -113,7 +113,15 @@ const PASSIVE_FLAG = process.env.SHRAGA_PASSIVE ?? process.env.UNCLAW_PASSIVE;
 const PASSIVE = PASSIVE_FLAG === '1' || PASSIVE_FLAG === 'true';
 if (PASSIVE) console.log('[server] PASSIVE mode — schedulers, consumers and background writers disabled');
 
+// Local-only prep (git config, gitignore, untracking). The NETWORK half — fetch/merge — is
+// deliberately NOT awaited here; it runs via dataSync.syncOnBoot() AFTER listen(). See syncOnBoot().
 if (!PASSIVE) await dataSync.init();
+
+// Kick the boot-time data sync detached, AFTER the port is bound. syncOnBoot() never rejects, and the
+// extra .catch() is belt-and-braces: an unhandled rejection here would hit the process-level handler.
+function bootDataSync(): void {
+  dataSync.syncOnBoot().catch(err => console.error('[data-sync] boot sync error:', (err as Error).message));
+}
 await loadShragaConfig();
 // Programmatic engines register through the same seam an overlay uses — BEFORE initEngines() so
 // getAvailableEngines() includes them and a directive can resolve to one immediately.
@@ -1233,6 +1241,7 @@ async function activateConsumers() {
   activated = true;
   console.log('[server] ACTIVATING — starting consumers and background writers');
   await dataSync.init();
+  bootDataSync();
   syncVendorRepos().catch(err => console.warn('[vendor-sync] error:', (err as Error).message));
   recordBootGap();
   startHeartbeat();
@@ -2150,6 +2159,7 @@ await new Promise<void>((resolve) => {
     catch (err) { console.warn('[self-upgrade] could not deliver report:', (err as Error).message); }
     startSidecars().catch(err => console.error('[sidecar] startup error:', err));
     recoverInterruptedSessions().catch(err => console.error('[recovery] failed:', err));
+    bootDataSync();
     // The disk MCP catalog is warmed off the turn path by whichever engine consumes it — the CE default
     // (Claude Code) hands MCP servers straight to its SDK and needs no catalog. An add-on engine that
     // uses the shared catalog registers its own boot/interval warm-up through the overlay.
