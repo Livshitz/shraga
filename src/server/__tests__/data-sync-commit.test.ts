@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { DataSync, extractCommitSubject, fallbackCommitMessage, withTimeout } from '../data-sync.ts';
+import { DataSync, extractCommitSubject, fallbackCommitMessage, isChurnPath, withTimeout } from '../data-sync.ts';
 
 describe('extractCommitSubject', () => {
   test('fence-only reply yields nothing (prod commit 1f6c20a was literally "```")', () => {
@@ -150,5 +150,23 @@ describe('flush() releases the push latch', () => {
     ds.pending.add('CLAUDE.md');
     await ds.flush();
     expect(calls.filter(c => c[0] === 'commit').length).toBe(2);
+  });
+});
+
+describe('isChurnPath', () => {
+  test('the files that stalled sync on 2026-09-07 are exempt', () => {
+    expect(isChurnPath('workspace/social/workers/logs/2026-09-07-liscout.task.txt')).toBe(true);
+    expect(isChurnPath('workspace/social/workers/logs/2026-09-07-xscout.task.txt')).toBe(true);
+    expect(isChurnPath('workspace/social/workers/tasks/20260907-084500-li-post.task.txt')).toBe(true);
+    expect(isChurnPath('workspace/social/workers/launch-agentx-leg.sh.bak-atomic')).toBe(true);
+    expect(isChurnPath('workspace/social/workers/recover-scout-payload.py.bak-softgate-20260907092016')).toBe(true);
+  });
+
+  test('shared data the guard exists to protect is NOT exempt', () => {
+    expect(isChurnPath('contacts.json')).toBe(false);
+    expect(isChurnPath('skills/social-manager.md')).toBe(false);
+    expect(isChurnPath('workspace/social/receipts/2026-09-07-morning.json')).toBe(false);
+    expect(isChurnPath('workspace/social/batches/2026-09-07-morning-x-replies.json')).toBe(false);
+    expect(isChurnPath('workspace/social/workers/launch-agentx-leg.sh')).toBe(false);
   });
 });
