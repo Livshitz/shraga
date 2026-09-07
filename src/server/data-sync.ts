@@ -66,6 +66,15 @@ export function extractCommitSubject(raw: string): string {
   return '';
 }
 
+/** Paths that are REWRITTEN or discarded by design: per-run worker logs, per-run task files, and
+ *  `.bak-*` copies. The shrink guard exists to catch a shared file being gutted (contacts.json
+ *  111 -> 5 lines); a task file losing 58 lines because the next run rewrote it is not that. And the
+ *  guard aborts the WHOLE commit, so one churn file stalls every other file's sync indefinitely —
+ *  measured 2026-09-07: repeated BLOCKED alerts and a 27-commit push backlog behind two task files. */
+export function isChurnPath(file: string): boolean {
+  return /(^|\/)workspace\/[^/]+\/workers\/(logs|tasks)\//.test(file) || /\.bak(-|\.|$)/.test(file);
+}
+
 export class DataSyncOptions {
   repoUrl = process.env.DATA_SYNC_REPO || '';
   branch = process.env.DATA_SYNC_BRANCH || 'main';
@@ -236,7 +245,7 @@ export class DataSync {
         const [addRaw, delRaw, file] = line.split('\t');
         if (addRaw === '-' || delRaw === '-' || !file) continue; // binary
         const net = (parseInt(delRaw, 10) || 0) - (parseInt(addRaw, 10) || 0);
-        if (net > shrinkThreshold) shrunk.push(`• ${file}  (−${net} net lines)`);
+        if (net > shrinkThreshold && !isChurnPath(file)) shrunk.push(`• ${file}  (−${net} net lines)`);
       }
       if (shrunk.length) {
         console.error(`${TAG} 🚫 BLOCKED large content shrink (${context}): ${shrunk.length} file(s) — net-removal threshold is ${shrinkThreshold}`);
