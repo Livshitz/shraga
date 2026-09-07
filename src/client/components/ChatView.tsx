@@ -23,6 +23,7 @@ const rehypeBidi: Plugin<[], Root> = () => (tree) => {
 import 'highlight.js/styles/github.css';
 import { ChevronRight, Wrench, User, Bot, Copy, Check, RotateCcw, Pencil, X, SendHorizontal, ShieldQuestion, CheckCircle2, XCircle, Eye, EyeOff, Info, Loader2, BrainCircuit, GitFork, Minimize2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { annotateLimitReset } from '@/lib/limit-reset';
 import type { ChatMessage, MessageBlock, Attachment } from '@/hooks/useConversation';
 import type { AskQuestion, QuestionAnswers } from '@/lib/ws';
 import { SmartChart, tryParseChartData } from './SmartChart';
@@ -320,7 +321,7 @@ function MessageRow({
             const result = block.type === 'tool_use'
               ? message.blocks.find((b): b is MessageBlock & { type: 'tool_result' } => b.type === 'tool_result' && b.toolUseId === block.toolUseId)
               : undefined;
-            return <BlockRenderer key={i} block={block} isUser={isUser} onPermissionRespond={onPermissionRespond} onQuestionRespond={onQuestionRespond} pairedResult={result} onImageClick={onImageClick} busy={busy} screenMap={screenMap} />;
+            return <BlockRenderer key={i} block={block} isUser={isUser} ts={message.ts} onPermissionRespond={onPermissionRespond} onQuestionRespond={onQuestionRespond} pairedResult={result} onImageClick={onImageClick} busy={busy} screenMap={screenMap} />;
           })}
             {isUser && userText && (
               <div className={cn('flex gap-1 items-center justify-end transition-opacity', actionsVisible ? 'opacity-100' : 'opacity-0 group-hover/row:opacity-100')}>
@@ -385,7 +386,7 @@ function CompactMarkerDivider({ summary, compactedCount }: { summary: string; co
   );
 }
 
-function BlockRenderer({ block, isUser, onPermissionRespond, onQuestionRespond, pairedResult, onImageClick, busy, screenMap }: { block: MessageBlock; isUser: boolean; onPermissionRespond?: (id: string, allow: boolean, allowAll?: boolean) => void; onQuestionRespond?: (id: string, answers: QuestionAnswers) => void; pairedResult?: MessageBlock & { type: 'tool_result' }; onImageClick?: (src: string) => void; busy?: boolean; screenMap?: Map<string, string[]> }) {
+function BlockRenderer({ block, isUser, ts, onPermissionRespond, onQuestionRespond, pairedResult, onImageClick, busy, screenMap }: { block: MessageBlock; isUser: boolean; ts?: number; onPermissionRespond?: (id: string, allow: boolean, allowAll?: boolean) => void; onQuestionRespond?: (id: string, answers: QuestionAnswers) => void; pairedResult?: MessageBlock & { type: 'tool_result' }; onImageClick?: (src: string) => void; busy?: boolean; screenMap?: Map<string, string[]> }) {
   const slots = useSlots();
   if (block.type === 'image') {
     return (
@@ -410,7 +411,7 @@ function BlockRenderer({ block, isUser, onPermissionRespond, onQuestionRespond, 
   }
 
   if (block.type === 'error') {
-    return <ErrorBlock text={block.text} />;
+    return <ErrorBlock text={block.text} ts={ts} />;
   }
 
   if (block.type === 'text') {
@@ -452,11 +453,12 @@ function BlockRenderer({ block, isUser, onPermissionRespond, onQuestionRespond, 
 }
 
 /** A run that failed at the engine/adapter level — deliberately loud, never mistakable for a reply. */
-function ErrorBlock({ text }: { text: string }) {
+function ErrorBlock({ text, ts }: { text: string; ts?: number }) {
+  const shown = annotateLimitReset(text, ts ?? Date.now());
   return (
     <div dir="auto" className="border border-destructive/40 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive break-words">
       <span className="font-medium">⚠️ Run failed</span>
-      <div className="mt-1 text-xs opacity-90 whitespace-pre-wrap font-mono">{text}</div>
+      <div className="mt-1 text-xs opacity-90 whitespace-pre-wrap font-mono">{shown}</div>
     </div>
   );
 }
