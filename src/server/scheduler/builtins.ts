@@ -56,6 +56,26 @@ const FAILURE_NOTIFIER_PROMPT = [
 const LEGACY_SESSION_LINE = /^.*<deployment URL>\/\?session=<sessionId>(.*)$/gm;
 const SESSION_LINE_FIX = "  *Session:* <the payload's sessionUrl, verbatim — omit this line if absent>";
 
+/**
+ * One source of truth for a prompt run's runtime: the leading `[engine:…,model:…]` directive of the
+ * prompt. `task.model`/`task.engine` were an INVISIBLE second copy — no UI ever showed them, which
+ * is how nine live schedules drifted to a half-pin (`model` set, `engine` not) that nobody could
+ * see or fix. Fold such a pin into the prompt exactly as runner.ts used to synthesize it, so the
+ * run is byte-identical and the selection is now editable where the prompt is.
+ *
+ * Applied to schedules loaded from disk AND to a module's freshly rendered task, so a manifest that
+ * still templates a `model` knob keeps working instead of silently losing its pin.
+ * `bash`/`job` tasks have no prompt to hold a directive, so their (unreadable) pin is just dropped.
+ */
+export function foldLegacyRuntimePin(task: Record<string, any>): void {
+  if (task.kind === 'prompt' && (task.model || task.engine)) {
+    const pins = [task.engine && `engine:${task.engine}`, task.model && `model:${task.model}`].filter(Boolean);
+    task.prompt = `[${pins.join(',')}] ${task.prompt ?? ''}`;
+  }
+  delete task.model;
+  delete task.engine;
+}
+
 export function isSystemSchedule(schedule: Schedule): boolean {
   return schedule.scope === 'system';
 }
@@ -86,6 +106,16 @@ export function backfillScope(schedules: Schedule[]): void {
     if (task.kind === 'job' && task.command === 'bun run summarize:conversations') {
       task.command = SUMMARIZER_CMD;
     }
+    // Undo the `engine: 'claude-code'` pin reconcile stamped onto the failure notifier. It shipped on
+    // a premise the box's own logs disprove — nothing was ever misrouted; the deployment was simply
+    // globally on claude-code then and on agentx now — and it made the alarm the second casualty of
+    // the real failure mode (an org cap on the pinned provider). Narrow on purpose: exactly the
+    // state that clause produced (this id, that engine, no model), so it cannot eat a real choice.
+    if (s.id === FAILURE_NOTIFIER_SCHEDULE_ID && task.engine === 'claude-code' && !task.model) {
+      delete task.engine;
+    }
+    foldLegacyRuntimePin(task);
+
     // Heal a persisted failure-notifier prompt still carrying the un-supplied "<deployment URL>"
     // placeholder — reconcile won't touch task.prompt, so this is the only path that reaches it.
     if (s.id === FAILURE_NOTIFIER_SCHEDULE_ID && typeof task.prompt === 'string') {
@@ -138,11 +168,7 @@ export function ensureBuiltinSchedules(schedules: Schedule[]): Schedule[] {
         match: { status: 'error' },
         throttle: { byFields: ['name', 'error'], windowSec: 21600 },
       },
-      // Pinned to the always-registered engine ON PURPOSE. Left unpinned, this run inherits whatever
-      // agent-config.json's global `engine` happens to be — and an optional engine can simply not
-      // register on a given boot (add-on absent, missing API key), which is exactly the failure this
-      // job exists to report. Its own alert must not be the second casualty.
-      task: { kind: 'prompt', prompt: FAILURE_NOTIFIER_PROMPT, engine: 'claude-code' },
+      task: { kind: 'prompt', prompt: FAILURE_NOTIFIER_PROMPT },
       scope: 'system',
       createdBy: { uid: SYSTEM_UID, email: 'system@shraga.local' },
       createdAt: now,
@@ -167,16 +193,8 @@ export function ensureBuiltinSchedules(schedules: Schedule[]): Schedule[] {
       existing.scope = builtin.scope;
       existing.trigger = existing.trigger ?? builtin.trigger;
       existing.createdBy = builtin.createdBy;
-      // A builtin's stored task is preserved (deployments edit the prompt) — with one exception: an
-      // engine/model pin is only meaningful as a PAIR. A stored task with a `model` but no `engine`
-      // was resolved against whatever the ambient global config was at the time, which is how the
-      // failure notifier ended up pinned to `composer-2.5` while running on claude-code. So when the
-      // builtin pins an engine and the stored task pins NONE, adopt the builtin's pair wholesale.
-      // An explicit stored `engine` is a real operator choice and is left untouched.
-      if (builtin.task.kind !== 'job' && existing.task.kind !== 'job' && builtin.task.engine && !existing.task.engine) {
-        existing.task.engine = builtin.task.engine;
-        existing.task.model = builtin.task.model;
-      }
+      // A builtin's stored task is otherwise preserved — deployments edit the prompt (and with it
+      // the runtime directive), and those edits must survive an upgrade.
     } else {
       schedules.push(builtin);
     }

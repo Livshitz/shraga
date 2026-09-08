@@ -45,22 +45,27 @@ export type ModelResolver = (token: string) => { model: string; engine?: string 
 let modelResolver: ModelResolver | null = null;
 export function setModelResolver(fn: ModelResolver | null): void { modelResolver = fn; }
 
-/** Alias table first (canonical shorthands win), then the engine registry. */
+/** Alias table first (canonical shorthands win), then the engine registry. Exported because the
+ *  client's directive editor needs the SAME verdict on "is this bare token a model?" as the parser —
+ *  a second opinion there would strip a token the server still reads, or keep one it doesn't. */
+export function resolveModelAlias(token: string): { model: string; engine?: string } | null {
+  const v = token.trim().toLowerCase();
+  if (MODEL_ALIASES[v]) return { model: MODEL_ALIASES[v] };
+  return modelResolver?.(v) ?? null;
+}
+
 function resolveModelToken(d: Directives, val: string): boolean {
-  if (MODEL_ALIASES[val]) { d.model = MODEL_ALIASES[val]; return true; }
-  const hit = modelResolver?.(val);
-  if (hit) {
-    d.model = hit.model;
-    // An engine-owned model implies its engine — but never override an explicit `[engine:x]`.
-    if (hit.engine && !d.engine) d.engine = hit.engine;
-    return true;
-  }
-  return false;
+  const hit = resolveModelAlias(val);
+  if (!hit) return false;
+  d.model = hit.model;
+  // An engine-owned model implies its engine — but never override an explicit `[engine:x]`.
+  if (hit.engine && !d.engine) d.engine = hit.engine;
+  return true;
 }
 
 /** Does a bracket group look like directives (vs. prompt text that happens to start with `[`)?
  * Every token must be a known key:value or a known positional, else we leave the group alone. */
-function isDirectiveGroup(raw: string): boolean {
+export function isDirectiveGroup(raw: string): boolean {
   const tokens = raw.split(',').map((t) => t.trim()).filter(Boolean);
   if (!tokens.length) return false;
   return tokens.every((t) => {
@@ -71,23 +76,31 @@ function isDirectiveGroup(raw: string): boolean {
   });
 }
 
-export function parseDirectives(text: string): ParsedPrompt {
-  // Consume EVERY consecutive leading [..] group, not just the first. runner.ts prepends
-  // `[model] ` onto prompts that may already open with `[turns:120]`, so a single-group parse
-  // silently dropped the second — a schedule pinned to opus quietly ran on the config default
-  // for three days. Groups that don't parse as directives are left as prompt text.
+/** Splits the leading `[..]` directive groups off a prompt — the single answer to "where do the
+ *  directives end". Consumes EVERY consecutive leading group, not just the first: a prompt may
+ *  legitimately open with `[engine:x,model:y] [turns:120] …`, and a single-group scan silently
+ *  dropped the second (a schedule pinned to opus quietly ran on the config default for three days).
+ *
+ *  `strict` requires every group — the first included — to actually look like directives. The parser
+ *  stays lenient there (long-standing contract: `[unknown] hi` strips the group and warns), but an
+ *  EDITOR rewriting the directive in place must never swallow a prompt whose body legitimately opens
+ *  with bracketed prose. */
+export function splitDirectiveGroups(text: string, opts?: { strict?: boolean }): { groups: string[]; body: string } {
   let rest = text;
   const groups: string[] = [];
   for (;;) {
     const m = rest.match(DIRECTIVE_RE);
     if (!m) break;
     const g = m[1].trim();
-    // The first group is always consumed (long-standing contract: `[unknown] hi` strips and warns).
-    // Later groups must actually look like directives, so prompt text such as `[WARN] …` survives.
-    if (groups.length && g && !isDirectiveGroup(g)) break;
+    if ((groups.length || opts?.strict) && g && !isDirectiveGroup(g)) break;
     groups.push(g);
     rest = m[2];
   }
+  return { groups, body: rest };
+}
+
+export function parseDirectives(text: string): ParsedPrompt {
+  const { groups, body: rest } = splitDirectiveGroups(text);
   if (!groups.length) return { prompt: text, directives: {} };
 
   const raw = groups.filter(Boolean).join(',');

@@ -1,11 +1,11 @@
 import { describe, test, expect } from 'bun:test';
 import { parseDirectives } from '../directives.ts';
 
-// task.model flows into the run as a [model] prompt-directive prefix (runner.ts prompt
-// synthesis). These tests pin the two halves of that contract: the prefix parses back out
-// and resolves through MODEL_ALIASES — so a schedule with task.model 'haiku' cannot
-// silently run on the instance default again (the phantom-field regression of 0.1.15).
-describe('scheduler task.model → [model] directive', () => {
+// A scheduled run's runtime IS the prompt's leading directive — there is no stored pin behind it
+// any more. These tests pin the shapes a schedule prompt actually carries (including the one the
+// legacy-pin migration writes), so a pinned schedule cannot silently run on the instance default
+// again (the phantom-field regression of 0.1.15).
+describe('schedule prompt [model] directive', () => {
   test('alias prefix resolves and is stripped from the prompt', () => {
     const { prompt, directives } = parseDirectives('[haiku] Dispatcher tick: do the thing.');
     expect(directives.model).toBe('claude-haiku-4-5-20251001');

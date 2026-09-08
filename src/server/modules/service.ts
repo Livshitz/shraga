@@ -11,6 +11,7 @@
  *    Only state.json answers "is the module on".
  *  - Reconcile is idempotent: write-if-changed skills, upserts preserve enabled/runCount/lastRun.
  */
+import { foldLegacyRuntimePin } from '../scheduler/builtins.ts';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, unlinkSync, renameSync, rmSync, copyFileSync, statSync, appendFileSync } from 'node:fs';
 import path from 'node:path';
 import { dataPath, DATA_DIR, PACKAGE_ROOT } from '../paths.ts';
@@ -305,6 +306,9 @@ function applyModule(rec: InstalledModule): void {
       const t = rendered.task as Record<string, unknown>;
       if (k in t && !t[k]) delete t[k];
     }
+    // A runtime knob is now expressed as the prompt's own `[engine:…,model:…]` directive, not as a
+    // shadow field — fold whatever the manifest templated into it.
+    foldLegacyRuntimePin(rendered.task as Record<string, any>);
     const existing = scheduler.getSchedule(id);
     const now = Date.now();
     const schedule: Schedule = {

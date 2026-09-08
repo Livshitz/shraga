@@ -5,8 +5,11 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Textarea } from '../ui/textarea';
 import { AutocompleteTextarea } from '../AutocompleteTextarea';
+import { useEngines } from '@/hooks/useEngines';
+import { readRuntimeDirective, writeRuntimeDirective } from '@/lib/prompt-directives';
 
 interface Props {
+  getToken: () => Promise<string | null>;
   initial?: Schedule;
   onSave: (s: Partial<Schedule>) => Promise<void>;
   onCancel: () => void;
@@ -63,7 +66,65 @@ function MatchEditor({ match, onChange }: { match: Record<string, string>; onCha
   );
 }
 
-export function ScheduleEditor({ initial, onSave, onCancel, skills = [], workspaceFiles = [] }: Props) {
+/** Engine + model picker for a prompt task. There is no stored field behind it: the leading
+ *  `[engine:…,model:…]` directive in the prompt IS the selection, so this reads that directive and
+ *  rewrites it in place. A directive typed by hand therefore shows up here, and a pin can never
+ *  drift out of sync with the prompt the way a shadow `task.model` did. */
+function RuntimePicker({ prompt, onChange, getToken }: { prompt: string; onChange: (p: string) => void; getToken: () => Promise<string | null> }) {
+  const { engines } = useEngines(getToken);
+  // Until the registry has loaded we cannot tell a bare model token from prose, so a rewrite could
+  // leave a stale duplicate pin behind. Read-only until then.
+  const ready = engines.length > 0;
+  const sel = useMemo(() => readRuntimeDirective(prompt), [prompt, ready]);
+  // Narrow the model list only to an engine the directive actually NAMES. An engine merely implied
+  // by the model would otherwise trap a model-only pin — 11 of the 15 live schedules — inside that
+  // engine's list, with no way to reach another engine's models.
+  const engineInfo = sel.engineExplicit ? engines.find((e) => e.name === sel.engine) : undefined;
+  const options = engineInfo
+    ? [{ engine: engineInfo.name, models: engineInfo.models }]
+    : engines.map((e) => ({ engine: e.name, models: e.models }));
+  // A <select> whose value matches no option silently renders the FIRST option while the state says
+  // otherwise — so a hand-typed directive naming something this engine doesn't list would be shown
+  // as a different selection than the one that will actually run. Surface it instead of lying.
+  const listed = (v: string | undefined, all: string[]) => !v || all.includes(v);
+  const modelListed = listed(sel.model, options.flatMap((o) => o.models.map((m) => m.value)));
+  const engineListed = listed(sel.engine, engines.map((e) => e.name));
+  // Only an engine the directive NAMES is carried forward. An inferred one belongs to the model it
+  // was inferred from: re-emitting it while the user picks another engine's model would silently
+  // pin a pairing nobody chose (agentx running a claude-code model).
+  const set = (next: { engine?: string; model?: string }) =>
+    onChange(writeRuntimeDirective(prompt, { engine: sel.engineExplicit ? sel.engine : undefined, model: sel.model, ...next }));
+  const selectClass = 'h-8 rounded-md border border-input bg-background px-2 text-xs';
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <label className="text-xs text-muted-foreground">Runtime</label>
+      <select
+        className={selectClass}
+        disabled={!ready}
+        value={sel.engine ?? ''}
+        // Switching engine drops the model pin: the old model belongs to the old engine's list.
+        onChange={(e) => set({ engine: e.target.value || undefined, model: undefined })}
+      >
+        <option value="">Default engine (agent config)</option>
+        {!engineListed && <option value={sel.engine}>{sel.engine} — not registered on this server</option>}
+        {engines.map((e) => <option key={e.name} value={e.name}>{e.name}</option>)}
+      </select>
+      <select className={selectClass} disabled={!ready} value={sel.model ?? ''} onChange={(e) => set({ model: e.target.value || undefined })}>
+        <option value="">Default model (agent config)</option>
+        {!modelListed && <option value={sel.model}>{sel.model} — not offered by this engine</option>}
+        {options.map(({ engine, models }) => (
+          <optgroup key={engine} label={engine}>
+            {models.filter((m) => m.value).map((m) => <option key={`${engine}:${m.value}`} value={m.value}>{m.label || m.value}</option>)}
+          </optgroup>
+        ))}
+      </select>
+      {!ready && <span className="text-[10px] text-muted-foreground">loading engines…</span>}
+    </div>
+  );
+}
+
+export function ScheduleEditor({ getToken, initial, onSave, onCancel, skills = [], workspaceFiles = [] }: Props) {
   const tz = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone, []);
   const [name, setName] = useState(initial?.name ?? 'New schedule');
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
@@ -225,6 +286,8 @@ export function ScheduleEditor({ initial, onSave, onCancel, skills = [], workspa
           ))}
         </div>
         {task.kind === 'prompt' ? (
+          <>
+          <RuntimePicker prompt={task.prompt} getToken={getToken} onChange={(prompt) => setTask({ ...task, prompt })} />
           <AutocompleteTextarea
             rows={5}
             value={task.prompt}
@@ -235,6 +298,7 @@ export function ScheduleEditor({ initial, onSave, onCancel, skills = [], workspa
             autoResize={false}
             className="flex min-h-[80px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           />
+          </>
         ) : task.kind === 'bash' ? (
           <Textarea
             rows={3}

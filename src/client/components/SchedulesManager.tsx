@@ -65,6 +65,7 @@ export const SchedulesManager = forwardRef<SchedulesManagerHandle, Props>(functi
         {creating ? (
           <ScheduleEditor
             key="__new__"
+            getToken={getToken}
             onSave={async (s) => { await create(s); closeEditor(); }}
             onCancel={closeEditor}
             skills={skills}
@@ -73,6 +74,7 @@ export const SchedulesManager = forwardRef<SchedulesManagerHandle, Props>(functi
         ) : editing ? (
           <ScheduleEditor
             key={editing.id}
+            getToken={getToken}
             initial={editing}
             onSave={async (s) => { await update(editing.id, s); closeEditor(); }}
             onCancel={closeEditor}

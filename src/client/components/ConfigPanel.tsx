@@ -5,6 +5,7 @@ import { Input } from './ui/input';
 import { Textarea } from './ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogBody, DialogFooter } from './ui/dialog';
 import { useSlots } from '@/lib/slots';
+import { useEngines, type EngineModel } from '@/hooks/useEngines';
 
 interface AgentConfig {
   model?: string;
@@ -16,17 +17,6 @@ interface AgentConfig {
   skillDiscovery?: boolean;
   thinking?: 'adaptive' | 'enabled' | 'disabled';
   effort?: 'low' | 'medium' | 'high' | 'max';
-}
-
-interface EngineModel {
-  value: string;
-  label: string;
-  provider?: string;
-}
-
-interface EngineInfo {
-  name: string;
-  models: EngineModel[];
 }
 
 const FALLBACK_MODELS: EngineModel[] = [
@@ -64,8 +54,7 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
   const [config, setConfig] = useState<AgentConfig>({});
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [engines, setEngines] = useState<EngineInfo[]>([]);
-  const [multiEngine, setMultiEngine] = useState(false);
+  const { engines, multiEngine } = useEngines(getToken, open);
   // Global config as loaded — so a per-session runtime change doesn't clobber the global defaults.
   const globalRef = useRef<AgentConfig>({});
   // Save scope for the runtime knobs (engine/model/turns/thinking): this conversation, or the
@@ -91,13 +80,6 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
             ...(sd?.turns !== undefined ? { maxTurns: sd.turns } : {}),
             ...(sd?.thinking !== undefined ? { thinking: sd.thinking as AgentConfig['thinking'] } : {}),
           });
-        })
-        .catch(() => {});
-      fetch('/api/engines', { headers: { Authorization: `Bearer ${token}` } })
-        .then((r) => r.json())
-        .then((data) => {
-          setEngines(data.engines ?? []);
-          setMultiEngine(data.multiEngine ?? false);
         })
         .catch(() => {});
     });

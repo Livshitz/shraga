@@ -156,12 +156,13 @@ describe('adoption', () => {
     expect(bak).toBe('# my hand-written skill\n');
   });
 
-  test('builtin routine adopts the circles pre-state: task.model haiku preserved via knob, scope→system, runtime kept', () => {
+  test('builtin routine adopts the circles pre-state: tickModel haiku preserved as a prompt directive, scope→system, runtime kept', () => {
     // Circles pre-state: unmanaged user-scope tick with a hand-set cheap model
     const pre: Schedule = {
       id: 'circles-tick-id', name: 'routine-tick', enabled: true,
       trigger: { kind: 'cron', expr: '0 9-16 * * 0-4', tz: 'Asia/Jerusalem' },
-      task: { kind: 'prompt', prompt: 'old hand-written tick prompt', model: 'haiku' },
+      // A pre-migration stored pin: the shadow field the Task type no longer carries.
+      task: { kind: 'prompt', prompt: 'old hand-written tick prompt', model: 'haiku' } as Schedule['task'],
       scope: 'user', createdBy: { uid: 'elya', email: 'elya@x.com' },
       createdAt: 1, updatedAt: 1, runCount: 99,
     };
@@ -172,7 +173,10 @@ describe('adoption', () => {
     const adopted = scheduler.getSchedule('circles-tick-id')!;
     expect(adopted.managedBy).toBe('routine');
     expect(adopted.scope).toBe('system');                              // intended (F2)
-    expect((adopted.task as { model?: string }).model).toBe('haiku');  // model round-trips via tickModel knob
+    // The tickModel knob now lands where the run actually reads it — the prompt's own directive —
+    // instead of a shadow field no UI ever showed.
+    expect((adopted.task as { model?: string }).model).toBeUndefined();
+    expect((adopted.task as { prompt: string }).prompt.startsWith('[model:haiku] ')).toBe(true);
     expect(adopted.runCount).toBe(99);
     expect(adopted.enabled).toBe(true);
     expect(adopted.trigger).toEqual({ kind: 'cron', expr: '0 8-17 * * 0-4', tz: 'Asia/Jerusalem' }); // def wins trigger
@@ -198,6 +202,7 @@ describe('adoption', () => {
     installModule({ path: path.join(FIXTURES, 'm-model') });
     const s = scheduler.getSchedule('mod-m-model-tick')!;
     expect('model' in s.task).toBe(false);
+    expect((s.task as { prompt: string }).prompt.startsWith('[')).toBe(false); // and no empty directive
     uninstallModule('m-model');
   });
 
@@ -435,7 +440,9 @@ describe('uninstall + skills-defaults', () => {
     const tick = scheduler.getSchedule('mod-routine-tick')!;
     expect(tick.enabled).toBe(true);
     expect(tick.trigger).toEqual({ kind: 'cron', expr: '0 8-17 * * 0-4', tz: 'Asia/Jerusalem' });
-    expect((tick.task as { model?: string }).model).toBe('haiku'); // tickModel knob rendered
+    // The tickModel knob renders into the prompt's own directive — the one place the run reads it.
+    expect((tick.task as { model?: string }).model).toBeUndefined();
+    expect((tick.task as { prompt: string }).prompt.startsWith('[model:haiku] Dispatcher tick')).toBe(true);
     const block = scheduler.getSchedule('mod-routine-work-block')!;
     expect(block.enabled).toBe(false);                        // ships disabled
     expect(block.trigger).toEqual({ kind: 'cron', expr: '0 12 * * 0-4', tz: 'Asia/Jerusalem' });

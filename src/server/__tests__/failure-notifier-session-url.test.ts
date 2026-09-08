@@ -124,26 +124,47 @@ describe('failure-notifier engine pin', () => {
     runCount: 7,
   }) as unknown as Schedule;
 
-  test('the shipped builtin pins the always-registered engine', () => {
+  test('the shipped builtin pins no engine — it follows agent config like every other schedule', () => {
+    // The pin was shipped on a premise since disproved by the box's own logs: nothing was ever
+    // misrouted, the deployment was simply globally on claude-code then and on agentx now. Hard-coding
+    // that stale state also made the alarm the second casualty of the real failure mode (an org cap
+    // on the pinned provider).
     const schedules = ensureBuiltinSchedules([]);
     const notifier = schedules.find((s) => s.id === FAILURE_NOTIFIER_SCHEDULE_ID)!;
-    expect((notifier.task as { engine?: string }).engine).toBe('claude-code');
+    const task = notifier.task as { prompt: string; engine?: string; model?: string };
+    expect(task.engine).toBeUndefined();
+    expect(task.model).toBeUndefined();
+    expect(task.prompt.startsWith('[')).toBe(false); // no synthesized runtime directive either
   });
 
-  test('reconcile heals a stored half-pin (model, no engine) — the live incident state', () => {
+  test("the reverted reconcile's own stamp is undone, not folded into a directive", () => {
+    // Exactly the state on the live box: this id, engine claude-code, no model — written by the
+    // reconcile clause being reverted, never by an operator. Folding it would perpetuate the pin.
+    const schedules = [stored({ kind: 'prompt', prompt: 'custom prompt', engine: 'claude-code' })];
+    backfillScope(schedules);
+    const task = schedules[0].task as { prompt: string; engine?: string };
+    expect(task.engine).toBeUndefined();
+    expect(task.prompt).toBe('custom prompt'); // no directive either — it follows agent config now
+  });
+
+  test('a stored legacy pin becomes the prompt directive — the selection survives, visibly', () => {
     const schedules = [stored({ kind: 'prompt', prompt: 'custom prompt', model: 'composer-2.5' })];
+    backfillScope(schedules);
     ensureBuiltinSchedules(schedules);
     const task = schedules[0].task as { prompt: string; engine?: string; model?: string };
-    expect(task.engine).toBe('claude-code');
-    expect(task.model).toBeUndefined(); // the foreign model went with the ambient engine it assumed
-    expect(task.prompt).toBe('custom prompt'); // an operator's prompt edit still survives
+    expect(task.model).toBeUndefined();
+    expect(task.engine).toBeUndefined();
+    // Byte-identical to what runner.ts used to synthesize onto the prompt — behaviour unchanged.
+    expect(task.prompt).toBe('[model:composer-2.5] custom prompt');
   });
 
-  test('an explicit stored engine is an operator choice and is left alone', () => {
+  test('an explicit stored pair folds into one directive group', () => {
     const schedules = [stored({ kind: 'prompt', prompt: 'p', engine: 'agentx', model: 'cursor/composer-2.5' })];
-    ensureBuiltinSchedules(schedules);
-    const task = schedules[0].task as { engine?: string; model?: string };
-    expect(task.engine).toBe('agentx');
-    expect(task.model).toBe('cursor/composer-2.5');
+    backfillScope(schedules);
+    const task = schedules[0].task as { prompt: string; engine?: string; model?: string };
+    expect(task.prompt).toBe('[engine:agentx,model:cursor/composer-2.5] p');
+    expect(task.engine).toBeUndefined();
+    expect(task.model).toBeUndefined();
   });
+
 });

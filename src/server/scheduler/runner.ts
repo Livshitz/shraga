@@ -9,6 +9,17 @@ import type { Schedule, ScheduleRunSummary } from './types.ts';
 import { updateRunLockPid, clearRunningMarker, loadSchedules } from './storage.ts';
 import { readOutcome, clearOutcome, pendingDeadline, outcomePrompt, MAX_PENDING_MS } from './outcome.ts';
 import { addUnread } from '../unread.ts';
+import { splitDirectiveGroups } from '../directives.ts';
+
+/** The prompt a `prompt` task runs, from wherever it is stored. Its leading `[…]` directive is the
+ *  task's runtime selection — there is no separate stored pin.
+ *  With a `promptFile`, `prompt` is a PREFIX rather than dead text: the directive has to live
+ *  somewhere the editor can rewrite, and that must not be someone's workspace file. */
+function taskPromptText(task: { prompt?: string; promptFile?: string }): string {
+  if (!task.promptFile) return task.prompt ?? '';
+  const body = readFileSync(resolvePromptFile(task.promptFile), 'utf-8').trim();
+  return task.prompt ? `${task.prompt.trim()} ${body}` : body;
+}
 
 export interface RunContext {
   sessionId: string;
@@ -194,13 +205,19 @@ export async function runSchedule(
 
   let prompt: string;
   if (resume) {
-    // The original task prompt is already in the conversation from the interrupted run.
+    // The original task prompt is already in the conversation from the interrupted run — but a
+    // resume prompt is a fresh "continue where you left off" string, not the saved original, so the
+    // task's own leading `[engine:…,model:…]` directive has to be carried onto it. Without that the
+    // resumed turn runs on the global default: a different engine, and a different vendor's bill.
     prompt = resume.prompt;
+    const groups = task.kind === 'prompt' ? splitDirectiveGroups(taskPromptText(task), { strict: true }).groups : [];
+    const raw = groups.filter(Boolean).join(',');
+    if (raw) prompt = `[${raw}] ${prompt}`;
   } else if (task.kind === 'bash') {
     const cmd = override || task.command;
     prompt = `Run exactly this bash command and report the result concisely:\n\n\`\`\`bash\n${cmd}\n\`\`\``;
   } else {
-    let base = task.promptFile ? readFileSync(resolvePromptFile(task.promptFile), 'utf-8').trim() : (task.prompt ?? '');
+    let base = taskPromptText(task);
     if (override) base = `${base}\n\n---\nAdditional instructions for this run:\n${override}`;
     if (eventCtx) base = `${base}\n\n---\n${formatEventBlock(eventCtx)}`;
     prompt = base;
@@ -215,15 +232,6 @@ export async function runSchedule(
     clearOutcome(sessionId);
     prompt = `${prompt}\n\n---\n${outcomePrompt(sessionId)}`;
   }
-
-  // task.engine/task.model ride the same prompt-directive channel users type by hand —
-  // parseDirectives strips them and resolves aliases. Prepending (vs new plumbing) also persists the
-  // choice into the saved prompt, so the session UI shows what the schedule actually requested.
-  // Applied on RESUME too: a resume's prompt is a fresh "continue where you left off" string, not the
-  // saved original, so skipping this here silently dropped the schedule's engine/model pin and let the
-  // resumed turn run on the global default — a different engine, and a different vendor's bill.
-  const pins = [task.engine && `engine:${task.engine}`, task.model && `model:${task.model}`].filter(Boolean);
-  if (pins.length) prompt = `[${pins.join(',')}] ${prompt}`;
 
   // Save the synthesized user prompt to the conversation (skip on resume — task prompt already persisted).
   if (!resume) {

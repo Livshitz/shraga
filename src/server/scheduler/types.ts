@@ -19,11 +19,16 @@ export interface EventThrottle {
   windowSec: number;
 }
 
-/** `engine`/`model` pin the runtime a run uses (e.g. engine 'agentx' + model
- *  'cursor/composer-2.5'); both ride the prompt-directive channel — see runner.ts. */
+/** The runtime a prompt run uses is NOT a field here: it is the leading `[engine:…,model:…]`
+ *  directive of the prompt itself (or of the promptFile's contents) — one source of truth, editable
+ *  and visible in the same place the prompt is. A separate stored pin shadowed it invisibly, which
+ *  is how nine live schedules ended up half-pinned (`model` set, `engine` not) with no UI to see it.
+ *  `bash` and `job` carry no selector: `bash` has no prompt to hold a directive (its prompt is a
+ *  fixed synthesized wrapper) and `job` never reaches an agent at all — both follow agent config.
+ *  Pin a shell command's runtime by writing a prompt task that runs it. */
 export type Task =
-  | { kind: 'prompt'; prompt?: string; promptFile?: string; model?: string; engine?: string }
-  | { kind: 'bash'; command: string; model?: string; engine?: string }
+  | { kind: 'prompt'; prompt?: string; promptFile?: string }
+  | { kind: 'bash'; command: string }
   | { kind: 'job'; command: string };
 
 /** Visibility: 'system' schedules + their sessions are shared with all whitelisted users; 'user' is private to createdBy. */
