@@ -3,6 +3,11 @@
  * One-shot backfill: resolve missing userName on DM slack sessions.
  * Reads slack-sessions.json to find DM channels, calls Slack API to get the user.
  * Run: bun run scripts/backfill-slack-usernames.ts
+ *
+ * RUN THIS WITH THE SERVER STOPPED. It rewrites sessions.json from a separate process, and the
+ * server keeps the index in memory with a 250 ms coalesced write-back (src/server/sessions.ts):
+ * a flush pending at the moment you write will overwrite this file wholesale and lose the
+ * backfill. The server logs that clobber, but it cannot prevent it without a lock.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dataPath } from '../src/server/paths.ts';

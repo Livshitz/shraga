@@ -8,30 +8,7 @@ import { useSlots } from '@/lib/slots';
 import { MachineStats } from './MachineStats';
 import type { UnreadSession } from '@/hooks/useUnread';
 import type { AgentSocket } from '@/lib/ws';
-
-interface Session {
-  sessionId: string;
-  title: string;
-  userEmail: string;
-  userName: string;
-  uid: string;
-  createdAt: number;
-  lastModified: number;
-  scope?: 'system' | 'user';
-  visibleTo?: string[];
-  slackContext?: { type: 'dm' | 'channel' | 'mention'; channelName?: string; userName?: string };
-  runStatus?: 'running' | 'idle';
-  lastStopReason?: 'max_turns_reached' | 'error' | 'aborted';
-  scheduleRunStatus?: 'running' | 'ok' | 'error' | 'aborted';
-}
-
-type ChatsFilter = 'mine' | 'all';
-
-function isMine(s: Session, uid: string, email: string): boolean {
-  if (s.uid === uid) return true;
-  if (s.visibleTo?.includes(email.toLowerCase())) return true;
-  return false;
-}
+import { useSessionList, type SessionRow as Session, type ChatsFilter } from '@/hooks/useSessionList';
 
 interface Props {
   getToken: () => Promise<string | null>;
@@ -41,8 +18,6 @@ interface Props {
   refreshKey?: number;
   workspaceRefreshKey?: number;
   onRefreshWorkspace: () => void;
-  userUid: string;
-  userEmail: string;
   unreads?: Record<string, UnreadSession>;
   busySessions?: Set<string>;
   socket?: AgentSocket | null;
@@ -80,16 +55,25 @@ function slackLabel(s: Session): string | null {
   return null;
 }
 
+/**
+ * Unread rows the current scope should show. Exported so the scoping is testable on its own: it is
+ * what the old client-side `scopeFiltered`/`visibleUnreadCount` did, moved onto the server-stamped
+ * `mine` flag because the trimmed list row no longer carries uid/visibleTo.
+ */
+export function scopeUnread(unreads: Record<string, unknown>, byId: Map<string, Session>, filter: ChatsFilter): Session[] {
+  return Object.keys(unreads)
+    .map((id) => byId.get(id))
+    .filter((s): s is Session => !!s && (filter === 'all' || s.mine !== false));
+}
+
 const FILTER_KEY = 'chats-filter';
 const UNREAD_FILTER_KEY = 'chats-unread-filter';
 
-export function Sidebar({ getToken, activeSessionId, onSelect, onNew, refreshKey, workspaceRefreshKey, onRefreshWorkspace, userUid, userEmail, unreads = {}, busySessions = new Set(), socket }: Props) {
+export function Sidebar({ getToken, activeSessionId, onSelect, onNew, refreshKey, workspaceRefreshKey, onRefreshWorkspace, unreads = {}, busySessions = new Set(), socket }: Props) {
   const slots = useSlots();
-  const [sessions, setSessions] = useState<Session[]>([]);
   const [filter, setFilter] = useState<ChatsFilter>(() => (localStorage.getItem(FILTER_KEY) as ChatsFilter) || 'mine');
   const [unreadOnly, setUnreadOnly] = useState(() => localStorage.getItem(UNREAD_FILTER_KEY) === 'true');
   const [version, setVersion] = useState<string>('');
-  const acRef = useRef<AbortController | null>(null);
   const activeRef = useRef<HTMLButtonElement | null>(null);
 
   function changeFilter(f: ChatsFilter) {
@@ -103,46 +87,77 @@ export function Sidebar({ getToken, activeSessionId, onSelect, onNew, refreshKey
     localStorage.setItem(UNREAD_FILTER_KEY, String(next));
   }
 
-  const scopeFiltered = useMemo(() =>
-    sessions.filter((s) => filter === 'all' || isMine(s, userUid, userEmail)),
-    [sessions, filter, userUid, userEmail],
+  // ── Data ───────────────────────────────────────────────────────────────────
+  const hydrateIds = useMemo(
+    () => [activeSessionId, ...Object.keys(unreads)].filter((id): id is string => !!id),
+    [activeSessionId, unreads],
   );
+  const { sessions, cursor, loading, byId, loadMore } = useSessionList({ getToken, filter, refreshKey, hydrateIds });
 
-  const visibleUnreadCount = useMemo(() =>
-    scopeFiltered.filter((s) => unreads[s.sessionId]).length,
-    [scopeFiltered, unreads],
-  );
+  // Both the unread VIEW and the unread DOT are scoped by `mine`, which the server stamps on every
+  // row (the trimmed list item no longer carries uid/visibleTo, so the client cannot re-derive it).
+  // Without this an owner replying in someone else's session lights the dot and lists that row
+  // under "mine" — the old client-side scopeFiltered/visibleUnreadCount did scope it.
+  // `?ids=` hydration stays UNSCOPED on purpose: the active row must render whatever the filter is.
+  const unreadRows = useMemo(() => scopeUnread(unreads, byId, filter), [unreads, byId, filter]);
+  const unreadCount = unreadRows.length;
 
-  const filtered = useMemo(() =>
-    unreadOnly ? scopeFiltered.filter((s) => unreads[s.sessionId]) : scopeFiltered,
-    [scopeFiltered, unreadOnly, unreads],
-  );
+  const filtered = useMemo(() => {
+    if (!unreadOnly) return sessions;
+    return [...unreadRows].sort((a, b) => b.lastModified - a.lastModified);
+  }, [unreadOnly, unreadRows, sessions]);
 
-  useEffect(() => {
-    getToken().then(t => t ? fetch('/api/version', { headers: { Authorization: `Bearer ${t}` } }) : null).then(r => r?.json()).then(d => d && setVersion(d.version)).catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    acRef.current?.abort();
-    const ac = new AbortController();
-    acRef.current = ac;
-
-    getToken().then((token) => {
-      if (!token || ac.signal.aborted) return;
-      fetch('/api/sessions', { signal: ac.signal, headers: { Authorization: `Bearer ${token}` } })
-        .then((r) => (r.ok ? r.json() : []))
-        .then((data) => { if (Array.isArray(data)) setSessions(data); })
-        .catch(() => {});
-    });
-
-    return () => ac.abort();
-  }, [getToken, refreshKey]);
+  // The open conversation is ALWAYS rendered: a deep link, an unread toast or any older thread lands
+  // outside the window, and a list without the active row highlights nothing and never scrolls to it.
+  const activeRow = activeSessionId && !filtered.some((s) => s.sessionId === activeSessionId)
+    ? byId.get(activeSessionId)
+    : undefined;
 
   useEffect(() => {
     if (activeRef.current) {
       activeRef.current.scrollIntoView({ block: 'nearest' });
     }
-  }, [activeSessionId]);
+  }, [activeSessionId, filtered, activeRow]);
+
+  useEffect(() => {
+    getToken().then(t => t ? fetch('/api/version', { headers: { Authorization: `Bearer ${t}` } }) : null).then(r => r?.json()).then(d => d && setVersion(d.version)).catch(() => {});
+  }, []);
+
+  function renderRow(s: Session) {
+    const unread = unreads[s.sessionId];
+    const isBusy = busySessions.has(s.sessionId) || s.runStatus === 'running' || s.scheduleRunStatus === 'running';
+    const isError = !isBusy && (!!s.lastStopReason || s.scheduleRunStatus === 'error' || s.scheduleRunStatus === 'aborted');
+    const borderColor = isBusy ? 'border-amber-500' : isError ? 'border-red-500' : unread ? 'border-blue-500' : '';
+    const hasBorder = !!(isBusy || isError || unread);
+    return (
+      <button
+        key={s.sessionId}
+        ref={s.sessionId === activeSessionId ? activeRef : undefined}
+        onClick={() => onSelect(s.sessionId, s.title)}
+        className={cn(
+          'w-full text-left px-3 py-2.5 text-sm transition-colors hover:bg-accent/50 group',
+          hasBorder ? `rounded-r-lg border-l-[3px] ${borderColor}` : 'rounded-lg',
+          activeSessionId === s.sessionId && 'bg-accent',
+        )}
+      >
+        <div className="flex items-start gap-2">
+          {slackIcon(s)}
+          <div className="min-w-0 flex-1">
+            <span className={cn('block truncate text-sm leading-snug', unread && 'font-semibold')}>
+              {s.title || 'New session'}
+            </span>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <span className="text-[10px] text-muted-foreground font-medium">
+                {slackLabel(s) || s.userName}
+              </span>
+              <span className="text-[10px] text-muted-foreground/50">·</span>
+              <span className="text-[10px] text-muted-foreground">{formatTime(s.lastModified)}</span>
+            </div>
+          </div>
+        </div>
+      </button>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full bg-muted/30">
@@ -173,53 +188,29 @@ export function Sidebar({ getToken, activeSessionId, onSelect, onNew, refreshKey
               unreadOnly ? 'text-blue-600 dark:text-blue-400 font-medium' : 'text-muted-foreground/60 hover:text-muted-foreground',
             )}
           >
-            unread{visibleUnreadCount > 0 && <span className="inline-block w-1.5 h-1.5 ml-1 rounded-full bg-blue-500 align-middle" />}
+            unread{unreadCount > 0 && <span className="inline-block w-1.5 h-1.5 ml-1 rounded-full bg-blue-500 align-middle" />}
           </button>
         </div>
       </div>
 
       <ScrollArea className="flex-1">
         <div className="px-2 pb-2 space-y-0.5">
-          {filtered.length === 0 && (
+          {filtered.length === 0 && !activeRow && (
             <p className="text-xs text-muted-foreground px-3 py-6 text-center">
-              {unreadOnly ? 'No unread conversations' : sessions.length === 0 ? 'No conversations yet' : 'No conversations match this filter'}
+              {loading ? 'Loading…' : unreadOnly ? 'No unread conversations' : 'No conversations yet'}
             </p>
           )}
-          {filtered.map((s) => {
-            const unread = unreads[s.sessionId];
-            const isBusy = busySessions.has(s.sessionId) || s.runStatus === 'running' || s.scheduleRunStatus === 'running';
-            const isError = !isBusy && (!!s.lastStopReason || s.scheduleRunStatus === 'error' || s.scheduleRunStatus === 'aborted');
-            const borderColor = isBusy ? 'border-amber-500' : isError ? 'border-red-500' : unread ? 'border-blue-500' : '';
-            const hasBorder = !!(isBusy || isError || unread);
-            return (
-              <button
-                key={s.sessionId}
-                ref={s.sessionId === activeSessionId ? activeRef : undefined}
-                onClick={() => onSelect(s.sessionId, s.title)}
-                className={cn(
-                  'w-full text-left px-3 py-2.5 text-sm transition-colors hover:bg-accent/50 group',
-                  hasBorder ? `rounded-r-lg border-l-[3px] ${borderColor}` : 'rounded-lg',
-                  activeSessionId === s.sessionId && 'bg-accent',
-                )}
-              >
-                <div className="flex items-start gap-2">
-                  {slackIcon(s)}
-                  <div className="min-w-0 flex-1">
-                    <span className={cn('block truncate text-sm leading-snug', unread && 'font-semibold')}>
-                      {s.title || 'New session'}
-                    </span>
-                    <div className="flex items-center gap-1.5 mt-0.5">
-                      <span className="text-[10px] text-muted-foreground font-medium">
-                        {slackLabel(s) || s.userName}
-                      </span>
-                      <span className="text-[10px] text-muted-foreground/50">·</span>
-                      <span className="text-[10px] text-muted-foreground">{formatTime(s.lastModified)}</span>
-                    </div>
-                  </div>
-                </div>
-              </button>
-            );
-          })}
+          {activeRow && renderRow(activeRow)}
+          {filtered.map(renderRow)}
+          {!unreadOnly && cursor && (
+            <button
+              onClick={loadMore}
+              disabled={loading}
+              className="w-full text-[11px] text-muted-foreground hover:text-foreground py-2 rounded-lg hover:bg-accent/50 transition-colors disabled:opacity-50"
+            >
+              {loading ? 'Loading…' : 'Show older'}
+            </button>
+          )}
         </div>
       </ScrollArea>
 

@@ -358,8 +358,6 @@ function AppInner() {
               refreshKey={sidebarRefresh}
               workspaceRefreshKey={workspaceRefreshKey}
               onRefreshWorkspace={refreshWorkspace}
-              userUid={user.uid}
-              userEmail={user.email || ''}
               unreads={unreads}
               busySessions={busySessions}
               socket={socket}

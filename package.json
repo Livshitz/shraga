@@ -82,6 +82,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@happy-dom/global-registrator": "^20.14.0",
     "@types/bun": "latest",
     "@types/express": "^5.0.0",
     "@types/react": "^19.0.0",

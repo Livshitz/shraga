@@ -26,7 +26,7 @@ import { mountFeatures, registerFeature, resumeFeatureSession, collectFeatureFla
 import { registerSpaCatchAll } from './spa-catchall.ts';
 import { slackFeature } from './slack/feature.ts';
 import { dataPath } from './paths.ts';
-import { getAllSessions, getSession, getSessionHistory, upsertSession, appendMessage, saveConversation, loadConversation, setSessionDirectives, getAutoApprove, setAutoApprove, getSessionsByScheduleId, getSessionsVisibleTo, isSessionVisibleTo, setRunStatus, incrementRetryCount, getRunningSessions, getActiveLockCount, updateScheduledSessionStatus, setShuttingDown, backfillSessionVisibility, writePartial, readPartial, clearPartial, registerLivePartial, unregisterLivePartial, readLivePartial, acquireSessionLock, releaseSessionLock, replaceSessionLock, isSessionLocked, getSessionAbortController, forkSession, generateSessionTitle, type ConvBlock, type ConvMessage, type SessionMeta } from './sessions.ts';
+import { getAllSessions, getSession, getSessionHistory, upsertSession, appendMessage, saveConversation, loadConversation, setSessionDirectives, getAutoApprove, setAutoApprove, getSessionsByScheduleId, getSessionsVisibleTo, isSessionVisibleTo, setRunStatus, incrementRetryCount, getRunningSessions, getActiveLockCount, updateScheduledSessionStatus, setShuttingDown, backfillSessionVisibility, writePartial, readPartial, clearPartial, registerLivePartial, unregisterLivePartial, readLivePartial, acquireSessionLock, releaseSessionLock, replaceSessionLock, isSessionLocked, getSessionAbortController, forkSession, generateSessionTitle, toListItem, pageSessions, isOwnSession, type ConvBlock, type ConvMessage, type SessionMeta } from './sessions.ts';
 import { setBroadcaster } from './session-bus.ts';
 import * as scheduler from './scheduler/index.ts';
 import { initPolls } from './polls.ts';
@@ -249,10 +249,45 @@ app.get('/api/claude-usage', requireAuth, async (_req, res) => {
   res.json(usage);
 });
 
+/**
+ * Conversation list — PAGED and TRIMMED.
+ *
+ * It used to serialize the entire session index: 6.76 MB and ~226 ms of blocking work per call on
+ * the Circles box, most of it `triggeredSkills` + `seenSlackTs`, which are server bookkeeping the
+ * browser never reads. The full record is still one `/api/sessions/:id/meta` away.
+ *
+ * Two modes, both returning `{ sessions, nextCursor }`:
+ *   ?filter=mine|all&limit=&before=<cursor>  — a page of the list, newest first.
+ *   ?ids=a,b,c                               — exactly these sessions, at any age.
+ *
+ * `ids` is what keeps the client's filters honest instead of "searches the first page only": the
+ * unread map arrives over the socket in full (per-user, `unread_sync`), so the Sidebar knows every
+ * unread id and hydrates the ones outside the loaded window by id. The active session is hydrated
+ * the same way. `mine` cannot be done that way — it is a predicate over the whole 12k index — so
+ * it is a server-side filter applied BEFORE paging.
+ */
+const SESSIONS_PAGE_MAX = 200;
 app.get('/api/sessions', requireAuth, async (req, res) => {
   const user = (req as any).user;
   // Exclude PTY-only sessions — a standalone/terminal-first shell is not a conversation.
-  res.json(getSessionsVisibleTo(user.uid, user.isOwner, user.email).filter((s) => s.kind !== 'terminal'));
+  const all = getSessionsVisibleTo(user.uid, user.isOwner, user.email).filter((s) => s.kind !== 'terminal');
+
+  const email = String(user.email ?? '').toLowerCase();
+  const mine = (s: SessionMeta) => isOwnSession(s, user.uid, email);
+
+  const idsParam = String(req.query.ids ?? '').trim();
+  if (idsParam) {
+    const want = new Set(idsParam.split(',').map((s) => s.trim()).filter(Boolean).slice(0, SESSIONS_PAGE_MAX));
+    // Deliberately NOT narrowed to `mine`: this is how the ACTIVE conversation gets a row, and the
+    // open session must render under either filter. Each row carries `mine` so the client can scope
+    // the parts that should be scoped (the unread view and its dot) without losing the active one.
+    return void res.json({ sessions: all.filter((s) => want.has(s.sessionId)).map((s) => toListItem(s, mine(s))), nextCursor: null });
+  }
+
+  const scoped = String(req.query.filter ?? 'all') === 'mine' ? all.filter(mine) : all;
+
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), SESSIONS_PAGE_MAX);
+  res.json(pageSessions(scoped, { limit, before: String(req.query.before ?? '') || undefined, mine }));
 });
 
 app.get('/api/sessions/:id/meta', requireAuth, async (req, res) => {

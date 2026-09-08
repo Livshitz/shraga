@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, renameSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { homedir } from 'node:os';
@@ -44,18 +44,146 @@ export interface SessionMeta {
   forkedFrom?: string;
 }
 
+// ── Index cache ──────────────────────────────────────────────────────────────
+// The index is ~9 MB / 12.8k records on the Circles box. Every mutation used to readFileSync +
+// JSON.parse the whole file and then stringify + write it back, SYNCHRONOUSLY (~260 ms per
+// mutation on a 2-vCPU host, and a turn does several), so the event loop stalled on bookkeeping.
+//
+// Single-writer, deliberately: the HTTP server, its scheduler and the MCP surface all run in ONE
+// bun process (`src/server/index.ts` → boot.ts, which mounts the MCP in-process; the only spawned
+// children are vendor MCP sidecars and background-job shells, none of which import this module).
+// data-sync cannot touch it either — `sessions.json` is in the data repo's canonical .gitignore,
+// so its pull/reset/stash never sees the file. The one out-of-band writer is the manual
+// `defaults/scripts/backfill-slack-usernames.ts`, and this cache does NOT make that safe:
+//
+//   The mtime guard below only runs when the cache is CLEAN. `loadIndex()` short-circuits on
+//   `if (dirty) return cache` first, so while a flush is pending the server neither sees an
+//   external edit nor survives it — the next flushIndex() writes the whole in-memory cache over
+//   the file, and the backfill's work is gone. The guard buys exactly one thing over the old
+//   read-every-time behaviour: an external edit made while nothing is pending IS picked up.
+//   Fixing the pending-flush case needs a merge or a lock, i.e. a multi-process protocol, which
+//   this file deliberately does not have. flushIndex() detects the clobber and logs it loudly
+//   instead of losing it silently — run the backfill with the server stopped.
+let cache: SessionMeta[] | null = null;
+let cacheMtimeMs = -1;
+let dirty = false;
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Coalescing window for the 9 MB write.
+ *
+ * Durability trade, stated explicitly: a crash can lose at most this much session BOOKKEEPING —
+ * runStatus, lastModified, seenSlackTs, triggeredSkills. Conversation content is not in this file
+ * (it lives in `data/conversations/`), so no user-visible message can be lost here. Every exit
+ * path we control flushes synchronously (`process.on('exit')` — reached by the SIGTERM/SIGINT
+ * graceful shutdown, which ends in process.exit — plus setShuttingDown() at the top of the drain),
+ * so the exposure is a SIGKILL or power loss inside a 250 ms window. Taken over the alternative:
+ * a ~260 ms sync stall on every single mutation.
+ */
+const FLUSH_DEBOUNCE_MS = 250;
+
 function loadIndex(): SessionMeta[] {
-  if (!existsSync(SESSIONS_PATH)) return [];
-  try {
-    return JSON.parse(readFileSync(SESSIONS_PATH, 'utf-8'));
-  } catch {
-    return [];
+  if (cache) {
+    if (dirty) return cache; // memory is ahead of disk — we are the authority
+    try {
+      if (statSync(SESSIONS_PATH).mtimeMs === cacheMtimeMs) return cache;
+    } catch {
+      return cache; // file vanished mid-run; keep serving what we have
+    }
   }
+  if (!existsSync(SESSIONS_PATH)) return (cache = []);
+  try {
+    cache = JSON.parse(readFileSync(SESSIONS_PATH, 'utf-8'));
+    cacheMtimeMs = statSync(SESSIONS_PATH).mtimeMs;
+  } catch (err) {
+    console.error('[sessions] index unreadable, serving an empty list:', (err as Error).message);
+    cache = [];
+  }
+  return cache!;
 }
 
 function saveIndex(sessions: SessionMeta[]): void {
-  mkdirSync(DATA_DIR, { recursive: true });
-  writeFileSync(SESSIONS_PATH, JSON.stringify(sessions, null, 2));
+  cache = sessions;
+  dirty = true;
+  if (!flushTimer) scheduleFlush();
+}
+
+function scheduleFlush(): void {
+  const t = setTimeout(flushIndex, FLUSH_DEBOUNCE_MS);
+  (t as { unref?: () => void }).unref?.(); // never hold the process open for bookkeeping
+  flushTimer = t;
+}
+
+/**
+ * Write the index to disk now. Atomic (tmp + rename): the old truncate-in-place write left a
+ * half-written 9 MB file if it was interrupted, and loadIndex's catch turned that into an EMPTY
+ * session list — a silent total loss of the index.
+ */
+export function flushIndex(): void {
+  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+  if (!dirty || !cache) return;
+  dirty = false;
+  const tmp = `${SESSIONS_PATH}.tmp`;
+  try {
+    // Someone wrote the file behind us while this flush was pending (see the cache note above).
+    // We cannot merge without a multi-process protocol, so at least never lose it silently.
+    try {
+      const onDisk = statSync(SESSIONS_PATH).mtimeMs;
+      if (cacheMtimeMs >= 0 && onDisk !== cacheMtimeMs) {
+        console.error(`[sessions] index changed on disk (mtime ${onDisk} != ${cacheMtimeMs}) while a flush was pending — overwriting that external edit`);
+      }
+    } catch { /* file absent: nothing to clobber */ }
+    mkdirSync(DATA_DIR, { recursive: true });
+    writeFileSync(tmp, JSON.stringify(cache)); // no pretty-print: 9 MB nobody reads by hand
+    renameSync(tmp, SESSIONS_PATH);
+    cacheMtimeMs = statSync(SESSIONS_PATH).mtimeMs;
+  } catch (err) {
+    console.error('[sessions] index flush failed, retrying on the next tick:', (err as Error).message);
+    dirty = true;
+    scheduleFlush();
+  }
+}
+
+// Covers the graceful-shutdown paths (SIGTERM/SIGINT end in process.exit) and any normal exit,
+// without adding signal listeners that would change the process's default signal semantics.
+process.on('exit', () => flushIndex());
+
+/**
+ * The subset of SessionMeta the conversation list actually renders. `triggeredSkills` (381 KB) and
+ * `seenSlackTs` (174 KB) are server bookkeeping and must never be shipped to a browser; the full
+ * record is still available per-session from /api/sessions/:id/meta.
+ */
+export interface SessionListItem {
+  sessionId: string;
+  title: string;
+  userName: string;
+  lastModified: number;
+  slackContext?: SessionMeta['slackContext'];
+  runStatus?: SessionMeta['runStatus'];
+  lastStopReason?: SessionMeta['lastStopReason'];
+  scheduleRunStatus?: SessionMeta['scheduleRunStatus'];
+  /** Owned by (or explicitly shared with) the caller. Stamped per-request: the trimmed row drops
+   *  `uid`/`visibleTo`, so without it the client cannot scope anything by "mine". */
+  mine?: boolean;
+}
+
+/** The `mine` predicate, shared by the list filter and the per-row stamp so they cannot drift. */
+export function isOwnSession(s: SessionMeta, uid: string, email: string): boolean {
+  return s.uid === uid || !!s.visibleTo?.includes(email);
+}
+
+export function toListItem(s: SessionMeta, mine?: boolean): SessionListItem {
+  return {
+    sessionId: s.sessionId,
+    title: s.title,
+    userName: s.userName,
+    lastModified: s.lastModified,
+    ...(s.slackContext ? { slackContext: s.slackContext } : {}),
+    ...(s.runStatus ? { runStatus: s.runStatus } : {}),
+    ...(s.lastStopReason ? { lastStopReason: s.lastStopReason } : {}),
+    ...(s.scheduleRunStatus ? { scheduleRunStatus: s.scheduleRunStatus } : {}),
+    ...(mine === undefined ? {} : { mine }),
+  };
 }
 
 function summarize(prompt: string): string {
@@ -126,8 +254,33 @@ export function addTriggeredSkills(sessionId: string, names: string[]): void {
   saveIndex(sessions);
 }
 
+/**
+ * Stable pagination cursor: lastModified alone is not unique across 12k sessions, and a paging
+ * cursor that only carries the timestamp drops or repeats every record in a tie.
+ */
+export function sessionCursor(s: SessionMeta | SessionListItem): string {
+  return `${String(s.lastModified).padStart(16, '0')}.${s.sessionId}`;
+}
+
+/**
+ * One page of an already-sorted (getAllSessions order) list, newest first. `before` is the cursor
+ * from the previous page's `nextCursor`; it is composite (lastModified + sessionId) because
+ * lastModified alone is not unique and a timestamp-only cursor drops or repeats records on a tie.
+ */
+export function pageSessions(list: SessionMeta[], opts: { limit: number; before?: string; mine?: (s: SessionMeta) => boolean }): { sessions: SessionListItem[]; nextCursor: string | null } {
+  const rest = opts.before ? list.filter((s) => sessionCursor(s) < opts.before!) : list;
+  const page = rest.slice(0, opts.limit);
+  return {
+    sessions: page.map((s) => toListItem(s, opts.mine?.(s))),
+    nextCursor: rest.length > page.length ? sessionCursor(page[page.length - 1]) : null,
+  };
+}
+
 export function getAllSessions(): SessionMeta[] {
-  return loadIndex().sort((a, b) => b.lastModified - a.lastModified);
+  // Copy before sorting: loadIndex() now returns the live cache array, and an in-place sort here
+  // would silently reorder the store for every other caller. Sorted by the same composite key the
+  // pagination cursor uses, so `cursor < before` is exactly consistent with this order.
+  return [...loadIndex()].sort((a, b) => b.lastModified - a.lastModified || (a.sessionId < b.sessionId ? 1 : a.sessionId > b.sessionId ? -1 : 0));
 }
 
 export function isSessionVisibleTo(s: SessionMeta, uid: string, isOwner = false, email?: string): boolean {
@@ -184,7 +337,11 @@ export function setSessionDirectives(sessionId: string, directives: NonNullable<
   const sessions = loadIndex();
   const s = sessions.find((s) => s.sessionId === sessionId);
   if (s) {
-    s.directives = directives;
+    // COPY, don't alias. streamChat() stores its working `directives` object here and then keeps
+    // mutating it for the rest of the turn (the per-skill turn budget is gap-filled afterwards).
+    // While the index was re-parsed from disk on every read that leak was invisible; against an
+    // in-memory store it would silently PIN a skill's 250-turn budget onto the session forever.
+    s.directives = { ...directives };
     saveIndex(sessions);
   }
 }
@@ -269,7 +426,7 @@ export function setAutoApprove(uid: string, value: boolean): void {
 }
 
 let _shuttingDown = false;
-export function setShuttingDown(): void { _shuttingDown = true; }
+export function setShuttingDown(): void { _shuttingDown = true; flushIndex(); }
 
 export function setRunStatus(sessionId: string, status: 'running' | 'idle', origin?: 'web' | 'slack' | 'scheduler' | 'gmail', stopReason?: SessionMeta['lastStopReason']): void {
   if (_shuttingDown && status === 'idle') return;

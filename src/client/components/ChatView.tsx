@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -84,6 +84,9 @@ interface Props {
 
 const SHOW_DETAILS_KEY = 'shraga:showDetails';
 
+/** Messages mounted by default; older ones stay out of the DOM behind a "show earlier" button. */
+const VISIBLE_MESSAGES = 150;
+
 export function ChatView({ messages, busy, connectionStatus, onPermissionRespond, onQuestionRespond, onReplay, onEdit, onFork, multiParticipant, statusItems }: Props) {
   const slots = useSlots();
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -92,17 +95,46 @@ export function ChatView({ messages, busy, connectionStatus, onPermissionRespond
   const [showDetails, setShowDetails] = useState(() => localStorage.getItem(SHOW_DETAILS_KEY) === 'true');
   const [lightbox, setLightbox] = useState<string | null>(null);
 
+  // Callers pass fresh closures every render (`onFork={(i) => …}`, handlers bound to a new `conv`
+  // object). Route them through a ref so MessageRow's props stay reference-stable.
+  const cbs = useRef({ onPermissionRespond, onQuestionRespond, onReplay, onEdit, onFork });
+  cbs.current = { onPermissionRespond, onQuestionRespond, onReplay, onEdit, onFork };
+  const permissionRespond = useCallback((id: string, allow: boolean, allowAll?: boolean) => cbs.current.onPermissionRespond?.(id, allow, allowAll), []);
+  const questionRespond = useCallback((id: string, answers: QuestionAnswers) => cbs.current.onQuestionRespond?.(id, answers), []);
+  const replay = useCallback((id: string, text: string, att?: Attachment[]) => cbs.current.onReplay?.(id, text, att), []);
+  const edit = useCallback((id: string, text: string, att?: Attachment[]) => cbs.current.onEdit?.(id, text, att), []);
+  const fork = useCallback((idx: number) => cbs.current.onFork?.(idx), []);
+
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
     isNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   };
 
-  const screenMap = useMemo(() => buildScreenMap(messages), [messages]);
+  // Built INCREMENTALLY into a stable Map: a full rebuild JSON.parsed every tool_result in the
+  // thread on every streamed token. Identity never changes, so it can't break MessageRow's memo —
+  // but that cuts both ways: a row whose tool_use renders a screen filled in by a LATER tool_result
+  // would stay memo-blocked on stale content forever. `screenVersion` bumps only when the map
+  // actually changes, and is passed down purely so memo sees a changed prop then (and only then).
+  const screenMapRef = useRef<Map<string, string[]>>(new Map());
+  const scannedBlocks = useRef<WeakSet<object>>(new WeakSet());
+  const screenVersionRef = useRef(0);
+  const screenVersion = useMemo(() => {
+    if (updateScreenMap(screenMapRef.current, scannedBlocks.current, messages)) screenVersionRef.current++;
+    return screenVersionRef.current;
+  }, [messages]);
+  const screenMap = screenMapRef.current;
+
+  // Only the last slice is mounted — an agent thread runs to thousands of blocks and the DOM
+  // (not React) is what goes sluggish. `showAll` mounts the rest on demand.
+  const [showAll, setShowAll] = useState(false);
+  const hiddenCount = showAll ? 0 : Math.max(0, messages.length - VISIBLE_MESSAGES);
+  const visibleMessages = hiddenCount > 0 ? messages.slice(hiddenCount) : messages;
 
   useEffect(() => {
     if (isNearBottom.current) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      // Smooth scrolling on every streamed token is a per-frame layout cost; snap while busy.
+      bottomRef.current?.scrollIntoView({ behavior: busy ? 'auto' : 'smooth' });
     }
   }, [messages, busy]);
 
@@ -138,9 +170,19 @@ export function ChatView({ messages, busy, connectionStatus, onPermissionRespond
             Details
           </button>
         </div>
-        {messages.map((msg, idx) => (
-          <MessageRow key={msg.id} message={msg} messageIndex={idx} isLast={idx === messages.length - 1} showDetails={showDetails} onPermissionRespond={onPermissionRespond} onQuestionRespond={onQuestionRespond} onReplay={onReplay} onEdit={onEdit} onFork={onFork} onImageClick={setLightbox} busy={busy && idx === messages.length - 1} screenMap={screenMap} multiParticipant={multiParticipant} />
-        ))}
+        {hiddenCount > 0 && (
+          <div className="flex justify-center pb-2">
+            <button onClick={() => setShowAll(true)} className="text-xs px-3 py-1 rounded-full border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors">
+              Show {hiddenCount} earlier message{hiddenCount === 1 ? '' : 's'}
+            </button>
+          </div>
+        )}
+        {visibleMessages.map((msg, i) => {
+          const idx = hiddenCount + i;
+          return (
+            <MessageRow key={msg.id} message={msg} messageIndex={idx} isLast={idx === messages.length - 1} showDetails={showDetails} onPermissionRespond={permissionRespond} onQuestionRespond={questionRespond} onReplay={replay} onEdit={edit} onFork={fork} onImageClick={setLightbox} busy={busy && idx === messages.length - 1} screenMap={screenMap} screenVersion={screenVersion} multiParticipant={multiParticipant} />
+          );
+        })}
 
         {busy && messages[messages.length - 1]?.role !== 'assistant' && (
           <div className="flex gap-3 py-4">
@@ -188,7 +230,7 @@ export function ChatView({ messages, busy, connectionStatus, onPermissionRespond
   );
 }
 
-function MessageRow({
+const MessageRow = memo(function MessageRow({
   message,
   messageIndex,
   isLast,
@@ -215,6 +257,8 @@ function MessageRow({
   onImageClick?: (src: string) => void;
   busy?: boolean;
   screenMap?: Map<string, string[]>;
+  /** Not read here — declared so memo() re-renders the row when screenMap's CONTENTS change. */
+  screenVersion?: number;
   multiParticipant?: boolean;
 }) {
   const compactBlock = message.blocks.find((b) => b.type === 'compact_marker');
@@ -359,7 +403,7 @@ function MessageRow({
       </div>
     </div>
   );
-}
+});
 
 function CompactMarkerDivider({ summary, compactedCount }: { summary: string; compactedCount: number }) {
   const [expanded, setExpanded] = useState(false);
@@ -507,20 +551,30 @@ function ThinkingBlock({ text }: { text: string }) {
   );
 }
 
-function buildScreenMap(messages: ChatMessage[]): Map<string, string[]> {
-  const map = new Map<string, string[]>();
+/**
+ * Fold any new pty-screen tool_results into `map` in place; returns true if anything was written.
+ * Each block is parsed at most once
+ * (tracked by object identity) and only when its text can plausibly hold a screen — a blind
+ * JSON.parse of every result in the thread, on every token, was the streaming hot spot.
+ */
+function updateScreenMap(map: Map<string, string[]>, scanned: WeakSet<object>, messages: ChatMessage[]): boolean {
+  let changed = false;
   for (const msg of messages) {
     for (const block of msg.blocks) {
       if (block.type !== 'tool_result' || !block.output) continue;
+      if (scanned.has(block)) continue;
+      scanned.add(block);
+      if (!block.output.includes('"screen"')) continue;
       try {
         const parsed = JSON.parse(block.output);
         if (typeof parsed?.sessionId === 'string' && Array.isArray(parsed?.screen)) {
           map.set(parsed.sessionId, parsed.screen);
+          changed = true;
         }
       } catch {}
     }
   }
-  return map;
+  return changed;
 }
 
 function parseAnswersFromResult(result: string): Record<string, string> {
@@ -625,15 +679,21 @@ function stripLineNumbers(text: string): string {
 
 function ToolResultBlock({ output }: { output: string }) {
   const [expanded, setExpanded] = useState(false);
-  const cleaned = output.trim().replace(/\[Image #\d+\]\s*/g, '').trim();
-  const trimmed = stripLineNumbers(cleaned);
+  // Regex + split + JSON.parse over the FULL output; keyed to the text so a re-render is free.
+  const { trimmed, isError, chartData, isLong, preview } = useMemo(() => {
+    const cleaned = output.trim().replace(/\[Image #\d+\]\s*/g, '').trim();
+    const t = stripLineNumbers(cleaned);
+    const err = /^(Error|ERROR)|"status"\s*:\s*[45]\d\d|ENOENT|EACCES|Permission denied|command not found|No such file/i.test(t);
+    return {
+      trimmed: t,
+      isError: err,
+      chartData: err ? null : tryParseChartData(t),
+      isLong: t.length > 200,
+      preview: t.slice(0, 120).replace(/\n/g, ' '),
+    };
+  }, [output]);
 
   if (!trimmed) return null;
-
-  const isError = /^(Error|ERROR)|"status"\s*:\s*[45]\d\d|ENOENT|EACCES|Permission denied|command not found|No such file/i.test(trimmed);
-  const chartData = !isError ? tryParseChartData(trimmed) : null;
-  const isLong = trimmed.length > 200;
-  const preview = trimmed.slice(0, 120).replace(/\n/g, ' ');
 
   const Icon = isError ? XCircle : Check;
   const borderCls = isError ? 'border-red-200 dark:border-red-900' : 'border-green-200 dark:border-green-900';
