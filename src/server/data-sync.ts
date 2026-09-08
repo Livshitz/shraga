@@ -224,14 +224,20 @@ export class DataSync {
   private runIntegrityAudit(): void {
     try {
       const { audit } = require('./integrity-audit.ts');
-      const issues = audit('HEAD~1') as { kind: string; file: string; detail: string }[];
+      // Churn paths are exempt for the same reason the shrink guard exempts them: a per-run worker
+       // log is written by one leg, rewritten by the next, and truncated whenever a run is killed
+      // mid-write. "invalid-json" on one of those is the normal end of an interrupted run, not
+      // corruption of shared data — and since the file stays in HEAD, the audit re-reported it on
+      // every sync. The audit exists to catch contacts.json being gutted.
+      const issues = (audit('HEAD~1') as { kind: string; file: string; detail: string }[])
+        .filter(i => !isChurnPath(i.file));
       if (issues.length) {
         console.warn(`${TAG} ⚠️ DATA INTEGRITY: ${issues.length} issue(s) detected after sync:`);
         for (const { kind, file, detail } of issues) {
           console.warn(`${TAG}   ${kind} ${file} — ${detail}`);
         }
         const list = issues.slice(0, 20).map(i => `• [${i.kind}] ${i.file} — ${i.detail}`).join('\n');
-        this.notifyOwners(
+        this.alertOnce('integrity', issues.map(i => `${i.kind} ${i.file}`).join('\n'),
           `⚠️ Data integrity: ${issues.length} issue(s) detected after sync\n\n${list}` +
           (issues.length > 20 ? `\n…and ${issues.length - 20} more` : '') +
           `\n\nRecover: \`cd data && git revert HEAD\``,

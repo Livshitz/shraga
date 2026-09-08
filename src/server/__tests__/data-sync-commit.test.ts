@@ -162,6 +162,12 @@ describe('isChurnPath', () => {
     expect(isChurnPath('workspace/social/workers/recover-scout-payload.py.bak-softgate-20260907092016')).toBe(true);
   });
 
+  test('a per-run worker log flagged by the integrity audit is exempt', () => {
+    // The 2026-09-08 alert: a leg was killed mid-write, leaving truncated JSON in HEAD, and the
+    // audit re-reported it on every sync.
+    expect(isChurnPath('workspace/social/workers/logs/20260908-220148-56243-opus-li-think.json')).toBe(true);
+  });
+
   test('shared data the guard exists to protect is NOT exempt', () => {
     expect(isChurnPath('contacts.json')).toBe(false);
     expect(isChurnPath('skills/social-manager.md')).toBe(false);
