@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { readRuntimeDirective, writeRuntimeDirective } from '../prompt-directives.ts';
 import { setModelResolver } from '../../../server/directives.ts';
 import { makeModelResolver } from '../../../server/engine/model-resolver.ts';
@@ -11,6 +11,11 @@ beforeAll(() => {
     { name: 'agentx', models: [{ value: 'cursor/composer-2.5' }, { value: 'anthropic/claude-opus-5' }] },
   ]));
 });
+
+// The resolver is a module global shared with every other test file in the run — leaving this one
+// installed makes a later file's `[token]` resolve against THIS registry. Order currently hides it;
+// don't rely on order.
+afterAll(() => setModelResolver(null));
 
 describe('readRuntimeDirective', () => {
   test('reads a directive the user typed by hand', () => {

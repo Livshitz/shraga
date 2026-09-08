@@ -61,7 +61,11 @@ const SESSION_LINE_FIX = "  *Session:* <the payload's sessionUrl, verbatim — o
  * prompt. `task.model`/`task.engine` were an INVISIBLE second copy — no UI ever showed them, which
  * is how nine live schedules drifted to a half-pin (`model` set, `engine` not) that nobody could
  * see or fix. Fold such a pin into the prompt exactly as runner.ts used to synthesize it, so the
- * run is byte-identical and the selection is now editable where the prompt is.
+ * run is byte-identical for a `prompt` task and the selection is now editable where the prompt is.
+ * NOT byte-identical for a `promptFile` task: runner.ts treated `task.prompt` as dead text once
+ * `promptFile` was set, and it now survives as the directive-carrying prefix. No live schedule uses
+ * `promptFile`, and dropping the prefix instead would silently lose the pin these lines exist to
+ * preserve — so the prefix is the deliberate choice, not an oversight.
  *
  * Applied to schedules loaded from disk AND to a module's freshly rendered task, so a manifest that
  * still templates a `model` knob keeps working instead of silently losing its pin.
