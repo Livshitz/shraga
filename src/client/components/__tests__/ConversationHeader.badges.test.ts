@@ -50,12 +50,26 @@ describe('deriveRuntimeBadges', () => {
     expect(b.engineMismatch).toBeUndefined();
   });
 
-  test('an engine-less recorded model is never trusted alone — the pair, or neither', () => {
-    // Guards the regression path: if only `lastModel` survives plumbing, we must not pair it with the
-    // requested engine and present the combination as fact.
+  test('an engine-less BARE recorded model is never trusted alone — unreadable without its engine', () => {
+    // A bare id says nothing about who billed it, so it cannot stand in for the requested model.
     const b = deriveRuntimeBadges({ requestedEngine: 'agentx', requestedModel: 'cursor/composer-2.5', actualModel: 'claude-sonnet-5' });
     expect(b.rawModel).toBe('cursor/composer-2.5');
     expect(b.engine).toBe('agentx');
+  });
+
+  test('an engine-less PREFIXED recorded model still names its provider (pre-lastEngine sessions)', () => {
+    // Every session written before `lastEngine` existed has `lastModel` and no engine. Dropping the
+    // recorded model there made the header report the REQUESTED provider — the exact false claim this
+    // module exists to prevent. A `provider/` prefix is direct evidence of what was billed.
+    const b = deriveRuntimeBadges({
+      requestedEngine: 'agentx',
+      requestedModel: 'cursor/composer-2.5',
+      actualModel: 'anthropic/claude-sonnet-4-6',
+    });
+    expect(b.rawModel).toBe('anthropic/claude-sonnet-4-6');
+    expect(b.billingProvider).toBe('anthropic'); // was 'cursor' — a provider that did not run
+    expect(b.engine).toBe('agentx'); // and we still claim no engine ground truth
+    expect(b.engineMismatch).toBeUndefined();
   });
 
   test('default when nothing is known at all', () => {

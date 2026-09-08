@@ -33,11 +33,14 @@ export function deriveRuntimeBadges(input: {
   // other than where this session currently asks to run.
   const engineMismatch = input.actualEngine && input.actualEngine !== requestedEngine ? requestedEngine : undefined;
   const engineIsNative = engine === 'claude-code' || engine === 'cursor';
-  // Only trust the recorded model when we also know which engine recorded it — the pair, or neither.
+  // "The pair, or neither" is right for the ENGINE, not for the provider: a `provider/` prefix on the
+  // recorded model is direct evidence of what actually ran and was billed, and needs no engine to read.
+  // Only a BARE recorded id is unreadable alone (it belongs to whichever engine recorded it), so only
+  // that one is dropped. Sessions written before lastEngine existed carry a prefixed model and nothing
+  // else — dropping it made the UI report the requested provider, the very claim this must never make.
+  const recordedModel = input.actualEngine || input.actualModel?.includes('/') ? input.actualModel : undefined;
   const rawModel =
-    (input.actualEngine ? input.actualModel : undefined) ||
-    input.requestedModel ||
-    (engine === 'cursor' ? 'cursor/composer-2.5' : 'sonnet-4-6');
+    recordedModel || input.requestedModel || (engine === 'cursor' ? 'cursor/composer-2.5' : 'sonnet-4-6');
   // Provider = the model's prefix; a bare id belongs to the engine that ran it (claude-code ⇒ anthropic,
   // an add-on engine ⇒ that engine's own provider) — never assume anthropic just because a prefix is absent.
   const billingProvider = rawModel.includes('/') ? rawModel.split('/')[0] : engine === 'claude-code' ? 'anthropic' : engine;
