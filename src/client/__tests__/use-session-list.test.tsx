@@ -5,10 +5,19 @@
  * must not collapse the user's paged depth, a "Show older" resolving after a filter toggle must not
  * land in the other list, and a by-id hydrated row must not keep its fetch-time snapshot forever.
  */
+// happy-dom's registrator installs window, document AND the web globals — fetch, Response,
+// Request, Headers — onto globalThis for the WHOLE bun process, which shares one module registry
+// across every test file. Left registered, every later file that speaks real HTTP is talking to a
+// DOM emulation instead of bun's runtime: measured 2026-09-08, this file alone failed 52 tests in
+// webhook-lane, spa-catchall, claude-usage, self-upgrade and createShraga on CI, and reproduced on
+// no dev machine because it depends on file order and the installed happy-dom. Hand the globals
+// back when this file is done.
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 GlobalRegistrator.register();
 
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, afterAll } from 'bun:test';
+
+afterAll(async () => { await GlobalRegistrator.unregister(); });
 import { createElement, useState, act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { useSessionList, PAGE_SIZE, type SessionRow } from '../hooks/useSessionList.ts';
