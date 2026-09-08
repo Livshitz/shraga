@@ -27,7 +27,13 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org/'
 
+      # PINNED. setup-bun defaults to the latest release, so the toolchain changes under a
+      # commit that did not touch it: 2026-09-08, bun 1.4.2 landed mid-afternoon and turned a
+      # green suite red with 52 cross-file failures (`Expected a Response object, but received
+      # 'Response {...}'`) that reproduced on no developer machine. Bump this deliberately.
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
 
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
