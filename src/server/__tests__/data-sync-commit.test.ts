@@ -170,3 +170,65 @@ describe('isChurnPath', () => {
     expect(isChurnPath('workspace/social/workers/launch-agentx-leg.sh')).toBe(false);
   });
 });
+
+/** Drive guardMassDeletions() directly with git + the owner DM stubbed. */
+function guardHarness(numstat: string, deleted: string) {
+  const ds: any = new DataSync({ repoUrl: 'x', branch: 'main', enabled: true } as any);
+  const dms: string[] = [];
+  ds.git = async (...args: string[]) => {
+    if (args.includes('--diff-filter=D')) return deleted;
+    if (args.includes('--numstat')) return numstat;
+    return '';
+  };
+  ds.notifyOwners = async (t: string) => { dms.push(t); };
+  return { ds, dms };
+}
+
+describe('guardMassDeletions alerting', () => {
+  const many = Array.from({ length: 173 }, (_, i) => `pane-sessions/s${i}`).join('\n');
+
+  test('untrackIgnored is NOT judged by the deletion threshold (files stay on disk)', async () => {
+    // 2026-09-08: adding `pane-sessions/` to .gitignore made 173 tracked files "deletions",
+    // which blocked every sync cycle forever and DM'd each time.
+    const { ds, dms } = guardHarness('', many);
+    expect(await ds.guardMassDeletions('untrackIgnored')).toBe(false);
+    expect(dms).toHaveLength(0);
+  });
+
+  test('a real mass deletion in a normal flush is still blocked', async () => {
+    const { ds, dms } = guardHarness('', many);
+    expect(await ds.guardMassDeletions('flush')).toBe(true);
+    expect(dms).toHaveLength(1);
+  });
+
+  test('an untrack far past the sanity ceiling is still blocked', async () => {
+    const huge = Array.from({ length: 600 }, (_, i) => `x/${i}`).join('\n');
+    const { ds } = guardHarness('', huge);
+    expect(await ds.guardMassDeletions('untrackIgnored')).toBe(true);
+  });
+
+  test('a STANDING condition DMs once, not on every cycle', async () => {
+    const { ds, dms } = guardHarness('', many);
+    for (let i = 0; i < 5; i++) expect(await ds.guardMassDeletions('flush')).toBe(true);
+    expect(dms).toHaveLength(1);           // still blocked 5×, but the owner is told once
+  });
+
+  test('a DIFFERENT condition still gets through the suppression', async () => {
+    const { ds, dms } = guardHarness('', many);
+    await ds.guardMassDeletions('flush');
+    ds.git = async (...a: string[]) => (a.includes('--diff-filter=D') ? 'contacts.json\nnotes.md\n' + many : '');
+    await ds.guardMassDeletions('flush');
+    expect(dms).toHaveLength(2);
+  });
+
+  test('a shrink that clears then recurs alerts again', async () => {
+    const { ds, dms } = guardHarness('1\t200\tcontacts.json', '');
+    expect(await ds.guardMassDeletions('flush')).toBe(true);
+    expect(dms).toHaveLength(1);
+    ds.git = async () => '';                                  // condition gone
+    expect(await ds.guardMassDeletions('flush')).toBe(false);
+    ds.git = async (...a: string[]) => (a.includes('--numstat') ? '1\t200\tcontacts.json' : '');
+    expect(await ds.guardMassDeletions('flush')).toBe(true);
+    expect(dms).toHaveLength(2);           // recurrence is news, not spam
+  });
+});

@@ -107,6 +107,9 @@ export class DataSync {
   private pullPending = false;
   private ready = false;
   private warnedDisabled = false;
+  /** key -> fingerprint+timestamp of the last DM sent for that guard, so a STANDING condition
+   *  alerts once instead of on every sync cycle. See alertOnce(). */
+  private alerted = new Map<string, { fingerprint: string; at: number }>();
 
   constructor(opts?: Partial<DataSyncOptions>) {
     this.options = { ...new DataSyncOptions(), ...opts };
@@ -243,7 +246,16 @@ export class DataSync {
    *  shrink (e.g. contacts.json 111→5 lines — a legit-looking normalization that wiped shared
    *  data). Notifies owner and aborts. */
   private async guardMassDeletions(context: string): Promise<boolean> {
-    const fileThreshold = parseInt(process.env.DATA_SYNC_DELETIONS_BLOCK || '10', 10);
+    // An untrackIgnored() pass is NOT a deletion: it runs `git rm --cached` over files that match
+    // the repo's OWN .gitignore (a personal global gitignore is excluded upstream) and that still
+    // exist on disk. Nothing is lost — the files simply stop being shared, which is the entire
+    // point of the call. Judging it by the 10-file deletion threshold made a normal .gitignore
+    // addition (pane-sessions/, 173 files) an unclearable block: every flush retried it, alerted,
+    // and `git reset HEAD` also discarded whatever real work was staged alongside.
+    const untracking = context === 'untrackIgnored';
+    const fileThreshold = untracking
+      ? parseInt(process.env.DATA_SYNC_UNTRACK_BLOCK || '500', 10)
+      : parseInt(process.env.DATA_SYNC_DELETIONS_BLOCK || '10', 10);
     const shrinkThreshold = parseInt(process.env.DATA_SYNC_SHRINK_BLOCK || '50', 10);
     try {
       // (1) Mass FILE deletions.
@@ -252,7 +264,7 @@ export class DataSync {
       if (deleted.length > fileThreshold) {
         console.error(`${TAG} 🚫 BLOCKED mass deletion (${context}): ${deleted.length} file(s) — threshold is ${fileThreshold}`);
         const list = deleted.slice(0, 20).map(f => `• ${f}`).join('\n');
-        await this.notifyOwners(
+        await this.alertOnce(`deletions:${context}`, deleted.join('\n'),
           `🚫 BLOCKED mass deletion in data/ (${context}): ${deleted.length} file(s) staged for deletion (threshold: ${fileThreshold})\n\n${list}` +
           (deleted.length > 20 ? `\n…and ${deleted.length - 20} more` : '') +
           `\n\nCommit was aborted. Manual intervention needed.`,
@@ -273,13 +285,16 @@ export class DataSync {
       }
       if (shrunk.length) {
         console.error(`${TAG} 🚫 BLOCKED large content shrink (${context}): ${shrunk.length} file(s) — net-removal threshold is ${shrinkThreshold}`);
-        await this.notifyOwners(
+        await this.alertOnce(`shrink:${context}`, shrunk.join('\n'),
           `🚫 BLOCKED large content shrink in data/ (${context}): a tracked file lost more than ${shrinkThreshold} net lines (guards against wiping shared data like contacts.json)\n\n${shrunk.slice(0, 20).join('\n')}` +
           `\n\nCommit was aborted. If intended, raise DATA_SYNC_SHRINK_BLOCK or commit manually.`,
         );
         await this.git('reset', 'HEAD').catch(() => {});
         return true;
       }
+      // Condition cleared — a future recurrence is news again, so let it alert.
+      this.clearAlert(`deletions:${context}`);
+      this.clearAlert(`shrink:${context}`);
       return false;
     } catch (err) {
       console.warn(`${TAG} Destructive-change check failed:`, (err as Error).message);
@@ -676,6 +691,31 @@ export class DataSync {
     }
 
     return violations;
+  }
+
+  /**
+   * DM owners about a guard trip, but only when the condition is NEW. A blocked commit is not a
+   * one-off: the same staged change is re-attempted on every flush, so a standing condition used to
+   * DM on every cycle (measured 2026-09-08: 173 files ignored-but-tracked produced an identical
+   * "BLOCKED mass deletion" DM ~15×/hour, indefinitely). Alert fatigue is a correctness bug — it
+   * buries the one alert that matters. Re-alerts only when the fingerprint CHANGES or after
+   * DATA_SYNC_ALERT_REPEAT_MS (default 6h), and every trip is still logged locally.
+   */
+  private async alertOnce(key: string, fingerprint: string, text: string): Promise<void> {
+    const repeatMs = parseInt(process.env.DATA_SYNC_ALERT_REPEAT_MS || '', 10) || 6 * 60 * 60 * 1000;
+    const prev = this.alerted.get(key);
+    const now = Date.now();
+    if (prev && prev.fingerprint === fingerprint && now - prev.at < repeatMs) {
+      console.warn(`${TAG} alert suppressed (unchanged since ${new Date(prev.at).toISOString()}): ${key}`);
+      return;
+    }
+    this.alerted.set(key, { fingerprint, at: now });
+    await this.notifyOwners(text);
+  }
+
+  /** Clear the repeat-suppression for a guard once its condition is gone, so a RECURRENCE alerts. */
+  private clearAlert(key: string): void {
+    this.alerted.delete(key);
   }
 
   private async notifyOwners(text: string): Promise<void> {
