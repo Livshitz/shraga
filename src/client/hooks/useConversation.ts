@@ -391,6 +391,8 @@ function applyStream(setMessages: Dispatch<SetStateAction<ChatMessage[]>>, event
       return setMessages((prev) =>
         appendToAssistant(prev, { type: 'tool_result', toolUseId: event.toolUseId, output: event.output }),
       );
+    case 'tool_result_image':
+      return setMessages((prev) => appendToAssistant(prev, { type: 'image', src: event.dataUrl }));
   }
 }
 

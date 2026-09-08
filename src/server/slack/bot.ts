@@ -12,6 +12,7 @@ import { getMcpConfig } from '../mcp.ts';
 import { dataPath } from '../paths.ts';
 import { appendMessage, setSlackContext, setRunStatus, setVisibleTo, writePartial, clearPartial, registerLivePartial, unregisterLivePartial, acquireSessionLock, releaseSessionLock, getSession, recordSeenSlackTs, type ConvBlock, type SessionMeta } from '../sessions.ts';
 import { injectFile } from '../file-inject.ts';
+import { createTurnAccumulator } from '../turn-stream.ts';
 import {
   postMessage, addReaction, removeReaction, getBotUserId, getAgentUserId, getThreadMessages, getMessage,
   getChannelName, getUserName, getUserProfile, resolveUserMentions, isSupportedFile, SUPPORTED_FILE_MIMES,
@@ -72,48 +73,34 @@ async function* pumpStream(
   sessionId: string,
   opts: { partial?: boolean; artifacts?: boolean } = {},
 ): AsyncGenerator<AgentEvent> {
-  let assistantText = '';
-  const assistantBlocks: ConvBlock[] = [];
-  const collect = () => [...assistantBlocks, ...(assistantText ? [{ type: 'text' as const, text: assistantText }] : [])];
+  // Transcript + web-viewer streaming is the shared reducer's job (turn-stream.ts); this function
+  // only adds what is Slack's: which events become Slack text, and the artifact hook.
+  const acc = createTurnAccumulator({
+    maxResultChars: 2000,
+    onDelta: (event) => broadcastFn({ type: 'session_stream', sessionId, event }),
+    onPassthrough: (event) => broadcastFn({ ...event, sessionId }),
+  });
   let partialInterval: ReturnType<typeof setInterval> | undefined;
   if (opts.partial) {
-    registerLivePartial(sessionId, collect);
-    partialInterval = setInterval(() => { const b = collect(); if (b.length) writePartial(sessionId, b); }, 5_000);
+    registerLivePartial(sessionId, () => acc.snapshot());
+    partialInterval = setInterval(() => { const b = acc.snapshot(); if (b.length) writePartial(sessionId, b); }, 5_000);
   }
-  let stopReason = '';
   try {
     for await (const ev of gen) {
-      if (ev.type === 'text_delta') {
-        assistantText += ev.text;
-        broadcastFn({ type: 'session_stream', sessionId, event: { type: 'text_delta', text: ev.text } });
-        yield { type: 'text_delta', text: ev.text };
-      } else if (ev.type === 'tool_use') {
-        if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
-        assistantBlocks.push({ type: 'tool_use', tool: ev.tool, toolUseId: ev.toolUseId, input: ev.input });
-        broadcastFn({ type: 'session_stream', sessionId, event: { type: 'tool_use', tool: ev.tool, toolUseId: ev.toolUseId, input: ev.input } });
+      const terminal = acc.push(ev);
+      if (ev.type === 'text_delta') yield { type: 'text_delta', text: ev.text };
+      else if (ev.type === 'tool_use') {
         if (opts.artifacts) { const e = handleArtifactToolUse(sessionId, ev.tool, ev.input); if (e) broadcastFn(e); }
         yield { type: 'tool_use', tool: ev.tool, toolUseId: ev.toolUseId, input: ev.input };
-      } else if (ev.type === 'tool_result') {
-        assistantBlocks.push({ type: 'tool_result', toolUseId: ev.toolUseId, output: ev.output });
-        const trimmed = ev.output.length > 2000 ? ev.output.slice(0, 2000) + '…' : ev.output;
-        broadcastFn({ type: 'session_stream', sessionId, event: { type: 'tool_result', toolUseId: ev.toolUseId, output: trimmed } });
-      } else if (ev.type === 'tool_result_image') {
-        assistantBlocks.push({ type: 'image', src: ev.dataUrl });
-      } else if (ev.type === 'done') {
-        stopReason = ev.stopReason ?? 'end_turn';
-        break;
       } else if (ev.type === 'error') {
         // Slack gets it as text (it has no block renderer); the transcript gets a real error block.
-        const t = `\n⚠️ ${ev.message}`;
-        if (assistantText) { assistantBlocks.push({ type: 'text', text: assistantText }); assistantText = ''; }
-        assistantBlocks.push({ type: 'error', text: ev.message });
-        yield { type: 'text_delta', text: t };
-        break;
+        yield { type: 'text_delta', text: `\n⚠️ ${ev.message}` };
       }
+      if (terminal) break;
     }
-    if (stopReason === 'max_turns_reached') {
+    if (acc.stopReason === 'max_turns_reached') {
       const notice = '\n\n---\n⚠️ _Reached the maximum number of steps for this turn. Reply "continue" to pick up where I left off._';
-      assistantText += notice;
+      acc.push({ type: 'text_delta', text: notice });
       yield { type: 'text_delta', text: notice };
     }
   } finally {
@@ -121,7 +108,7 @@ async function* pumpStream(
     if (opts.partial) unregisterLivePartial(sessionId);
   }
 
-  if (assistantText) assistantBlocks.push({ type: 'text', text: assistantText });
+  const assistantBlocks = acc.finish();
   for (const b of assistantBlocks) if (mdText(b)) (b as any).text = await resolveUserMentions(b.text);
   if (assistantBlocks.length) {
     if (opts.partial) clearPartial(sessionId);

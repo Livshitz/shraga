@@ -2,13 +2,20 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import basicSsl from '@vitejs/plugin-basic-ssl';
 import path from 'path';
+import { readFileSync } from 'fs';
 
 // HTTPS dev server (default). Browsers only expose powerful APIs (mic, camera, clipboard) in a
 // secure context (HTTPS, or localhost), so a phone on the LAN needs HTTPS. basic-ssl mints a
 // self-signed cert — accept the one-time warning on the device. Opt out with `DEV_HTTPS=0`.
 const httpsDev = process.env.DEV_HTTPS !== '0';
 
+// Stamp the version this bundle is built from. The server compares it at runtime (/api/version):
+// a deploy that updates the server without rebuilding dist/client is otherwise SILENT — an older
+// client just discards a response whose shape changed, and the UI renders empty with no error.
+const clientVersion = JSON.parse(readFileSync(path.resolve(__dirname, 'package.json'), 'utf8')).version;
+
 export default defineConfig({
+  define: { __SHRAGA_CLIENT_VERSION__: JSON.stringify(clientVersion) },
   plugins: [react(), ...(httpsDev ? [basicSsl()] : [])],
   resolve: {
     alias: {

@@ -9,6 +9,7 @@ import { MachineStats } from './MachineStats';
 import type { UnreadSession } from '@/hooks/useUnread';
 import type { AgentSocket } from '@/lib/ws';
 import { useSessionList, type SessionRow as Session, type ChatsFilter } from '@/hooks/useSessionList';
+import { CLIENT_BUILD_VERSION } from '@/lib/build-version';
 
 interface Props {
   getToken: () => Promise<string | null>;
@@ -123,6 +124,14 @@ export function Sidebar({ getToken, activeSessionId, onSelect, onNew, refreshKey
     getToken().then(t => t ? fetch('/api/version', { headers: { Authorization: `Bearer ${t}` } }) : null).then(r => r?.json()).then(d => d && setVersion(d.version)).catch(() => {});
   }, []);
 
+  // Version skew is SILENT otherwise: a `dist/client` left stale by a deploy keeps serving a client
+  // written against an older API shape, which discards the new response and renders an empty list —
+  // no error, no log (the list routes are quiet on 200). Surface it instead of debugging a ghost.
+  const stale = !!version && version !== 'unknown' && CLIENT_BUILD_VERSION !== 'dev' && version !== CLIENT_BUILD_VERSION;
+  useEffect(() => {
+    if (stale) console.warn(`[shraga] stale client bundle: built from v${CLIENT_BUILD_VERSION}, server runs v${version} — rebuild dist/client`);
+  }, [stale, version]);
+
   function renderRow(s: Session) {
     const unread = unreads[s.sessionId];
     const isBusy = busySessions.has(s.sessionId) || s.runStatus === 'running' || s.scheduleRunStatus === 'running';
@@ -218,7 +227,17 @@ export function Sidebar({ getToken, activeSessionId, onSelect, onNew, refreshKey
         <MachineStats socket={socket ?? null} getToken={getToken} />
         {slots.sidebarExtras?.()}
         {version && (
-          <div className="text-[10px] text-muted-foreground/50 text-center">v{version}</div>
+          stale ? (
+            <button
+              onClick={() => location.reload()}
+              title={`This page was built from v${CLIENT_BUILD_VERSION}, the server runs v${version} — reload to update`}
+              className="text-[10px] text-amber-400 hover:text-amber-300 text-center underline decoration-dotted"
+            >
+              ⚠️ stale page (v{CLIENT_BUILD_VERSION} → v{version}) · reload
+            </button>
+          ) : (
+            <div className="text-[10px] text-muted-foreground/50 text-center">v{version}</div>
+          )
         )}
       </div>
     </div>

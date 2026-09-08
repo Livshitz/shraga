@@ -23,6 +23,7 @@ const rehypeBidi: Plugin<[], Root> = () => (tree) => {
 import 'highlight.js/styles/github.css';
 import { ChevronRight, Wrench, User, Bot, Copy, Check, RotateCcw, Pencil, X, SendHorizontal, ShieldQuestion, CheckCircle2, XCircle, Eye, EyeOff, Info, Loader2, BrainCircuit, GitFork, Minimize2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { toolPreview } from '@/lib/tool-preview';
 import { annotateLimitReset } from '@/lib/limit-reset';
 import type { ChatMessage, MessageBlock, Attachment } from '@/hooks/useConversation';
 import type { AskQuestion, QuestionAnswers } from '@/lib/ws';
@@ -622,11 +623,7 @@ function ToolUseBlock({ block, tool, input, result, busy, screenMap }: { block: 
   const [expanded, setExpanded] = useState(false);
   const inputStr = typeof input === 'string' ? input : JSON.stringify(input, null, 2);
   const isEmpty = typeof input === 'object' && input !== null && Object.keys(input as object).length === 0;
-  const preview = isEmpty
-    ? ''
-    : typeof input === 'object' && input !== null
-      ? Object.keys(input as object).join(', ')
-      : String(input).slice(0, 60);
+  const preview = isEmpty ? '' : toolPreview(input);
 
   const resultTrimmed = result != null ? stripLineNumbers(result.trim().replace(/\[Image #\d+\]\s*/g, '').trim()) : undefined;
   const hasResult = result != null;

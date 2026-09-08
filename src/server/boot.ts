@@ -27,7 +27,8 @@ import { registerSpaCatchAll } from './spa-catchall.ts';
 import { slackFeature } from './slack/feature.ts';
 import { dataPath } from './paths.ts';
 import { getAllSessions, getSession, getSessionHistory, upsertSession, appendMessage, saveConversation, loadConversation, setSessionDirectives, getAutoApprove, setAutoApprove, getSessionsByScheduleId, getSessionsVisibleTo, isSessionVisibleTo, setRunStatus, incrementRetryCount, getRunningSessions, getActiveLockCount, updateScheduledSessionStatus, setShuttingDown, backfillSessionVisibility, writePartial, readPartial, clearPartial, registerLivePartial, unregisterLivePartial, readLivePartial, acquireSessionLock, releaseSessionLock, replaceSessionLock, isSessionLocked, getSessionAbortController, forkSession, generateSessionTitle, toListItem, pageSessions, isOwnSession, type ConvBlock, type ConvMessage, type SessionMeta } from './sessions.ts';
-import { setBroadcaster } from './session-bus.ts';
+import { setBroadcaster, emitToSession } from './session-bus.ts';
+import { TURN_CONTROL_EVENTS } from './turn-stream.ts';
 import * as scheduler from './scheduler/index.ts';
 import { initPolls } from './polls.ts';
 import { initBackgroundJobs } from './background-jobs.ts';
@@ -609,6 +610,8 @@ app.get('/api/schedules/:id/runs', requireAuth, (req, res) => {
   res.json(getSessionsByScheduleId(id));
 });
 
+// Cap on a tool_result pushed to viewers; the transcript keeps the full output.
+const STREAMED_RESULT_MAX = 2000;
 // ── REST chat endpoint (for automation / CLI triggers / agent-to-agent) ──────
 /**
  * Run a single chat turn with all its side effects (session lock, message
@@ -666,7 +669,13 @@ async function runChatTurn(
       abortController,
       context: opts.context ?? { source: 'api', user: userEmail },
       onPermissionRequest: async () => ({ allow: true }),
-    }), onEvent);
+    }), onEvent, {
+      // Same reason as the wake lane: an /api/chat or MCP-driven turn used to surface nothing to a
+      // web viewer until it ended, and dropped an add-on engine's subagent events entirely.
+      maxResultChars: STREAMED_RESULT_MAX,
+      onDelta: (event) => broadcast({ type: 'session_stream', sessionId: sid, event }),
+      onPassthrough: (event) => emitToSession(sid, event),
+    });
     if (blocks.length) {
       appendMessage(sid, { id: crypto.randomUUID(), role: 'assistant', blocks });
     }
@@ -1218,7 +1227,18 @@ initPolls({
       await new Promise((r) => setTimeout(r, 2_000));
     }
     try {
-      return await consumeStream(streamChat({ prompt, sessionId, uid, userEmail, mcpServers: getMcpConfig(uid), abortController, onPermissionRequest: async () => ({ allow: true }) }));
+      // Stream it. A woken turn (a background job reporting back, a poll firing) used to surface
+      // NOTHING until it ended — and an add-on engine's subagent events were dropped outright — so a
+      // turn that dispatched a worker was indistinguishable from one that only claimed to.
+      return await consumeStream(
+        streamChat({ prompt, sessionId, uid, userEmail, mcpServers: getMcpConfig(uid), abortController, onPermissionRequest: async () => ({ allow: true }) }),
+        undefined,
+        {
+          maxResultChars: STREAMED_RESULT_MAX,
+          onDelta: (event) => broadcast({ type: 'session_stream', sessionId, event }),
+          onPassthrough: (event) => emitToSession(sessionId, event),
+        },
+      );
     } finally {
       if (releaseSessionLock(sessionId, abortController)) setRunStatus(sessionId, 'idle');
     }
@@ -1550,6 +1570,11 @@ async function runStream(ws: WebSocket, session: WsSession, sid: string, promptT
           send(ws, { type: 'error', message: event.message, sessionId: sid });
         }
         break;
+      } else if (!TURN_CONTROL_EVENTS.has(event.type)) {
+        // Not core-owned — an add-on engine's event (subagent pills, worker cards). The owning
+        // socket already got it verbatim above; mirror it to the session's OTHER viewers too, so a
+        // second device watching the same turn sees the same thing.
+        broadcast({ ...event, sessionId: sid }, ws);
       }
     }
     if (eventCount === 0) {

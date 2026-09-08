@@ -40,7 +40,7 @@ export type ServerEvent =
   | { type: 'session_title_updated'; sessionId: string; title: string }
   | { type: 'directives'; directives: { model?: string; turns?: number; thinking?: string; engine?: string } }
   | { type: 'session_busy'; sessionId: string; busy: boolean }
-  | { type: 'session_stream'; sessionId: string; event: { type: 'thinking_delta'; text: string } | { type: 'text_delta'; text: string } | { type: 'tool_use'; tool: string; toolUseId: string; input: unknown } | { type: 'tool_use_input'; toolUseId: string; input: unknown } | { type: 'tool_result'; toolUseId: string; output: string } }
+  | { type: 'session_stream'; sessionId: string; event: { type: 'thinking_delta'; text: string } | { type: 'text_delta'; text: string } | { type: 'tool_use'; tool: string; toolUseId: string; input: unknown } | { type: 'tool_use_input'; toolUseId: string; input: unknown } | { type: 'tool_result'; toolUseId: string; output: string } | { type: 'tool_result_image'; toolUseId: string; dataUrl: string } }
   | { type: 'artifact'; id: string; sessionId: string; title: string; dimensions: [number, number]; version: number }
   | { type: 'server_restarting' }
   | { type: 'unread'; sessionId: string; count: number; preview: string; source: 'response' | 'proactive' | 'schedule'; title?: string }

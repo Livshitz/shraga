@@ -3,6 +3,7 @@ import { summarizeText } from './summarize.ts';
 import { dataSync } from './data-sync.ts';
 import type { McpConfig } from './mcp.ts';
 import { loadConversation, saveConversation, appendMessage, getSession, setSessionDirectives, addTriggeredSkills, upsertSession, type ConvMessage, type ConvBlock } from './sessions.ts';
+import { createTurnAccumulator, type TurnStreamHooks } from './turn-stream.ts';
 import {
   resolveDefaultSkillsContent,
   expandMentionedSkills,
@@ -70,6 +71,8 @@ export function saveAgentConfig(config: AgentConfig): void {
 }
 
 // ── WS events ───────────────────────────────────────────────────────────────
+
+export type { TurnStreamHooks };
 
 export type WsEvent =
   | { type: 'text_delta'; text: string }
@@ -410,38 +413,16 @@ export async function* streamChat(opts: {
  * thing — the MCP path said NOTHING at all, so a truncated turn arrived looking finished. */
 export const MAX_TURNS_NOTICE = '\n\n---\n⚠️ Reached the maximum number of steps for this turn. Send "continue" to pick up where I left off.';
 
-export async function consumeStream(stream: AsyncGenerator<WsEvent>, onEvent?: (ev: WsEvent) => void): Promise<ConvBlock[]> {
-  let text = '';
-  let thinking = '';
-  const blocks: ConvBlock[] = [];
+export async function consumeStream(
+  stream: AsyncGenerator<WsEvent>,
+  onEvent?: (ev: WsEvent) => void,
+  hooks?: TurnStreamHooks,
+): Promise<ConvBlock[]> {
+  const acc = createTurnAccumulator(hooks ?? {});
   for await (const ev of stream) {
     onEvent?.(ev);
-    if (ev.type === 'thinking_delta') {
-      thinking += ev.text;
-    } else if (ev.type === 'text_delta') {
-      if (thinking) { blocks.push({ type: 'thinking', text: thinking }); thinking = ''; }
-      text += ev.text;
-    } else if (ev.type === 'tool_use') {
-      if (thinking) { blocks.push({ type: 'thinking', text: thinking }); thinking = ''; }
-      if (text) { blocks.push({ type: 'text', text }); text = ''; }
-      blocks.push({ type: 'tool_use', tool: ev.tool, toolUseId: ev.toolUseId, input: ev.input });
-    } else if (ev.type === 'tool_use_input') {
-      const existing = blocks.find((b) => b.type === 'tool_use' && b.toolUseId === ev.toolUseId) as any;
-      if (existing) existing.input = ev.input;
-    } else if (ev.type === 'tool_result') {
-      blocks.push({ type: 'tool_result', toolUseId: ev.toolUseId, output: ev.output });
-    } else if (ev.type === 'tool_result_image') {
-      blocks.push({ type: 'image', src: ev.dataUrl });
-    } else if (ev.type === 'done') {
-      break;
-    } else if (ev.type === 'error') {
-      if (text) { blocks.push({ type: 'text', text }); text = ''; }
-      blocks.push({ type: 'error', text: ev.message });
-      break;
-    }
+    if (acc.push(ev)) break;
   }
-  if (thinking) blocks.push({ type: 'thinking', text: thinking });
-  if (text) blocks.push({ type: 'text', text });
-  return blocks;
+  return acc.finish();
 }
 
