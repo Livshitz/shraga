@@ -64,6 +64,23 @@ export class EngineUnavailableError extends Error {
   }
 }
 
+/** An explicitly selected model that neither the alias table nor any REGISTERED engine could
+ *  resolve. Same contract as EngineUnavailableError: the run stops instead of silently continuing
+ *  on the instance default, which is a different model than the caller chose. */
+export class ModelUnavailableError extends Error {
+  constructor(public readonly model: string) {
+    super(
+      `Model "${model}" could not be resolved on this server. It is not a known alias, not a ` +
+        `provider-qualified id (\`provider/model\`), and no registered engine advertises it. ` +
+        `Registered engines: ${getAvailableEngines().join(', ') || 'none'} — an engine registers only when enabled ` +
+        `at boot (AGENT_ENGINES must list it; the native cursor engine also needs CURSOR_API_KEY), ` +
+        `so a model owned by an absent engine cannot resolve. Check the server env and startup log. ` +
+        `The run was stopped rather than silently re-routed to the instance's default model.`,
+    );
+    this.name = 'ModelUnavailableError';
+  }
+}
+
 export function resolveAndGetEngine(directives?: { engine?: string }, agentConfig?: { engine?: string }) {
   const name = resolveEngine(directives, agentConfig);
   // An optional engine may be unregistered on a given boot (add-on not loaded, missing API key or

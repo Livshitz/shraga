@@ -9,6 +9,11 @@ export interface Directives {
 export interface ParsedPrompt {
   prompt: string;
   directives: Directives;
+  /** An EXPLICIT model selection that no alias and no registered engine could resolve. Reported
+   *  instead of applied: dropping it (the old behaviour) ran the turn on `config.model` — a
+   *  DIFFERENT model than the caller asked for, with nothing but a `console.warn` to show for it.
+   *  The caller turns this into a turn error; see `streamChat`. */
+  unresolvedModel?: string;
 }
 
 /** Model used when neither directives nor config specify one. Always passed
@@ -91,8 +96,19 @@ export function parseDirectives(text: string): ParsedPrompt {
 
   const directives: Directives = {};
   let positionalIndex = 0;
+  let unresolvedModel: string | undefined;
 
-  for (const token of raw.split(',')) {
+  const tokens = raw.split(',');
+  // Is this group PROVABLY a directive group (some token is a known `key:value`)? A bare positional
+  // that resolves to nothing is otherwise indistinguishable from prose — `[some bracketed text] hi`
+  // is a legitimate prompt and must never fail a turn. With a keyed sibling present the group is
+  // unambiguously directives, so an unresolvable leading model token there IS a dropped selection.
+  const provenDirectiveGroup = tokens.some((t) => {
+    const i = t.indexOf(':');
+    return i !== -1 && DIRECTIVE_KEYS.includes(t.slice(0, i).trim().toLowerCase());
+  });
+
+  for (const token of tokens) {
     const t = token.trim();
     if (!t) continue;
 
@@ -100,7 +116,7 @@ export function parseDirectives(text: string): ParsedPrompt {
     if (colonIdx !== -1) {
       const key = t.slice(0, colonIdx).trim().toLowerCase();
       const val = t.slice(colonIdx + 1).trim().toLowerCase();
-      applyDirective(directives, key, val);
+      unresolvedModel = applyDirective(directives, key, val) ?? unresolvedModel;
     } else {
       const val = t.toLowerCase();
       if (positionalIndex === 0 && resolveModelToken(directives, val)) {
@@ -112,6 +128,7 @@ export function parseDirectives(text: string): ParsedPrompt {
       } else if (['nothink', 'nothinking'].includes(val)) {
         directives.thinking = 'disabled';
       } else if (positionalIndex === 0) {
+        if (provenDirectiveGroup && !isQualifiedModel(val)) unresolvedModel ??= t;
         console.warn(isQualifiedModel(val)
           ? `[directives] Provider-qualified model needs key form: "[model:${t}]"`
           : `[directives] Unknown model alias: "${t}"`);
@@ -120,16 +137,19 @@ export function parseDirectives(text: string): ParsedPrompt {
     }
   }
 
-  return { prompt, directives };
+  return { prompt, directives, unresolvedModel };
 }
 
-function applyDirective(d: Directives, key: string, val: string) {
+/** Returns the token of an EXPLICIT model selection it could not resolve, else undefined. */
+function applyDirective(d: Directives, key: string, val: string): string | undefined {
   switch (key) {
     case 'model':
       if (resolveModelToken(d, val)) break;
-      if (isQualifiedModel(val)) d.model = val;
-      else console.warn(`[directives] Unknown model alias: "${val}"`);
-      break;
+      // A `provider/model` id is already concrete — hand it to the engine, which owns the verdict.
+      if (isQualifiedModel(val)) { d.model = val; break; }
+      // Nothing knows this token. `[model:x]` is unambiguously a selection (never prose), so the
+      // turn must not quietly continue on the instance default model.
+      return val;
     case 'turns':
       if (/^\d+$/.test(val)) d.turns = parseInt(val, 10);
       else console.warn(`[directives] Invalid turns value: "${val}"`);
@@ -149,4 +169,5 @@ function applyDirective(d: Directives, key: string, val: string) {
     default:
       console.warn(`[directives] Unknown directive key: "${key}"`);
   }
+  return undefined;
 }

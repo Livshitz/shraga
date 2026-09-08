@@ -77,4 +77,33 @@ describe('parseDirectives', () => {
     const r = parseDirectives('[opus] line1\nline2');
     expect(r.prompt).toBe('line1\nline2');
   });
+
+  // An EXPLICIT model selection that resolves to nothing must be REPORTED, not dropped — dropping it
+  // ran the turn on config.model, a different model than the caller chose (streamChat turns
+  // `unresolvedModel` into a turn `error`). The blast radius is the point: ordinary bracketed prose
+  // must stay prose.
+  describe('unresolvable model selection', () => {
+    test('[model:x] key form reports the token', () => {
+      const r = parseDirectives('[model:composer-2.5] hi');
+      expect(r.unresolvedModel).toBe('composer-2.5');
+      expect(r.directives.model).toBeUndefined();
+    });
+
+    test('bare positional in a PROVEN directive group reports it', () => {
+      const r = parseDirectives('[composer-2.5, turns:5] hi');
+      expect(r.unresolvedModel).toBe('composer-2.5');
+      expect(r.directives.turns).toBe(5);
+    });
+
+    test('bracketed prose stays prose — no error', () => {
+      for (const text of ['[some bracketed prose] hi', '[WARN] something happened', '[fix src/foo.ts] go']) {
+        expect(parseDirectives(text).unresolvedModel).toBeUndefined();
+      }
+    });
+
+    test('a resolvable or provider-qualified model reports nothing', () => {
+      expect(parseDirectives('[model:opus] hi').unresolvedModel).toBeUndefined();
+      expect(parseDirectives('[model:cursor/composer-2.5] hi').unresolvedModel).toBeUndefined();
+    });
+  });
 });

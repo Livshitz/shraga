@@ -23,7 +23,7 @@ import { getUserContextBlock } from './user-context.ts';
 import { collectTurnContext } from './turn-context.ts';
 import { DATA_DIR, dataPath } from './paths.ts';
 import * as contacts from './contacts.ts';
-import { resolveAndGetEngine } from './engine/index.ts';
+import { resolveAndGetEngine, ModelUnavailableError } from './engine/index.ts';
 
 const CONFIG_PATH = dataPath('agent-config.json');
 
@@ -213,7 +213,19 @@ export async function* streamChat(opts: {
   context?: Record<string, string>;
 }): AsyncGenerator<WsEvent> {
   const config = getAgentConfig();
-  const { prompt: cleanPrompt, directives: parsed } = parseDirectives(opts.prompt);
+  const { prompt: cleanPrompt, directives: parsed, unresolvedModel } = parseDirectives(opts.prompt);
+
+  // An explicit model selection that resolves to nothing is a HARD stop, for the same reason an
+  // unregistered engine is: continuing would run the turn on `config.model` — a different model
+  // than the caller picked — with only a console.warn to show for it. Surfaced as a turn `error`
+  // event (not a throw) so WS, Slack, scheduler, MCP and webhook all report it identically and a
+  // scheduled run is marked failed instead of quietly succeeding on the wrong model.
+  if (unresolvedModel) {
+    const message = new ModelUnavailableError(unresolvedModel).message;
+    console.error(`[stream] ${message} (user=${opts.uid} session=${opts.sessionId ?? 'new'})`);
+    yield { type: 'error', message };
+    return;
+  }
 
   const sessionMeta = opts.sessionId ? getSession(opts.sessionId) : undefined;
   const directives: Directives = { ...sessionMeta?.directives, ...parsed };
