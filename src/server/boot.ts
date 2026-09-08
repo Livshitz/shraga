@@ -25,7 +25,6 @@ import { streamChat, consumeStream, getAgentConfig, saveAgentConfig, getClaudeAu
 import { mountFeatures, registerFeature, resumeFeatureSession, collectFeatureFlags, collectSidecarRoutes } from './features.ts';
 import { registerSpaCatchAll } from './spa-catchall.ts';
 import { slackFeature } from './slack/feature.ts';
-import { webhookLaneFeature } from './webhook-lane/feature.ts';
 import { dataPath } from './paths.ts';
 import { getAllSessions, getSession, getSessionHistory, upsertSession, appendMessage, saveConversation, loadConversation, setSessionDirectives, getAutoApprove, setAutoApprove, getSessionsByScheduleId, getSessionsVisibleTo, isSessionVisibleTo, setRunStatus, incrementRetryCount, getRunningSessions, getActiveLockCount, updateScheduledSessionStatus, setShuttingDown, backfillSessionVisibility, writePartial, readPartial, clearPartial, registerLivePartial, unregisterLivePartial, readLivePartial, acquireSessionLock, releaseSessionLock, replaceSessionLock, isSessionLocked, getSessionAbortController, forkSession, generateSessionTitle, type ConvBlock, type ConvMessage, type SessionMeta } from './sessions.ts';
 import { setBroadcaster } from './session-bus.ts';
@@ -1001,8 +1000,8 @@ function proxySidecarWebSocket(req: import('node:http').IncomingMessage, socket:
       // proxy-local reply only proves THIS hop is alive: if the proxy→sidecar leg is half-open, or the
       // sidecar has already dropped this client from its subscriber set, the browser still gets pongs,
       // keeps `readyState === OPEN`, shows a green "connected" dot, and every keystroke disappears.
-      // The probe is only worth anything end-to-end, so the sidecar owns the reply (lane-pty answers in
-      // its ws message handler); a sidecar that doesn't reply fails the probe, which is the honest
+      // The probe is only worth anything end-to-end, so the sidecar owns the reply (it answers in its
+      // own ws message handler); a sidecar that doesn't reply fails the probe, which is the honest
       // outcome — the client then reconnects rather than trusting a dead pipe.
       if (targetWs.readyState === WebSocket.OPEN) targetWs.send(data, { binary: isBinary });
       else if (!opened && pending.length < 256) pending.push({ data, isBinary }); // bounded: never buffer unboundedly
@@ -1066,7 +1065,7 @@ server.on('upgrade', (req, socket, head) => {
   } else {
     const port = req.url ? resolveSidecarPort(req.url) : null;
     if (port) {
-      // A sidecar socket is a LIVE ATTACHED SHELL (lane-pty) — read/write on the user's terminals. It
+      // A sidecar socket is a LIVE ATTACHED SHELL (a terminal daemon) — read/write on the user's terminals. It
       // must be authenticated BEFORE we bridge it, like the HTTP routes (`requireAuth`) and the `/ws`
       // control socket (its `auth` message). NOTE the limit of this gate: it is IDENTITY-ONLY. It proves
       // the token belongs to a valid user; it does NOT check that the user owns (or may access) the
@@ -1223,9 +1222,6 @@ if (process.env.SHRAGA_OVERLAY) {
 // so their routes mount ahead of the SPA fallback, identical to the overlay path.
 for (const f of __reg.features ?? []) registerFeature(f);
 registerFeature(slackFeature);
-// webhook-lane external-agent lane — a second medium alongside Slack; both subscribe the owner-notice
-// bus independently, so neither affects the other.
-registerFeature(webhookLaneFeature);
 mountFeatures({ app, requireAuth, broadcast, passive: PASSIVE });
 // Fold in feature-contributed sidecar WS proxy routes (the core names none; each add-on adds its own).
 Object.assign(WS_PROXY_ROUTES, collectSidecarRoutes());

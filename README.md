@@ -85,7 +85,9 @@ The core is deliberately small and grows through documented seams (see
 | **Server features** (`src/server/features.ts`) | Mount new server-side surfaces via `registerFeature`. |
 | **Client slots** (`src/client/lib/slots.tsx`) | Inject UI into typed render slots without touching core. |
 | **Route extensions** (`data/extensions/*.ext.ts`) | Drop-in public routes (webhooks, OAuth callbacks) per deployment. |
+| **Webhook lane** (`src/server/webhook-lane/`) | Give an external chat product a turn ingress that streams the answer back to a signed callback. |
 | **`SHRAGA_OVERLAY`** | Load a whole external add-on module at startup (the optional add-ons above). |
+| **`SHRAGA_CLI_EXT`** | Hand any subcommand the core does not own to an external CLI module. |
 
 ## Use as a library
 

@@ -19,10 +19,10 @@ export function ownerEmails(): string[] {
 /** Is this email address an owner of this deployment?
  *
  *  Exported because a medium that is not Slack cannot use `resolveOwners`: that returns Slack ids
- *  (OWNERS ∩ contacts WITH a Slack id), which is a Slack-shaped answer. The lane lane holds a
- *  shraga uid + the email of the API key that opened the link, so it joins on the email instead.
- *  An empty/unknown address is NOT an owner — the fail-closed direction, since the alternative is
- *  fanning a deploy report out to whoever happened to link a lane. */
+ *  (OWNERS ∩ contacts WITH a Slack id), which is a Slack-shaped answer. A webhook-lane add-on, for
+ *  instance, holds a shraga uid + the email of the API key that opened the link, so it joins on the
+ *  email instead. An empty/unknown address is NOT an owner — the fail-closed direction, since the
+ *  alternative is fanning a deploy report out to whoever happened to open a link. */
 export function isOwnerEmail(email: string | undefined | null): boolean {
   const e = String(email ?? '').trim().toLowerCase();
   return !!e && ownerEmails().includes(e);
@@ -48,8 +48,9 @@ export function senderStamp(): string {
  * side.
  *
  * Returns NOTHING, on purpose. It used to return "was there anyone to tell", which was a truthful
- * answer only while Slack was the sole medium: `resolveOwners` filters on a SLACK id, so once lane
- * subscribes the same bus an empty owner list means "no Slack owner", not "nobody was notified".
+ * answer only while Slack was the sole medium: `resolveOwners` filters on a SLACK id, so once another
+ * medium subscribes the same bus an empty owner list means "no Slack owner", not "nobody was
+ * notified".
  * Rather than keep a boolean whose meaning depends on which features happen to be registered — no
  * caller reads it (`data-sync.ts`, `self-upgrade/index.ts`) — the notice is emitted unconditionally
  * and each subscriber decides for itself. The Slack subscriber already no-ops on an empty

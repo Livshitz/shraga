@@ -29,18 +29,22 @@ Subcommands:
   ingress                 Run the host-header TCP router (INGRESS_PORT, default 3100)
                           for previews + blue-green flips. Own process, survives restarts.
   user add <email> <pw>   Seed a local username/password user
-  lane post [text]        Push a message into a linked webhook-lane conversation.
-                          Text from [text], --file <path>, or stdin (preferred for
-                          multi-line reports). --conn <id> picks a link when several exist.
+  <add-on>                Any other subcommand is handed to SHRAGA_CLI_EXT, if set.
 
 Environment:
   CLOUDFLARE_TUNNEL_TOKEN   If set, starts a Cloudflare Tunnel alongside the server.
                             Get the token from Cloudflare Zero Trust > Tunnels > Configure.
   ANTHROPIC_API_KEY         Claude API key (or use \`claude auth login\` for subscription auth)
   VITE_FIREBASE_CONFIG_PROD Firebase config JSON for auth (prod project)
+  SHRAGA_CLI_EXT            Absolute path to an add-on CLI module. Any subcommand this CLI
+                            does not own is handed to it before the server boots. See the
+                            CLI EXTENSION SEAM comment in src/cli.ts.
 `.trim());
   process.exit(0);
 }
+
+/** Subcommands the core owns. Everything else is offered to SHRAGA_CLI_EXT (see below). */
+const CORE_SUBCOMMANDS = new Set(['user', 'ingress']);
 
 const port = flag('port', 'p');
 const dataDir = flag('data-dir', 'd');
@@ -62,58 +66,31 @@ if (args[0] === 'user' && args[1] === 'add') {
   process.exit(0);
 }
 
-// `shraga lane post [text]` — the PROACTIVE half of the webhook-lane agent lane.
+// ── CLI EXTENSION SEAM ───────────────────────────────────────────────────────
 //
-// The reactive half (lane asks, shraga answers) is driven by webhook-lane calling `/api/lane/turn`, and
-// the only other outbound path is the deploy-notice bus subscriber in `webhook-lane/feature.ts` — which is
-// gated on `kind === 'deploy'`. So a SCHEDULED run (a daily digest) had no way to reach the lane at
-// all: it composes text on its own clock with no inbound turn to answer and no deploy event to ride.
-// This is that door, and it is a CLI rather than a route because the caller is the agent itself,
-// running Bash on this very box: a local process reading the same `webhook-lanenks.json` the feature
-// writes needs no listener, no API key, and no second copy of the callback secret.
+// The twin of the `registerFeature` / SHRAGA_OVERLAY seam, for the command line. The core owns a
+// short, fixed list of subcommands; ANY other one is handed to the module named by SHRAGA_CLI_EXT,
+// so a downstream distribution can ship its own commands without the core naming them.
 //
-// Text comes from stdin by default. A digest is multi-line markdown with backticks and emoji, and
-// making a model shell-quote that into argv is a defect generator; `... | shraga lane post` is not.
-if (args[0] === 'lane' && args[1] === 'post') {
-  const { loadLinks } = await import('./server/webhook-lane/feature.ts');
-  const { postProactive } = await import('./server/webhook-lane/streamer.ts');
-
-  const links = loadLinks();
-  const wanted = flag('conn');
-  const ids = Object.keys(links);
-  // Refuse to guess. Picking "the first" would silently deliver a private report to whichever
-  // connection happened to sort first the day a second one is added.
-  const connId = wanted ?? (ids.length === 1 ? ids[0] : undefined);
-  if (!connId || !links[connId]) {
-    console.error(ids.length
-      ? `usage: shraga lane post --conn <connId>   (linked: ${ids.join(', ')})`
-      : 'no lane link yet — send one message from webhook-lane to this agent first, then retry.');
+// CONTRACT. The module is imported for side effects, with `process.argv` untouched — it reads argv
+// itself, and calls `process.exit()` when it has handled the command. If it returns without
+// exiting, we fall through to the normal server boot, which is exactly what an unrecognised
+// subcommand does today. It runs AFTER env resolution (so DATA_DIR/PORT are settled and the
+// extension sees the same data dir the server would) and BEFORE any server boot.
+//
+// WHY AN ENV VAR AND NOT A REGISTRY. There is no server process to register against — this is a
+// one-shot CLI. The path must come from the deployment, and the deployment already sets DATA_DIR
+// and friends the same way.
+const cliExt = process.env.SHRAGA_CLI_EXT?.trim();
+if (cliExt && args[0] && !args[0].startsWith('-') && !CORE_SUBCOMMANDS.has(args[0])) {
+  const { pathToFileURL } = await import('node:url');
+  const { resolve } = await import('node:path');
+  try {
+    await import(pathToFileURL(resolve(cliExt)).href);
+  } catch (err) {
+    console.error(`[cli-ext] failed to load ${cliExt}:`, (err as Error)?.stack || err);
     process.exit(1);
   }
-  const link = links[connId];
-
-  const file = flag('file');
-  let text: string;
-  if (file) {
-    text = (await import('node:fs')).readFileSync(file, 'utf-8');
-  } else {
-    // A bare positional (not a flag, and not a flag's VALUE) is accepted for one-liners.
-    const flagVals = new Set<string>();
-    for (let i = 0; i < args.length; i++) if (args[i].startsWith('--')) flagVals.add(args[i + 1]);
-    const positional = args.slice(2).find((a) => !a.startsWith('--') && !flagVals.has(a));
-    text = positional ?? await new Response(Bun.stdin.stream()).text();
-  }
-  if (!text.trim()) {
-    console.error('nothing to post: text was empty (pipe it on stdin, pass --file, or give it as an argument)');
-    process.exit(1);
-  }
-
-  const ok = await postProactive({ url: link.url, secret: link.secret, connId }, link.convId, text);
-  // Exit code is the point: `postProactive` swallows transport failures into `false`, so a caller
-  // that only looked at stdout would read a silent drop as a successful delivery.
-  if (!ok) { console.error(`\u2716 lane post FAILED \u2192 ${link.convId}`); process.exit(1); }
-  console.log(`\u2705 posted to ${link.convId}`);
-  process.exit(0);
 }
 
 // `shraga ingress` — host-header TCP router for previews + blue-green flips.

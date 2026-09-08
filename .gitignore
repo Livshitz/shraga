@@ -27,11 +27,13 @@ coverage
 /backups/
 /secrets/
 .internal-token
+# terminal-sidecar session logs: a locally-run pty daemon writes `<its cwd>/.<name>-pty/sessions/`
+# into whatever checkout it is started from, so any clone can grow one full of private transcripts.
+/.*-pty/
 
 # generated MCP config for local agent CLIs
 .mcp.json
 .mcp-*
-.sidecar-pty
 
 # editor / OS
 .idea

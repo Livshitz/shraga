@@ -80,6 +80,21 @@ per-vendor `verify` over the raw body, and on success emits the typed event — 
 matching `event`-trigger schedules. A webhook IS an extension (it mounts on the same Router before
 the SPA catch-all); the factory sugar reuses that seam rather than inventing a parallel one.
 
+**5. Webhook lane: `src/server/webhook-lane/`**
+A prebuilt `ServerFeature` for the case where an EXTERNAL chat product owns the UI and cannot hold
+an HTTP response open for a whole agent run. `createWebhookLaneFeature({ name, route,
+onTurnAccepted?, channel?, source?, streamer? })` returns a feature you pass to `registerFeature`.
+It mounts `POST <route>`, authenticated with an ordinary shraga API key (`validateApiKey` on the
+`Authorization: Bearer` header, 401 otherwise), requires `connId`/`convId`/`msgId`/`prompt` plus a
+`callback.url` (https, or loopback) and `callback.secret` in the body, answers `{ status:
+'accepted' }` immediately, then runs the turn and POSTs the answer back progressively to that
+callback, each delivery HMAC-signed with the per-turn secret. `onTurnAccepted(link)` is a
+NOTIFICATION, not a gate: it fires once per accepted turn before the run starts so an add-on can
+persist the connection, and a throw is caught and logged — the turn still runs and still answers.
+`runWebhookTurn(...)` is exported separately for an add-on that brings its own ingress. The core
+registers nothing here and declares no flag; where links are persisted, which may receive proactive
+posts, and the route path are all the add-on's.
+
 ### The overlay contract
 
 `SHRAGA_OVERLAY` points at an external module **outside the core release tree**. `boot.ts` does
@@ -92,6 +107,19 @@ core never crashes on it. The overlay module **must live outside the release tre
 (which replace the tree) don't wipe it. Prefer a programmatic `createShraga().registerFeature(...)`
 embed when you own the entry point; use `SHRAGA_OVERLAY` when you're running the stock CLI/binary
 and only want to inject an external module.
+
+### The CLI extension seam
+
+`SHRAGA_CLI_EXT` is the command-line twin of the overlay. The core owns a short fixed list of
+subcommands (`user`, `ingress`); `src/cli.ts` hands ANY other non-flag first argument to the module
+this env var names, so a downstream distribution ships its own commands without the core naming
+them. The path is resolved against CWD and imported for side effects with `process.argv`
+UNTOUCHED — the module parses argv itself and calls `process.exit()` once it has handled the
+command. Returning without exiting falls through to the normal server boot, which is what an
+unrecognised subcommand already did. It runs AFTER env resolution (so `DATA_DIR`/`PORT` are settled
+and the extension sees the same data dir the server would) and BEFORE any boot. A failed import is
+logged and exits non-zero. It is an env var and not a registry because there is no server process
+to register against: this is a one-shot CLI, and the path must come from the deployment.
 
 ### The core rule
 
