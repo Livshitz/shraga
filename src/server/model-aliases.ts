@@ -8,7 +8,8 @@
 
 /** Canonical short aliases → concrete Anthropic model ids. */
 export const MODEL_ALIASES: Record<string, string> = {
-  fable: 'claude-fable-5',
+  fable: 'claude-fable-5-1',
+  'fable-5-1': 'claude-fable-5-1',
   'fable-5': 'claude-fable-5',
   opus: 'claude-opus-5',
   'opus-5': 'claude-opus-5',

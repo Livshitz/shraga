@@ -207,7 +207,8 @@ export class ClaudeCodeEngine implements AgentEngine {
   getModels(): EngineModel[] {
     return [
       { value: '', label: `Default (${DEFAULT_MODEL})` },
-      { value: 'claude-fable-5', label: 'Fable 5 — frontier, most capable' },
+      { value: 'claude-fable-5-1', label: 'Fable 5.1 — frontier, most capable' },
+      { value: 'claude-fable-5', label: 'Fable 5' },
       { value: 'claude-opus-5', label: 'Opus 5 — most capable' },
       { value: 'claude-opus-4-8', label: 'Opus 4.8' },
       { value: 'claude-opus-4-7', label: 'Opus 4.7' },
