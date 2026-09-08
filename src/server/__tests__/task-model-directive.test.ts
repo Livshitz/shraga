@@ -1,5 +1,11 @@
-import { describe, test, expect } from 'bun:test';
-import { parseDirectives } from '../directives.ts';
+import { describe, test, expect, beforeEach } from 'bun:test';
+import { parseDirectives, setModelResolver } from '../directives.ts';
+
+// These assert the NO-resolver behaviour (a bare `composer-2.5` is unresolvable, so the token is
+// reported instead of silently becoming a model). The resolver is a module global that any other
+// test file may have installed, and bun's file order differs between macOS and Linux CI — so own
+// it here rather than inheriting whatever ran first.
+beforeEach(() => setModelResolver(null));
 
 // A scheduled run's runtime IS the prompt's leading directive — there is no stored pin behind it
 // any more. These tests pin the shapes a schedule prompt actually carries (including the one the
