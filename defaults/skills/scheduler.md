@@ -305,7 +305,7 @@ The dedup key is built from the named payload fields (dot-paths), string-normali
 `builtin-failure-notifier` is a shipped, **disabled-by-default** schedule that reacts to `schedule.finished` / `status:error`, triages the error (credential-expiry / rate-limit / data-issue / generic), and DMs the deployment owner — throttled to one alert per job+error per 6h. To use it:
 
 1. Enable it (toggle the schedule).
-2. Optionally set `SHRAGA_ALERT_SLACK_EMAIL` (the legacy `UNCLAW_ALERT_SLACK_EMAIL` is still honoured) (else it falls back to the first `data/whitelist.json` entry).
+2. Recipient: the first `OWNERS` entry by default — the same list auth and the deploy notices join on, so an owner is alerted with no extra config. `SHRAGA_ALERT_SLACK_EMAIL` (legacy `UNCLAW_ALERT_SLACK_EMAIL` still honoured) overrides it. Only if both are unset does it fall back to the first `data/whitelist.json` entry, which picks by array order and is a last resort.
 3. Set `PUBLIC_ORIGIN` (or `publicOrigin` in the data-dir config) so the alert can link to the failed run's session. It is the only source of a publicly-reachable origin — a scheduled run has no request to derive one from. Unset, the `sessionUrl` payload field is absent and the alert omits the link rather than emitting an unreachable `localhost` one.
 4. Optionally edit its `task.prompt` to add deployment specifics (recipients, runbook links, severity rules) — your edits to a builtin's prompt and `enabled` flag survive upgrades; only `name`/`scope`/`createdBy` reconcile from code. Because `task.prompt` is deliberately *not* reconciled, the alert's session link is supplied through the event payload (`sessionUrl`) instead, so it reaches deployments that already persisted the schedule.
 

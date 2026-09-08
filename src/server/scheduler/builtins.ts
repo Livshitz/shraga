@@ -14,6 +14,17 @@ export const DAILY_GARDEN_SCHEDULE_ID = 'builtin-daily-garden';
 export const HOURLY_SUMMARIZER_SCHEDULE_ID = 'builtin-conversation-summarizer';
 export const FAILURE_NOTIFIER_SCHEDULE_ID = 'builtin-failure-notifier';
 
+/** Who the failure alert goes to. $OWNERS is THE definition of "an owner of this deployment"
+ *  (see notify-owners.ts — auth, data-sync alerts and self-upgrade reports all join on it), so
+ *  the notifier joins on it too rather than inventing a third answer. The whitelist is an
+ *  authentication list, not an authority list: falling back to its first entry picks by array
+ *  order, which is only ever right by luck. */
+const OWNER_RESOLUTION = [
+  'resolve the owner from $OWNERS (comma-separated emails, first entry) —',
+  '$SHRAGA_ALERT_SLACK_EMAIL (or legacy $UNCLAW_ALERT_SLACK_EMAIL) overrides it;',
+  'only if BOTH are unset, fall back to the first entry in data/whitelist.json',
+].join(' ');
+
 /** Generic triage prompt for the failure notifier. Deployments override the prompt
  *  (recipients, runbooks, severity rules) — their edits survive reconcile. The session link
  *  is NOT part of that: it comes from the event payload (see getSessionUrl), precisely so it
@@ -31,8 +42,7 @@ const FAILURE_NOTIFIER_PROMPT = [
   'Severity is HIGH for revenue/reporting-critical jobs, otherwise NORMAL.',
   '',
   'NOTIFY — send exactly ONE concise alert to the deployment owner, then stop. Prefer a Slack DM',
-  'if a Slack tool is configured (resolve the owner from $SHRAGA_ALERT_SLACK_EMAIL (or legacy $UNCLAW_ALERT_SLACK_EMAIL), else the first',
-  'entry in data/whitelist.json); otherwise email them. Suggested format:',
+  `if a Slack tool is configured (${OWNER_RESOLUTION}); otherwise email them. Suggested format:`,
   '  :rotating_light: *<category>*<add " [HIGH]" if high severity> — scheduled job failed: *<name>*',
   '  *What:* <one plain-language line>',
   '  *Fix:* <actionable next step from triage>',
@@ -55,6 +65,11 @@ const FAILURE_NOTIFIER_PROMPT = [
  *  and every occurrence is healed (a stored prompt may mention the link more than once). */
 const LEGACY_SESSION_LINE = /^.*<deployment URL>\/\?session=<sessionId>(.*)$/gm;
 const SESSION_LINE_FIX = "  *Session:* <the payload's sessionUrl, verbatim — omit this line if absent>";
+
+/** Same reason as above: reconcile preserves a stored prompt, so a deployment that persisted the
+ *  whitelist-order fallback keeps it forever. Matched on the exact shipped wording (it spans a
+ *  line break) so a deployment that hand-wrote its own recipient is left alone. */
+const LEGACY_OWNER_RESOLUTION = /resolve the owner from \$SHRAGA_ALERT_SLACK_EMAIL[\s\S]*?entry in data\/whitelist\.json/g;
 
 export function isSystemSchedule(schedule: Schedule): boolean {
   return schedule.scope === 'system';
@@ -92,6 +107,7 @@ export function backfillScope(schedules: Schedule[]): void {
       // `$1` keeps whatever the deployment wrote after the placeholder. No .test() guard:
       // LEGACY_SESSION_LINE is global, and a global regex's .test() carries lastIndex between calls.
       task.prompt = task.prompt.replace(LEGACY_SESSION_LINE, `${SESSION_LINE_FIX}$1`);
+      task.prompt = task.prompt.replace(LEGACY_OWNER_RESOLUTION, OWNER_RESOLUTION);
     }
   }
 }
