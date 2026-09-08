@@ -15,7 +15,8 @@ export async function initEngines(): Promise<void> {
   // Core always registers the Claude Code engine (the CE default — @anthropic-ai/claude-agent-sdk).
   // Optional engines are registered by an add-on through the same `registerEngine` seam when the
   // SHRAGA_OVERLAY loads (it's imported before the server serves any turn). Bare CE runs Claude Code
-  // only; a directive requesting an unregistered engine falls back to claude-code (resolveAndGetEngine).
+  // only; a directive requesting an unregistered engine FAILS the turn (resolveAndGetEngine) rather
+  // than rerouting to another vendor's billing.
   registerEngine(new ClaudeCodeEngine());
 
   // Let `[<model>]` name ANY registered engine's model (e.g. `[composer-2.5]`) and imply its engine.
@@ -49,15 +50,26 @@ export function resolveEngine(directives?: { engine?: string }, agentConfig?: { 
   return 'claude-code';
 }
 
+/** Requested engine isn't registered on this boot. Carries an actionable message; callers surface it
+ *  as a turn error (see streamClaude) — never as a reroute to a different vendor's engine/billing. */
+export class EngineUnavailableError extends Error {
+  constructor(public readonly engine: string, available: string[]) {
+    super(
+      `Engine "${engine}" is not available on this server. Registered engines: ${available.join(', ') || 'none'}. ` +
+        `Optional engines register only when enabled at boot (AGENT_ENGINES must list the engine; the native ` +
+        `cursor engine also needs CURSOR_API_KEY) — check the server env and startup log, then retry. ` +
+        `The run was stopped rather than silently re-routed to another provider's billing.`,
+    );
+    this.name = 'EngineUnavailableError';
+  }
+}
+
 export function resolveAndGetEngine(directives?: { engine?: string }, agentConfig?: { engine?: string }) {
   const name = resolveEngine(directives, agentConfig);
   // An optional engine may be unregistered on a given boot (add-on not loaded, missing API key or
-  // failed init). Don't let that throw and kill every run — including scheduled jobs like the daily
-  // digest, which resolve the engine from the global agent-config. Fall back to the always-present
-  // claude-code engine with a warning instead.
-  if (!hasEngine(name)) {
-    console.warn(`[engine] "${name}" not registered (available: ${getAvailableEngines().join(', ') || 'none'}) — falling back to claude-code`);
-    return getEngine('claude-code');
-  }
+  // failed init). Rerouting to claude-code here silently switched PROVIDER AND BILLING under the
+  // caller — a cursor/agentx run billed Anthropic while the UI still showed the cursor chips. Fail
+  // loudly instead; the degradation is surfaced to whoever asked (user, schedule) as a turn error.
+  if (!hasEngine(name)) throw new EngineUnavailableError(name, getAvailableEngines());
   return getEngine(name);
 }

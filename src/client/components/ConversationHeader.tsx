@@ -11,11 +11,45 @@ interface SessionDirectives {
   engine?: string;
 }
 
+/** What the chips must report: the engine/model that ACTUALLY ran, and whether that disagrees with
+ *  what this session asks for. Pure, so the rule is testable without a DOM.
+ *
+ *  The bug this replaces: the old code inferred the engine from the model id's SHAPE (bare ⇒ native)
+ *  and threw away the runtime-recorded model whenever the shape disagreed with the requested engine —
+ *  i.e. precisely in the case where a run had silently switched provider. The header was structurally
+ *  incapable of reporting a fallback, so a run that billed Anthropic still showed the Cursor chips.
+ *  Runtime ground truth now arrives as a self-consistent (engine, model) PAIR, so nothing is inferred. */
+export function deriveRuntimeBadges(input: {
+  requestedEngine?: string;
+  requestedModel?: string;
+  /** Engine that ran the last turn (session meta `lastEngine`). */
+  actualEngine?: string;
+  /** Model that engine resolved (session meta `lastModel`). */
+  actualModel?: string;
+}) {
+  const requestedEngine = input.requestedEngine || 'claude-code';
+  const engine = input.actualEngine || requestedEngine;
+  // A mismatch is a fact worth showing, not something to launder away: the last turn ran somewhere
+  // other than where this session currently asks to run.
+  const engineMismatch = input.actualEngine && input.actualEngine !== requestedEngine ? requestedEngine : undefined;
+  const engineIsNative = engine === 'claude-code' || engine === 'cursor';
+  // Only trust the recorded model when we also know which engine recorded it — the pair, or neither.
+  const rawModel =
+    (input.actualEngine ? input.actualModel : undefined) ||
+    input.requestedModel ||
+    (engine === 'cursor' ? 'cursor/composer-2.5' : 'sonnet-4-6');
+  // Provider = the model's prefix; a bare id belongs to the engine that ran it (claude-code ⇒ anthropic,
+  // an add-on engine ⇒ that engine's own provider) — never assume anthropic just because a prefix is absent.
+  const billingProvider = rawModel.includes('/') ? rawModel.split('/')[0] : engine === 'claude-code' ? 'anthropic' : engine;
+  return { engine, engineIsNative, engineMismatch, rawModel, billingProvider };
+}
+
 function InfoBadges({
   sessionId,
   config,
   sessionDirectives,
   actualModel,
+  actualEngine,
   scheduleId,
   onScheduleClick,
 }: {
@@ -24,19 +58,19 @@ function InfoBadges({
   sessionDirectives?: SessionDirectives;
   /** Model the engine actually resolved at runtime (session meta `lastModel`) — beats configured/requested. */
   actualModel?: string;
+  /** Engine that actually ran the last turn (session meta `lastEngine`). Ground truth, arriving in the
+   *  same `model_resolved` event as `actualModel` — so the pair never has to be inferred from a shape. */
+  actualEngine?: string;
   scheduleId?: string;
   onScheduleClick?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
-  const engine = sessionDirectives?.engine || config.engine || 'claude-code';
-  // The native Claude Code engine records a bare `claude-*` id; a multi-provider add-on engine records
-  // a `provider/model` id. Trust the recorded model only when its shape matches the current engine
-  // family, or a session that has since switched engines would show the previous engine's model.
-  const recordedByNative = actualModel ? !actualModel.includes('/') : undefined;
-  const engineIsNative = engine === 'claude-code' || engine === 'cursor';
-  const trustedActual = recordedByNative !== undefined && recordedByNative === engineIsNative ? actualModel : undefined;
-  const rawModel =
-    trustedActual || sessionDirectives?.model || config.model || (engine === 'cursor' ? 'cursor/composer-2.5' : 'sonnet-4-6');
+  const { engine, engineIsNative, engineMismatch, rawModel, billingProvider } = deriveRuntimeBadges({
+    requestedEngine: sessionDirectives?.engine || config.engine,
+    requestedModel: sessionDirectives?.model || config.model,
+    actualEngine,
+    actualModel,
+  });
   // A multi-provider add-on engine runs any provider's model through its own loop, so it must be
   // distinguishable from a native runtime running the same model. Prefix such a model with the engine
   // name; native engines (claude-code, cursor) show the model plainly. Engine name comes from data.
@@ -46,8 +80,6 @@ function InfoBadges({
   // engine / provider-prefixed model runs on that provider's key (ai.libx.js adapters throw without
   // one). What that key COSTS is plan-dependent and NOT knowable here (Anthropic API is metered;
   // a Cursor key may draw on a Cursor subscription) — so we label the mechanism, not the billing.
-  // Provider = the model's prefix (bare ⇒ anthropic).
-  const billingProvider = rawModel.includes('/') ? rawModel.split('/')[0] : 'anthropic';
   const onSubscription = engine === 'claude-code' && config.claudeAuthSource === 'subscription';
   // Tone: green = claude.ai login (no key); amber = provider key whose usage may be subscription-
   // covered (Cursor); rose = provider key that is genuinely metered (Anthropic/OpenAI/etc.).
@@ -87,6 +119,14 @@ function InfoBadges({
       >
         {onSubscription ? 'sub' : `API·${billingProvider}`}
       </span>
+      {engineMismatch && (
+        <span
+          title={`This session requests the "${engineMismatch}" engine, but the last turn actually ran on "${engine}" — so the chips above report ${engine}, and that provider was billed.`}
+          className="inline-flex items-center rounded-md bg-rose-50 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 ring-1 ring-inset ring-rose-600/20 dark:bg-rose-950/50 dark:text-rose-300 dark:ring-rose-400/30"
+        >
+          ≠ {engineMismatch}
+        </span>
+      )}
       <span className="inline-flex items-center rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20 dark:bg-amber-950/50 dark:text-amber-300 dark:ring-amber-400/30">
         {permLabel}
       </span>
@@ -127,6 +167,7 @@ export interface ConversationHeaderProps {
   agentConfig: AgentConfig;
   sessionDirectives?: SessionDirectives;
   sessionLastModel?: string;
+  sessionLastEngine?: string;
   sessionScheduleId?: string;
   artifactCount: number;
   getToken: () => Promise<string | null>;
@@ -143,6 +184,7 @@ export function ConversationHeader({
   agentConfig,
   sessionDirectives,
   sessionLastModel,
+  sessionLastEngine,
   sessionScheduleId,
   artifactCount,
   getToken,
@@ -159,6 +201,7 @@ export function ConversationHeader({
         config={agentConfig}
         sessionDirectives={sessionDirectives}
         actualModel={sessionLastModel}
+        actualEngine={sessionLastEngine}
         scheduleId={sessionScheduleId}
         onScheduleClick={onScheduleClick}
       />

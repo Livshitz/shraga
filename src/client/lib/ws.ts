@@ -26,7 +26,7 @@ export type ServerEvent =
   | { type: 'session_id'; sessionId: string }
   | { type: 'forked'; sourceSessionId: string; sessionId: string }
   | { type: 'done'; sessionId: string; stopReason?: 'end_turn' | 'max_turns_reached' | (string & {}) }
-  | { type: 'model_resolved'; sessionId: string; model: string }
+  | { type: 'model_resolved'; sessionId: string; model: string; engine: string }
   | { type: 'error'; message: string; sessionId?: string }
   | { type: 'workspace_change'; action: 'created' | 'modified' | 'deleted'; path: string }
   | { type: 'disconnected' }

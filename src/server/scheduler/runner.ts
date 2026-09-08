@@ -219,10 +219,11 @@ export async function runSchedule(
   // task.engine/task.model ride the same prompt-directive channel users type by hand —
   // parseDirectives strips them and resolves aliases. Prepending (vs new plumbing) also persists the
   // choice into the saved prompt, so the session UI shows what the schedule actually requested.
-  if (!resume) {
-    const pins = [task.engine && `engine:${task.engine}`, task.model && `model:${task.model}`].filter(Boolean);
-    if (pins.length) prompt = `[${pins.join(',')}] ${prompt}`;
-  }
+  // Applied on RESUME too: a resume's prompt is a fresh "continue where you left off" string, not the
+  // saved original, so skipping this here silently dropped the schedule's engine/model pin and let the
+  // resumed turn run on the global default — a different engine, and a different vendor's bill.
+  const pins = [task.engine && `engine:${task.engine}`, task.model && `model:${task.model}`].filter(Boolean);
+  if (pins.length) prompt = `[${pins.join(',')}] ${prompt}`;
 
   // Save the synthesized user prompt to the conversation (skip on resume — task prompt already persisted).
   if (!resume) {

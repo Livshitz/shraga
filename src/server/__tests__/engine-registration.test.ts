@@ -5,14 +5,14 @@ import { describe, test, expect } from 'bun:test';
  * optional add-on (SHRAGA_OVERLAY) contributes more engines through the same `registerEngine` export.
  *
  * The trap this guards: CE's initEngines() could regress to naming/constructing an add-on engine
- * itself (re-coupling CE to an add-on runtime), or resolveAndGetEngine() could stop falling back to
- * claude-code when a requested engine isn't registered (killing every turn on a bare-CE boot). Both
- * are exactly what an add-on-free CE must never do — so this test names no add-on engine either; it
+ * itself (re-coupling CE to an add-on runtime), or resolveAndGetEngine() could go back to silently
+ * REROUTING an unregistered engine to claude-code — which switched provider and billing under the
+ * caller while the UI still reported the requested one. This test names no add-on engine either; it
  * uses a neutral placeholder for "some engine only an overlay would register".
  *
  * DATA_DIR comes from the shared preload (bunfig.toml → setup.ts).
  */
-const { initEngines, resolveAndGetEngine, getAvailableEngines } = await import('../engine/index.ts');
+const { initEngines, resolveAndGetEngine, getAvailableEngines, EngineUnavailableError } = await import('../engine/index.ts');
 const { registerEngine, hasEngine } = await import('../engine/registry.ts');
 import type { AgentEngine } from '../engine/types.ts';
 
@@ -33,10 +33,20 @@ describe('engine-registration seam (CE registers claude-code only; overlay adds 
     expect(getAvailableEngines()).not.toContain(OVERLAY_ENGINE);
   });
 
-  test('a directive for an unregistered engine falls back to claude-code (graceful degrade)', () => {
-    // Before any overlay registers it, requesting an overlay engine must NOT throw — it degrades.
+  test('a directive for an unregistered engine FAILS LOUDLY — never reroutes to claude-code', () => {
     expect(hasEngine(OVERLAY_ENGINE)).toBe(false);
-    expect(resolveAndGetEngine({ engine: OVERLAY_ENGINE }).name).toBe('claude-code');
+    expect(() => resolveAndGetEngine({ engine: OVERLAY_ENGINE })).toThrow(EngineUnavailableError);
+    // The message has to be actionable: the missing engine, what IS registered, and the env gate.
+    let msg = '';
+    try { resolveAndGetEngine({ engine: OVERLAY_ENGINE }); } catch (e) { msg = (e as Error).message; }
+    expect(msg).toContain(OVERLAY_ENGINE);
+    expect(msg).toContain('claude-code');
+    expect(msg).toContain('AGENT_ENGINES');
+  });
+
+  test('a bare CE boot (no engine requested anywhere) still resolves — not bricked', () => {
+    expect(resolveAndGetEngine().name).toBe('claude-code');
+    expect(resolveAndGetEngine({}, {}).name).toBe('claude-code');
   });
 
   test('a simulated overlay registration adds the engine and resolveAndGetEngine picks it', () => {
@@ -49,7 +59,8 @@ describe('engine-registration seam (CE registers claude-code only; overlay adds 
     registerEngine(fake); // the exact call an overlay makes at import time
     expect(hasEngine(OVERLAY_ENGINE)).toBe(true);
     expect(resolveAndGetEngine({ engine: OVERLAY_ENGINE }).name).toBe(OVERLAY_ENGINE);
-    // claude-code still resolvable + still the fallback for an unknown engine.
-    expect(resolveAndGetEngine({ engine: 'nope-not-registered' }).name).toBe('claude-code');
+    // claude-code still resolvable; an unknown engine still fails rather than borrowing its billing.
+    expect(resolveAndGetEngine({ engine: 'claude-code' }).name).toBe('claude-code');
+    expect(() => resolveAndGetEngine({ engine: 'nope-not-registered' })).toThrow(EngineUnavailableError);
   });
 });

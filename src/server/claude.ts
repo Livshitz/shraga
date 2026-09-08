@@ -81,7 +81,7 @@ export type WsEvent =
   | { type: 'question_request'; id: string; questions: AskQuestion[] }
   | { type: 'thinking_delta'; text: string }
   | { type: 'done'; sessionId: string; stopReason?: 'end_turn' | 'max_turns_reached' | (string & {}); builtinHandled?: boolean }
-  | { type: 'model_resolved'; sessionId: string; model: string }
+  | { type: 'model_resolved'; sessionId: string; model: string; engine: string }
   | { type: 'error'; message: string }
   | { type: 'stats'; sample: { t: number; cpu: number; mem: number; load: number; disk: number; diskUsedBytes?: number; diskTotalBytes?: number } };
 // Add-on engines/features emit their OWN events (e.g. a duplex voice brain's `duplex_*`) through the
@@ -356,8 +356,19 @@ export async function* streamChat(opts: {
     console.log(`[stream] turn-context injected (${turnContext.length} chars) for session=${sessionId}`);
   }
 
-  // Resolve engine and delegate
-  const engine = resolveAndGetEngine(directives as any, config);
+  // Resolve engine and delegate. An unregistered engine is a HARD stop: rerouting to claude-code
+  // would switch provider and billing under the caller while the UI still showed the requested one.
+  // Surfaced as a turn `error` event (not a throw) so every transport — WS, Slack, scheduler, MCP,
+  // webhook — reports it the same way and a scheduled run is marked failed instead of dying.
+  let engine: ReturnType<typeof resolveAndGetEngine>;
+  try {
+    engine = resolveAndGetEngine(directives as any, config);
+  } catch (err) {
+    const message = (err as Error).message;
+    console.error(`[stream] ${message} (user=${opts.uid} session=${sessionId})`);
+    yield { type: 'error', message };
+    return;
+  }
   console.log(`[stream] engine=${engine.name} user=${opts.uid} session=${sessionId}`);
 
   yield* engine.stream({

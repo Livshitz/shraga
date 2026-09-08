@@ -43,6 +43,9 @@ export function ConversationPane({ nodeId, sessionId }: { nodeId: string; sessio
   const [sessionDirectives, setSessionDirectives] = useState<SessionDirectives | undefined>();
   const [sessionScheduleId, setSessionScheduleId] = useState<string | undefined>();
   const [sessionLastModel, setSessionLastModel] = useState<string | undefined>();
+  // Engine that ACTUALLY ran the last turn — always set/cleared together with sessionLastModel, since
+  // the pair is the runtime ground truth the header reports (neither half may be inferred).
+  const [sessionLastEngine, setSessionLastEngine] = useState<string | undefined>();
   const [multiParticipant, setMultiParticipant] = useState(false);
 
   const artifacts = useArtifacts(currentSessionId, ws.getToken, ws.token);
@@ -66,9 +69,10 @@ export function ConversationPane({ nodeId, sessionId }: { nodeId: string; sessio
       } else if (event.type === 'directives') {
         // Optimistic-then-confirm pill: drop stale ground-truth so the pill shows the just-requested
         // model. Untagged event — gate on this pane being mid-turn so idle panes don't flicker.
-        if (busyRef.current) setSessionLastModel(undefined);
+        if (busyRef.current) { setSessionLastModel(undefined); setSessionLastEngine(undefined); }
       } else if (event.type === 'model_resolved' && event.sessionId === currentSessionIdRef.current) {
         setSessionLastModel(event.model);
+        setSessionLastEngine(event.engine);
       }
     },
     [ws, nodeId, artifacts],
@@ -113,6 +117,7 @@ export function ConversationPane({ nodeId, sessionId }: { nodeId: string; sessio
       setSessionDirectives(undefined);
       setSessionScheduleId(undefined);
       setSessionLastModel(undefined);
+      setSessionLastEngine(undefined);
       return;
     }
     apiFetch(`/api/sessions/${currentSessionId}/meta`, ws.getToken)
@@ -121,6 +126,7 @@ export function ConversationPane({ nodeId, sessionId }: { nodeId: string; sessio
         setSessionDirectives(meta.directives);
         setSessionScheduleId(meta.scheduleId);
         setSessionLastModel(meta.lastModel);
+        setSessionLastEngine(meta.lastEngine);
         if (meta.runStatus === 'running') conv.setBusy(true);
       })
       .catch(() => {});
@@ -221,6 +227,7 @@ export function ConversationPane({ nodeId, sessionId }: { nodeId: string; sessio
         agentConfig={ws.agentConfig}
         sessionDirectives={sessionDirectives}
         sessionLastModel={sessionLastModel}
+        sessionLastEngine={sessionLastEngine}
         sessionScheduleId={sessionScheduleId}
         artifactCount={artifacts.artifacts.length}
         getToken={ws.getToken}

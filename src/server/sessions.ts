@@ -38,6 +38,9 @@ export interface SessionMeta {
   directives?: Directives;
   /** Actual model the engine resolved at runtime (from the SDK init message) — ground truth, unlike directives.model which is the request. */
   lastModel?: string;
+  /** Engine that actually ran the last turn — ground truth beside `lastModel`, so the UI can report
+   *  what executed instead of inferring the engine from the model id's shape. */
+  lastEngine?: string;
   forkedFrom?: string;
 }
 
@@ -189,19 +192,24 @@ export function setSessionDirectives(sessionId: string, directives: NonNullable<
 // Resolved model per running session (set by the engine from the SDK init message).
 // appendMessage stamps assistant messages from this map so every channel records it.
 const liveModels = new Map<string, string>();
+const liveEngines = new Map<string, string>();
 
 /** Last resolved model for a session (live map first, then persisted lastModel). */
 export function getSessionModel(sessionId: string): string | undefined {
   return liveModels.get(sessionId) ?? loadIndex().find((s) => s.sessionId === sessionId)?.lastModel;
 }
 
-export function setSessionModel(sessionId: string, model: string): void {
-  if (liveModels.get(sessionId) === model) return;
+/** Record the runtime ground truth for a turn. `engine` is the engine that actually ran it — the
+ *  pair is what the header reports, so neither half may be inferred from the other. */
+export function setSessionModel(sessionId: string, model: string, engine?: string): void {
+  if (liveModels.get(sessionId) === model && (!engine || liveEngines.get(sessionId) === engine)) return;
   liveModels.set(sessionId, model);
+  if (engine) liveEngines.set(sessionId, engine);
   const sessions = loadIndex();
   const s = sessions.find((s) => s.sessionId === sessionId);
-  if (s && s.lastModel !== model) {
+  if (s && (s.lastModel !== model || (engine && s.lastEngine !== engine))) {
     s.lastModel = model;
+    if (engine) s.lastEngine = engine;
     saveIndex(sessions);
   }
 }

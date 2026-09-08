@@ -138,7 +138,11 @@ export function ensureBuiltinSchedules(schedules: Schedule[]): Schedule[] {
         match: { status: 'error' },
         throttle: { byFields: ['name', 'error'], windowSec: 21600 },
       },
-      task: { kind: 'prompt', prompt: FAILURE_NOTIFIER_PROMPT },
+      // Pinned to the always-registered engine ON PURPOSE. Left unpinned, this run inherits whatever
+      // agent-config.json's global `engine` happens to be — and an optional engine can simply not
+      // register on a given boot (add-on absent, missing API key), which is exactly the failure this
+      // job exists to report. Its own alert must not be the second casualty.
+      task: { kind: 'prompt', prompt: FAILURE_NOTIFIER_PROMPT, engine: 'claude-code' },
       scope: 'system',
       createdBy: { uid: SYSTEM_UID, email: 'system@shraga.local' },
       createdAt: now,
@@ -163,6 +167,16 @@ export function ensureBuiltinSchedules(schedules: Schedule[]): Schedule[] {
       existing.scope = builtin.scope;
       existing.trigger = existing.trigger ?? builtin.trigger;
       existing.createdBy = builtin.createdBy;
+      // A builtin's stored task is preserved (deployments edit the prompt) — with one exception: an
+      // engine/model pin is only meaningful as a PAIR. A stored task with a `model` but no `engine`
+      // was resolved against whatever the ambient global config was at the time, which is how the
+      // failure notifier ended up pinned to `composer-2.5` while running on claude-code. So when the
+      // builtin pins an engine and the stored task pins NONE, adopt the builtin's pair wholesale.
+      // An explicit stored `engine` is a real operator choice and is left untouched.
+      if (builtin.task.kind !== 'job' && existing.task.kind !== 'job' && builtin.task.engine && !existing.task.engine) {
+        existing.task.engine = builtin.task.engine;
+        existing.task.model = builtin.task.model;
+      }
     } else {
       schedules.push(builtin);
     }

@@ -10,7 +10,7 @@ import { registerProactiveMessage } from '../slack/sessions.ts';
 import { registerPoll } from '../polls.ts';
 import { getSession, setSessionModel, getSessionModel, type ConvMessage } from '../sessions.ts';
 import { DEFAULT_MODEL } from '../directives.ts';
-import { resolveModelSwitch } from '../model-aliases.ts';
+import { resolveModelSwitch, MODEL_ALIASES } from '../model-aliases.ts';
 import type { WsEvent, AskQuestion, QuestionAnswers, QuestionHandler } from '../claude.ts';
 import type { AgentEngine, EngineStreamOpts, EngineModel } from './types.ts';
 import { getPromptSuffix } from '../prompt-suffix.ts';
@@ -40,6 +40,16 @@ const DESTRUCTIVE_DATA_PATTERNS = [
   /\bfind\b.*\bdata\/(conversations?|sessions?|schedules?).*(-delete|-exec\s+rm)\b/i,
   />\s*data\/(conversations?|sessions?|schedules?)\//i,
 ];
+
+/** Is `id` a model this engine can actually run? Anything else — notably a foreign id like
+ *  `cursor/composer-2.5` or the bare `composer-2.5` a schedule pinned for another engine — used to be
+ *  forwarded straight to the Anthropic SDK, billing Anthropic for a model the caller never asked it
+ *  for. Shape-based rather than an exact list so dated ids (`claude-sonnet-4-5-20250929`) still pass.
+ *  An explicit `anthropic/` prefix is this engine's own provider and is stripped first. */
+function isOwnModel(id: string): boolean {
+  const bare = id.startsWith('anthropic/') ? id.slice('anthropic/'.length) : id;
+  return bare.startsWith('claude-') || bare.toLowerCase() in MODEL_ALIASES;
+}
 
 type DenyResult = { behavior: 'deny'; message: string };
 
@@ -303,7 +313,20 @@ export class ClaudeCodeEngine implements AgentEngine {
 
     // Always pass an explicit model — left unset, the CLI applies its own default
     // (observed: Opus 4.7), not what the UI's "Default" label promises.
-    options['model'] = directives.model ?? config.model ?? DEFAULT_MODEL;
+    const requestedModel = directives.model || config.model || DEFAULT_MODEL;
+    // Refuse a model that isn't ours instead of posting it to Anthropic. Substituting our default
+    // silently would be the same billing lie in a different costume, so this ends the turn.
+    if (!isOwnModel(requestedModel)) {
+      const message =
+        `Model "${requestedModel}" does not belong to the ${this.name} engine, so this run was stopped ` +
+        `rather than billed to Anthropic under another provider's model name. Pick a Claude model, or ` +
+        `request the engine that owns it (e.g. \`[engine:cursor,model:${requestedModel}]\`) and make sure ` +
+        `that engine is registered on this server.`;
+      console.error(`[claude] ${message}`);
+      yield { type: 'error', message };
+      return;
+    }
+    options['model'] = requestedModel;
     const thinkingMode = directives.thinking ?? config.thinking;
     if (thinkingMode) options['thinking'] = thinkingMode === 'enabled' ? { type: 'enabled' } : { type: thinkingMode };
     const effort = directives.effort ?? config.effort;
@@ -412,11 +435,11 @@ export class ClaudeCodeEngine implements AgentEngine {
               prior: opts.sessionId ? getSessionModel(opts.sessionId) : undefined,
             });
             if (sw.notice) yield { type: 'text_delta', text: sw.notice };
-            if (opts.sessionId) setSessionModel(opts.sessionId, m.model);
+            if (opts.sessionId) setSessionModel(opts.sessionId, m.model, this.name);
             // Live ground-truth so the header pill confirms the actually-resolved model mid-turn
             // (catches inline overrides like [opus] and silent rate-limit fallbacks) instead of
             // only updating on session reload.
-            yield { type: 'model_resolved', sessionId: opts.sessionId ?? '', model: m.model };
+            yield { type: 'model_resolved', sessionId: opts.sessionId ?? '', model: m.model, engine: this.name };
           }
           const servers = m.mcp_servers;
           if (Array.isArray(servers) && servers.length > 0) {

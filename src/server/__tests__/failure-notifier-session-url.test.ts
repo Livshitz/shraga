@@ -105,3 +105,45 @@ describe('already-persisted failure-notifier schedule', () => {
     expect((schedules[0].task as { prompt: string }).prompt).toBe(once);
   });
 });
+
+/** The failure notifier must not inherit the global agent-config engine: an optional engine can fail
+ *  to register on a boot (add-on absent, missing key), which is exactly the class of failure this job
+ *  exists to report. Live data had `model: "composer-2.5"` and NO engine — an incoherent half-pin that
+ *  ran on whatever the ambient config was, and billed Anthropic for a Cursor model id. */
+describe('failure-notifier engine pin', () => {
+  const stored = (task: Record<string, unknown>): Schedule => ({
+    id: FAILURE_NOTIFIER_SCHEDULE_ID,
+    name: 'Scheduled-job failure notifier',
+    enabled: true,
+    trigger: { kind: 'event', source: 'schedule.finished', match: { status: 'error' } },
+    task,
+    scope: 'system',
+    createdBy: { uid: SYSTEM_UID, email: 'system@shraga.local' },
+    createdAt: 1,
+    updatedAt: 1,
+    runCount: 7,
+  }) as unknown as Schedule;
+
+  test('the shipped builtin pins the always-registered engine', () => {
+    const schedules = ensureBuiltinSchedules([]);
+    const notifier = schedules.find((s) => s.id === FAILURE_NOTIFIER_SCHEDULE_ID)!;
+    expect((notifier.task as { engine?: string }).engine).toBe('claude-code');
+  });
+
+  test('reconcile heals a stored half-pin (model, no engine) — the live incident state', () => {
+    const schedules = [stored({ kind: 'prompt', prompt: 'custom prompt', model: 'composer-2.5' })];
+    ensureBuiltinSchedules(schedules);
+    const task = schedules[0].task as { prompt: string; engine?: string; model?: string };
+    expect(task.engine).toBe('claude-code');
+    expect(task.model).toBeUndefined(); // the foreign model went with the ambient engine it assumed
+    expect(task.prompt).toBe('custom prompt'); // an operator's prompt edit still survives
+  });
+
+  test('an explicit stored engine is an operator choice and is left alone', () => {
+    const schedules = [stored({ kind: 'prompt', prompt: 'p', engine: 'agentx', model: 'cursor/composer-2.5' })];
+    ensureBuiltinSchedules(schedules);
+    const task = schedules[0].task as { engine?: string; model?: string };
+    expect(task.engine).toBe('agentx');
+    expect(task.model).toBe('cursor/composer-2.5');
+  });
+});
