@@ -168,12 +168,20 @@ describe('isChurnPath', () => {
     expect(isChurnPath('workspace/social/workers/logs/20260908-220148-56243-opus-li-think.json')).toBe(true);
   });
 
+  test('a garbage-collected job record is exempt', () => {
+    for (const ext of ['json', 'log', 'status']) {
+      expect(isChurnPath(`jobs/job-mtpl1c1o-iirwzq.${ext}`)).toBe(true);
+    }
+  });
+
   test('shared data the guard exists to protect is NOT exempt', () => {
     expect(isChurnPath('contacts.json')).toBe(false);
     expect(isChurnPath('skills/social-manager.md')).toBe(false);
     expect(isChurnPath('workspace/social/receipts/2026-09-07-morning.json')).toBe(false);
     expect(isChurnPath('workspace/social/batches/2026-09-07-morning-x-replies.json')).toBe(false);
     expect(isChurnPath('workspace/social/workers/launch-agentx-leg.sh')).toBe(false);
+    expect(isChurnPath('jobs/schedule.json')).toBe(false);          // not a job-<id> record
+    expect(isChurnPath('mcps/browser-bridge.json')).toBe(false);    // a real deletion, worth one alert
   });
 });
 

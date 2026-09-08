@@ -72,7 +72,13 @@ export function extractCommitSubject(raw: string): string {
  *  guard aborts the WHOLE commit, so one churn file stalls every other file's sync indefinitely —
  *  measured 2026-09-07: repeated BLOCKED alerts and a 27-commit push backlog behind two task files. */
 export function isChurnPath(file: string): boolean {
-  return /(^|\/)workspace\/[^/]+\/workers\/(logs|tasks)\//.test(file) || /\.bak(-|\.|$)/.test(file);
+  return /(^|\/)workspace\/[^/]+\/workers\/(logs|tasks)\//.test(file)
+    // Per-job runtime records (one .json/.log/.status triple per background job), written on
+    // dispatch and garbage-collected once the job is done. 54 live files churning constantly, so
+    // their deletion is the design, not a regression — the integrity audit reported dozens of
+    // "missing … in reference but not HEAD" lines for a routine GC pass.
+    || /(^|\/)jobs\/job-[^/]+\.(json|log|status)$/.test(file)
+    || /\.bak(-|\.|$)/.test(file);
 }
 
 export class DataSyncOptions {
