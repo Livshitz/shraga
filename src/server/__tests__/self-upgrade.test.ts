@@ -192,7 +192,16 @@ describe('SelfUpgrade report delivery', () => {
 describe('supervisor.sh', () => {
   const script = path.join(import.meta.dir, '..', 'self-upgrade', 'supervisor.sh');
 
-  async function runSupervisor(env: Record<string, string>, healthVersion: () => string | null) {
+  // A shared CI runner is slower than any dev machine, and every knob here is a REAL wall-clock
+  // wait inside a shell script. CI stretches the scheduler tests the same way (SCHED_TEST_SCALE in
+  // ci.yml); these were never wired into it, so a runner that lost a 5s probe race reported
+  // "revert-failed" for a revert that was merely slow. Scale the script's waits AND each test's
+  // budget by the same factor, so the ratios the assertions depend on stay identical.
+  const SCALE = Math.max(1, parseInt(process.env.SCHED_TEST_SCALE || '1', 10) || 1);
+  const secs = (n: number) => String(n * SCALE);
+  const budget = (ms: number) => ms * SCALE;
+
+  async function runSupervisor(env: Record<string, string>, healthVersion: () => string | null): Promise<string> {
     const server = Bun.serve({
       port: 0,
       fetch() {
@@ -200,13 +209,31 @@ describe('supervisor.sh', () => {
         return v === null ? new Response('down', { status: 503 }) : Response.json({ version: v });
       },
     });
+    let proc: ReturnType<typeof Bun.spawn> | undefined;
     try {
-      const proc = Bun.spawn(['bash', script], {
+      proc = Bun.spawn(['bash', script], {
         env: { ...process.env, HEALTH_URL: `http://127.0.0.1:${server.port}/api/version`, ...env },
         stdout: 'pipe', stderr: 'pipe',
       });
-      await proc.exited;
+      // The child MUST NOT outlive the test. When bun's per-test timeout fires it abandons this
+      // await, afterEach deletes the temp root, and the abandoned continuation then throws ENOENT
+      // as an "Unhandled error between tests" — which poisons every LATER file in the run. Measured
+      // 2026-09-08: two slow supervisor tests turned into 52 failures across the suite. Bounding it
+      // here means a slow supervisor fails its own assertion with its own log, and nothing else.
+      const kill = setTimeout(() => proc?.kill('SIGKILL'), budget(25_000));
+      try { await proc.exited; } finally { clearTimeout(kill); }
     } finally { server.stop(true); }
+    // The script's only diagnostic channel. Without it a CI-only "revert-failed" is unfalsifiable.
+    const log = `${env.REPORT.replace(/\.json$/, '')}.log`;
+    return existsSync(log) ? readFileSync(log, 'utf8') : '(no supervisor log)';
+  }
+
+  /** Read the report, printing the supervisor's own log first when it is not what we expected. */
+  function readReport(file: string, log: string): Record<string, string> {
+    if (!existsSync(file)) { console.error(log); throw new Error(`supervisor wrote no report at ${file}`); }
+    const r = JSON.parse(readFileSync(file, 'utf8'));
+    if (r.status !== 'ok' && r.status !== 'reverted') console.error(log);
+    return r;
   }
 
   test('reverts package.json when the new version never reports in', async () => {
@@ -214,30 +241,30 @@ describe('supervisor.sh', () => {
     const report = path.join(root, 'report.json');
     // `bun install` is stubbed with `true` and the "service" never flips version: the upgrade must
     // fail verification and the pin must come back to where it started.
-    await runSupervisor({
+    const log = await runSupervisor({
       APP_ROOT: root, PKG: 'shraga', TARGET: '0.1.99', FROM: '0.1.33',
-      RESTART_CMD: 'true', REPORT: report, BUN: 'true', BOOT_TIMEOUT: '5', SOAK: '1',
+      RESTART_CMD: 'true', REPORT: report, BUN: 'true', BOOT_TIMEOUT: secs(5), SOAK: '1',
     }, () => '0.1.33');
 
     const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
     expect(pkg.dependencies.shraga).toBe('0.1.33');
-    expect(JSON.parse(readFileSync(report, 'utf8')).status).toBe('reverted');
-  }, 30_000);
+    expect(readReport(report, log).status).toBe('reverted');
+  }, budget(30_000));
 
   test('reports ok and leaves the new pin in place when the version flips and soaks', async () => {
     const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
     const report = path.join(root, 'report.json');
-    await runSupervisor({
+    const log = await runSupervisor({
       APP_ROOT: root, PKG: 'shraga', TARGET: '0.1.99', FROM: '0.1.33',
-      RESTART_CMD: 'true', REPORT: report, BUN: 'true', BOOT_TIMEOUT: '15', SOAK: '1',
+      RESTART_CMD: 'true', REPORT: report, BUN: 'true', BOOT_TIMEOUT: secs(15), SOAK: '1',
     }, () => '0.1.99');
 
     const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
     expect(pkg.dependencies.shraga).toBe('0.1.99');
-    const r = JSON.parse(readFileSync(report, 'utf8'));
+    const r = readReport(report, log);
     expect(r.status).toBe('ok');
     expect(r.installed).toBe('0.1.99');
-  }, 30_000);
+  }, budget(30_000));
 
   // A single dropped probe on a busy box is not a crash-loop. Zero tolerance here reverted a
   // perfectly healthy 0.1.48 on the feedox box while the process stayed up the whole time.
@@ -245,29 +272,29 @@ describe('supervisor.sh', () => {
     const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
     const report = path.join(root, 'report.json');
     let hits = 0;
-    await runSupervisor({
+    const log = await runSupervisor({
       APP_ROOT: root, PKG: 'shraga', TARGET: '0.1.99', FROM: '0.1.33',
-      RESTART_CMD: 'true', REPORT: report, BUN: 'true', BOOT_TIMEOUT: '15', SOAK: '12',
+      RESTART_CMD: 'true', REPORT: report, BUN: 'true', BOOT_TIMEOUT: secs(15), SOAK: '12',
     }, () => (++hits === 3 ? null : '0.1.99'));   // one 503 partway through the soak
 
     expect(JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).dependencies.shraga).toBe('0.1.99');
-    expect(JSON.parse(readFileSync(report, 'utf8')).status).toBe('ok');
-  }, 60_000);
+    expect(readReport(report, log).status).toBe('ok');
+  }, budget(60_000));
 
   test('but a version that stops answering for good still reverts', async () => {
     const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
     const report = path.join(root, 'report.json');
     let hits = 0;
-    await runSupervisor({
+    const log = await runSupervisor({
       APP_ROOT: root, PKG: 'shraga', TARGET: '0.1.99', FROM: '0.1.33',
-      RESTART_CMD: 'true', REPORT: report, BUN: 'true', BOOT_TIMEOUT: '15', SOAK: '60',
+      RESTART_CMD: 'true', REPORT: report, BUN: 'true', BOOT_TIMEOUT: secs(15), SOAK: '60',
       // dies during the soak (3 consecutive misses = the limit), then the reverted old version
       // answers again — the sequence a real rollback produces.
     }, () => { hits++; if (hits <= 2) return '0.1.99'; if (hits <= 7) return null; return '0.1.33'; });
 
     expect(JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).dependencies.shraga).toBe('0.1.33');
-    expect(JSON.parse(readFileSync(report, 'utf8')).status).toBe('reverted');
-  }, 60_000);
+    expect(readReport(report, log).status).toBe('reverted');
+  }, budget(60_000));
 
   test('refuses to edit an ambiguous package.json rather than guessing which pin is the dep', async () => {
     // The same name under both dependencies and overrides: a first-match text edit would silently
@@ -280,42 +307,42 @@ describe('supervisor.sh', () => {
     const restartMarker = path.join(root, 'restarted');
     const before = readFileSync(path.join(root, 'package.json'), 'utf8');
 
-    await runSupervisor({
+    const log = await runSupervisor({
       APP_ROOT: root, PKG: 'shraga', TARGET: '0.1.99', FROM: '0.1.33',
-      RESTART_CMD: `touch ${restartMarker}`, REPORT: report, BUN: 'true', BOOT_TIMEOUT: '5', SOAK: '1',
+      RESTART_CMD: `touch ${restartMarker}`, REPORT: report, BUN: 'true', BOOT_TIMEOUT: secs(5), SOAK: '1',
     }, () => '0.1.33');
 
     expect(readFileSync(path.join(root, 'package.json'), 'utf8')).toBe(before);
     expect(existsSync(restartMarker)).toBe(false);
-    expect(JSON.parse(readFileSync(report, 'utf8')).status).toBe('failed');
-  }, 30_000);
+    expect(readReport(report, log).status).toBe('failed');
+  }, budget(30_000));
 
   test('refuses when package.json does not hold the version it was told to expect', async () => {
     // Guards a stale plan: something else moved the pin between the preflight and the hand-off.
     const root = deployment({ dependencies: { shraga: '0.1.40' } }, { nodeModules: true });
     const report = path.join(root, 'report.json');
-    await runSupervisor({
+    const log = await runSupervisor({
       APP_ROOT: root, PKG: 'shraga', TARGET: '0.1.99', FROM: '0.1.33',
-      RESTART_CMD: 'true', REPORT: report, BUN: 'true', BOOT_TIMEOUT: '5', SOAK: '1',
+      RESTART_CMD: 'true', REPORT: report, BUN: 'true', BOOT_TIMEOUT: secs(5), SOAK: '1',
     }, () => '0.1.40');
 
     expect(JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).dependencies.shraga).toBe('0.1.40');
-    expect(JSON.parse(readFileSync(report, 'utf8')).status).toBe('failed');
-  }, 30_000);
+    expect(readReport(report, log).status).toBe('failed');
+  }, budget(30_000));
 
   test('a failed install reverts and never restarts a half-installed tree', async () => {
     const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
     const report = path.join(root, 'report.json');
     const restartMarker = path.join(root, 'restarted');
-    await runSupervisor({
+    const log = await runSupervisor({
       APP_ROOT: root, PKG: 'shraga', TARGET: '0.1.99', FROM: '0.1.33',
-      RESTART_CMD: `touch ${restartMarker}`, REPORT: report, BUN: 'false', BOOT_TIMEOUT: '5', SOAK: '1',
+      RESTART_CMD: `touch ${restartMarker}`, REPORT: report, BUN: 'false', BOOT_TIMEOUT: secs(5), SOAK: '1',
     }, () => '0.1.33');
 
     expect(existsSync(restartMarker)).toBe(false);
     expect(JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).dependencies.shraga).toBe('0.1.33');
-    expect(JSON.parse(readFileSync(report, 'utf8')).status).toBe('failed');
-  }, 30_000);
+    expect(readReport(report, log).status).toBe('failed');
+  }, budget(30_000));
 });
 
 // Route wiring: proves the endpoints are actually mounted and gated. The preflight tests above run
