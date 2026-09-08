@@ -11,8 +11,16 @@ interface SessionDirectives {
   engine?: string;
 }
 
-/** What the chips must report: the engine/model that ACTUALLY ran, and whether that disagrees with
- *  what this session asks for. Pure, so the rule is testable without a DOM.
+/** Provenance of what the chips report.
+ *  - `ran`        a turn executed and recorded a self-consistent (engine, model) PAIR.
+ *  - `ran-model`  a turn executed and recorded its MODEL, but not the engine that ran it — every
+ *                 session written before `lastEngine` existed (45 of 817 on the live box).
+ *  - `pending`    nothing has run in this conversation yet. */
+export type RuntimeProvenance = 'ran' | 'ran-model' | 'pending';
+
+/** What the chips must report: the engine/model that ACTUALLY ran, and — separately — what this
+ *  session is currently SET to run. Those are different claims and the pill must never blur them.
+ *  Pure, so the rule is testable without a DOM.
  *
  *  The bug this replaces: the old code inferred the engine from the model id's SHAPE (bare ⇒ native)
  *  and threw away the runtime-recorded model whenever the shape disagreed with the requested engine —
@@ -28,23 +36,32 @@ export function deriveRuntimeBadges(input: {
   actualModel?: string;
 }) {
   const requestedEngine = input.requestedEngine || 'claude-code';
-  const engine = input.actualEngine || requestedEngine;
-  // A mismatch is a fact worth showing, not something to launder away: the last turn ran somewhere
-  // other than where this session currently asks to run.
-  const engineMismatch = input.actualEngine && input.actualEngine !== requestedEngine ? requestedEngine : undefined;
-  const engineIsNative = engine === 'claude-code' || engine === 'cursor';
-  // "The pair, or neither" is right for the ENGINE, not for the provider: a `provider/` prefix on the
-  // recorded model is direct evidence of what actually ran and was billed, and needs no engine to read.
-  // Only a BARE recorded id is unreadable alone (it belongs to whichever engine recorded it), so only
-  // that one is dropped. Sessions written before lastEngine existed carry a prefixed model and nothing
-  // else — dropping it made the UI report the requested provider, the very claim this must never make.
-  const recordedModel = input.actualEngine || input.actualModel?.includes('/') ? input.actualModel : undefined;
+  const provenance: RuntimeProvenance = input.actualEngine ? 'ran' : input.actualModel ? 'ran-model' : 'pending';
+
+  // A recorded model is ground truth about the MODEL whether or not an engine was recorded beside
+  // it, so it is never dropped — dropping it made the UI report the REQUESTED runtime for a turn
+  // that had already run, the one claim this must never make. What a lone model cannot do is name
+  // the engine: an id is bare or prefixed by PROVIDER, and a provider is not an engine (agentx runs
+  // anthropic models). So with no `lastEngine`, the engine stays unknown rather than guessed.
+  const engine = provenance === 'ran' ? input.actualEngine! : provenance === 'pending' ? requestedEngine : undefined;
   const rawModel =
-    recordedModel || input.requestedModel || (engine === 'cursor' ? 'cursor/composer-2.5' : 'sonnet-4-6');
-  // Provider = the model's prefix; a bare id belongs to the engine that ran it (claude-code ⇒ anthropic,
-  // an add-on engine ⇒ that engine's own provider) — never assume anthropic just because a prefix is absent.
-  const billingProvider = rawModel.includes('/') ? rawModel.split('/')[0] : engine === 'claude-code' ? 'anthropic' : engine;
-  return { engine, engineIsNative, engineMismatch, rawModel, billingProvider };
+    input.actualModel || input.requestedModel || (requestedEngine === 'cursor' ? 'cursor/composer-2.5' : 'sonnet-4-6');
+
+  // A mismatch is a fact worth showing, not something to launder away: the last turn ran somewhere
+  // other than where this session currently asks to run — which the ground-truth pill alone cannot
+  // say, because it reports only where the turn DID run, not where the next one will be sent.
+  const engineMismatch = provenance === 'ran' && engine !== requestedEngine ? requestedEngine : undefined;
+  const engineIsNative = engine === 'claude-code' || engine === 'cursor';
+
+  // Provider = the model's prefix; a bare id belongs to the engine that ran it (claude-code ⇒
+  // anthropic, an add-on engine ⇒ that engine's own provider). With neither a prefix nor a known
+  // engine there is nothing to name it from, so it is reported as unknown, never assumed.
+  const billingProvider = rawModel.includes('/')
+    ? rawModel.split('/')[0]
+    : engine === 'claude-code'
+      ? 'anthropic'
+      : engine;
+  return { provenance, engine, engineIsNative, engineMismatch, rawModel, billingProvider };
 }
 
 function InfoBadges({
@@ -68,7 +85,7 @@ function InfoBadges({
   onScheduleClick?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
-  const { engine, engineIsNative, engineMismatch, rawModel, billingProvider } = deriveRuntimeBadges({
+  const { provenance, engine, engineIsNative, engineMismatch, rawModel, billingProvider } = deriveRuntimeBadges({
     requestedEngine: sessionDirectives?.engine || config.engine,
     requestedModel: sessionDirectives?.model || config.model,
     actualEngine,
@@ -77,7 +94,18 @@ function InfoBadges({
   // A multi-provider add-on engine runs any provider's model through its own loop, so it must be
   // distinguishable from a native runtime running the same model. Prefix such a model with the engine
   // name; native engines (claude-code, cursor) show the model plainly. Engine name comes from data.
-  const model = !engineIsNative ? `${engine} · ${rawModel.replace('claude-', '')}` : rawModel.replace('claude-', '');
+  // With no engine recorded there is nothing truthful to prefix with, so the model stands alone.
+  const shortModel = rawModel.replace('claude-', '');
+  const model = engine && !engineIsNative ? `${engine} · ${shortModel}` : shortModel;
+  // A selection is not a runtime. Until a turn has run, the chips describe what the NEXT one will
+  // use — marked so, and never presented as something that executed.
+  const pending = provenance === 'pending';
+  const pendingRing = pending ? ' border border-dashed border-current/40 opacity-80' : '';
+  const runtimeTitle = pending
+    ? 'Nothing has run in this conversation yet — this is what the next turn is set to use.'
+    : provenance === 'ran-model'
+      ? `Model recorded from the last turn. The engine that ran it was not recorded (this conversation predates engine tracking), so it is not named here.`
+      : `Engine and model that actually ran the last turn.`;
   // Auth-mechanism indicator. The only verifiable distinction is claude.ai OAuth login vs a provider
   // API key: the native claude-code engine can run on a login (no ANTHROPIC_API_KEY); every add-on
   // engine / provider-prefixed model runs on that provider's key (ai.libx.js adapters throw without
@@ -86,15 +114,19 @@ function InfoBadges({
   const onSubscription = engine === 'claude-code' && config.claudeAuthSource === 'subscription';
   // Tone: green = claude.ai login (no key); amber = provider key whose usage may be subscription-
   // covered (Cursor); rose = provider key that is genuinely metered (Anthropic/OpenAI/etc.).
-  const billingTone = onSubscription ? 'sub' : billingProvider === 'cursor' ? 'plan' : 'metered';
+  const billingTone = !billingProvider ? 'unknown' : onSubscription ? 'sub' : billingProvider === 'cursor' ? 'plan' : 'metered';
   const billingClass =
-    billingTone === 'sub'
+    billingTone === 'unknown'
+      ? 'bg-muted text-muted-foreground ring-border'
+      : billingTone === 'sub'
       ? 'bg-emerald-50 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-950/50 dark:text-emerald-300 dark:ring-emerald-400/30'
       : billingTone === 'plan'
         ? 'bg-amber-50 text-amber-700 ring-amber-600/20 dark:bg-amber-950/50 dark:text-amber-300 dark:ring-amber-400/30'
         : 'bg-rose-50 text-rose-700 ring-rose-600/20 dark:bg-rose-950/50 dark:text-rose-300 dark:ring-rose-400/30';
   const billingTitle =
-    billingTone === 'sub'
+    billingTone === 'unknown'
+      ? 'The engine that ran this turn was not recorded and the model id carries no provider prefix — the billed provider cannot be named from what was stored.'
+      : billingTone === 'sub'
       ? 'Claude.ai subscription (OAuth login) — no API key in use'
       : billingTone === 'plan'
         ? `Runs on your ${billingProvider} API key — usage may draw on your ${billingProvider} plan/subscription`
@@ -113,14 +145,17 @@ function InfoBadges({
 
   return (
     <div className="flex items-center gap-1.5 flex-wrap">
-      <span className="inline-flex items-center rounded-md bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20 dark:bg-blue-950/50 dark:text-blue-300 dark:ring-blue-400/30">
-        {model}
+      <span
+        title={runtimeTitle}
+        className={`inline-flex items-center rounded-md bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20 dark:bg-blue-950/50 dark:text-blue-300 dark:ring-blue-400/30${pendingRing}`}
+      >
+        {pending ? `→ ${model}` : model}
       </span>
       <span
-        title={billingTitle}
-        className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset ${billingClass}`}
+        title={pending ? `${runtimeTitle} ${billingTitle}` : billingTitle}
+        className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset ${billingClass}${pendingRing}`}
       >
-        {onSubscription ? 'sub' : `API·${billingProvider}`}
+        {billingTone === 'unknown' ? 'API·?' : onSubscription ? 'sub' : `API·${billingProvider}`}
       </span>
       {engineMismatch && (
         <span
