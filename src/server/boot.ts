@@ -1022,6 +1022,23 @@ function abortUpgrade(socket: import('node:stream').Duplex, code: number, messag
   catch { socket.destroy(); }
 }
 
+/** Claude Code speaks the kitty keyboard protocol, where `CSI <code>;<mods> u` IS a modified keypress —
+ *  `CSI 107;9u` is cmd+k, which clears its screen and, arriving twice, runs `/clear` and destroys the
+ *  conversation. Our terminal is xterm.js 5.5, which has no kitty support and can never emit that byte,
+ *  so anything shaped like it on this socket is spurious, not a keystroke the user made. Drop it and say
+ *  where it came from — repeated unexplained `/clear`s cost real sessions. Remove once a client that
+ *  genuinely speaks the protocol attaches here. */
+const CSI_U_KEY = /\x1b\[\d+;\d+u/;
+function isSpuriousKittyKey(data: import('ws').RawData, isBinary: boolean): string | null {
+  if (isBinary) return null;
+  try {
+    const msg = JSON.parse(data.toString());
+    if (msg?.type !== 'input' || typeof msg.data !== 'string') return null;
+    const input = Buffer.from(msg.data, 'base64').toString();
+    return CSI_U_KEY.test(input) ? input : null;
+  } catch { return null; }
+}
+
 function proxySidecarWebSocket(req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex, head: Buffer, port: number) {
   const targetUrl = `ws://127.0.0.1:${port}${req.url}`;
   sidecarWss.handleUpgrade(req, socket as any, head, (clientWs) => {
@@ -1047,6 +1064,13 @@ function proxySidecarWebSocket(req: import('node:http').IncomingMessage, socket:
       // The probe is only worth anything end-to-end, so the sidecar owns the reply (it answers in its
       // own ws message handler); a sidecar that doesn't reply fails the probe, which is the honest
       // outcome — the client then reconnects rather than trusting a dead pipe.
+      const spurious = isSpuriousKittyKey(data, isBinary);
+      if (spurious) {
+        console.warn('[ws-proxy] BLOCKED kitty key input', JSON.stringify({
+          url: req.url?.split('?')[0], seq: spurious, ua: req.headers['user-agent'], ref: req.headers.referer,
+        }));
+        return;
+      }
       if (targetWs.readyState === WebSocket.OPEN) targetWs.send(data, { binary: isBinary });
       else if (!opened && pending.length < 256) pending.push({ data, isBinary }); // bounded: never buffer unboundedly
     });
