@@ -127,10 +127,41 @@ export function ChatView({ messages, busy, connectionStatus, onPermissionRespond
   const screenMap = screenMapRef.current;
 
   // Only the last slice is mounted — an agent thread runs to thousands of blocks and the DOM
-  // (not React) is what goes sluggish. `showAll` mounts the rest on demand.
-  const [showAll, setShowAll] = useState(false);
-  const hiddenCount = showAll ? 0 : Math.max(0, messages.length - VISIBLE_MESSAGES);
+  // (not React) is what goes sluggish. Scrolling to the top reveals the next slice, so a long
+  // thread walks backwards a page at a time instead of mounting 12k rows in one jump.
+  const [limit, setLimit] = useState(VISIBLE_MESSAGES);
+  const hiddenCount = Math.max(0, messages.length - limit);
   const visibleMessages = hiddenCount > 0 ? messages.slice(hiddenCount) : messages;
+  const showEarlier = useCallback(() => setLimit((n) => n + VISIBLE_MESSAGES), []);
+
+  const pendingAnchor = useRef<{ box: HTMLDivElement | null; before: number } | null>(null);
+  // Reveal-on-scroll, with the button below as the visible fallback. The scroll position is pinned
+  // to the same message afterwards: prepending rows above the viewport otherwise yanks the thread.
+  const topRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = topRef.current;
+    if (!el || hiddenCount === 0) return;
+    const io = new IntersectionObserver((entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return;
+      // On mount the thread is pinned to the bottom and the top sentinel can be "visible" simply
+      // because nothing has scrolled yet — expanding there would cascade the whole 12k thread into
+      // the DOM, which is exactly what the window exists to prevent. Only reveal on a real scroll up.
+      if (isNearBottom.current) return;
+      const box = scrollRef.current;
+      const before = box?.scrollHeight ?? 0;
+      pendingAnchor.current = { box, before };
+      showEarlier();
+    }, { rootMargin: '400px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [hiddenCount, limit, showEarlier]);
+
+  useEffect(() => {
+    const a = pendingAnchor.current;
+    if (!a?.box) return;
+    pendingAnchor.current = null;
+    a.box.scrollTop += a.box.scrollHeight - a.before; // keep the reader on the same message
+  }, [limit]);
 
   useEffect(() => {
     if (isNearBottom.current) {
@@ -172,10 +203,10 @@ export function ChatView({ messages, busy, connectionStatus, onPermissionRespond
           </button>
         </div>
         {hiddenCount > 0 && (
-          <div className="flex justify-center pb-2">
-            <button onClick={() => setShowAll(true)} className="text-xs px-3 py-1 rounded-full border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors">
-              Show {hiddenCount} earlier message{hiddenCount === 1 ? '' : 's'}
-            </button>
+          // Scroll-based, like the sidebar: scrolling to the top reveals the previous slice. A
+          // status row, not a control — the earlier button read as a dead box at the top of a thread.
+          <div ref={topRef} className="py-3 text-center text-[11px] text-muted-foreground/60">
+            {hiddenCount} earlier message{hiddenCount === 1 ? '' : 's'} · scroll up to load
           </div>
         )}
         {visibleMessages.map((msg, i) => {

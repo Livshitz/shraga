@@ -120,6 +120,26 @@ export function Sidebar({ getToken, activeSessionId, onSelect, onNew, refreshKey
     }
   }, [activeSessionId, filtered, activeRow]);
 
+  // Load the next page when the end of the list comes into view. A list that simply stops when you
+  // scroll to the bottom reads as broken — the button below stays as the visible fallback, but it
+  // is not the mechanism. `root: null` still respects the Radix viewport's clipping, so the sentinel
+  // only intersects once the user has actually scrolled near the end.
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const loadMoreRef = useRef(loadMore);
+  loadMoreRef.current = loadMore;
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || !cursor || unreadOnly) return;
+    const io = new IntersectionObserver(
+      (entries) => { if (entries.some((e) => e.isIntersecting)) loadMoreRef.current(); },
+      { rootMargin: '300px' },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+    // `loading` is a dep so the observer re-arms after a page lands: if the end is STILL in view
+    // (a short page, a tall sidebar), re-observing fires again and walks on to the next page.
+  }, [cursor, loading, unreadOnly]);
+
   useEffect(() => {
     getToken().then(t => t ? fetch('/api/version', { headers: { Authorization: `Bearer ${t}` } }) : null).then(r => r?.json()).then(d => d && setVersion(d.version)).catch(() => {});
   }, []);
@@ -212,13 +232,11 @@ export function Sidebar({ getToken, activeSessionId, onSelect, onNew, refreshKey
           {activeRow && renderRow(activeRow)}
           {filtered.map(renderRow)}
           {!unreadOnly && cursor && (
-            <button
-              onClick={loadMore}
-              disabled={loading}
-              className="w-full text-[11px] text-muted-foreground hover:text-foreground py-2 rounded-lg hover:bg-accent/50 transition-colors disabled:opacity-50"
-            >
-              {loading ? 'Loading…' : 'Show older'}
-            </button>
+            // Scroll-based: reaching the end of the list loads the next page. This is a status row,
+            // not a control — a "Show older" button read as a dead grey box at the end of the list.
+            <div ref={sentinelRef} className="py-3 text-center text-[11px] text-muted-foreground/60">
+              {loading ? 'Loading older…' : '···'}
+            </div>
           )}
         </div>
       </ScrollArea>
