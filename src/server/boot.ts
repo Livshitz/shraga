@@ -1039,91 +1039,129 @@ function isSpuriousKittyKey(data: import('ws').RawData, isBinary: boolean): stri
   } catch { return null; }
 }
 
-function proxySidecarWebSocket(req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex, head: Buffer, port: number) {
+function proxySidecarWebSocket(req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex, head: Buffer, port: number, authed: Promise<import('./auth.ts').AuthUser | null>) {
   const targetUrl = `ws://127.0.0.1:${port}${req.url}`;
   sidecarWss.handleUpgrade(req, socket as any, head, (clientWs) => {
-    // The caller paused the socket for the async auth gap; ws has now attached its own 'data' listener
-    // (handleUpgrade → setSocket runs before this callback), so it's safe — and necessary — to resume:
-    // an EXPLICITLY paused socket does not re-enter flowing mode just because a listener was added, so
-    // without this every buffered byte and every subsequent keystroke would sit unread forever.
+    // Belt-and-braces: nothing pauses this socket any more (the auth gap moved past the handshake, see
+    // AUTH GATE below), but an explicitly paused socket does not re-enter flowing mode just because a
+    // listener was added — so if anything upstream ever pauses again, resuming here is what keeps every
+    // buffered byte and every subsequent keystroke from sitting unread forever.
     socket.resume();
-    const targetWs = new WebSocket(targetUrl);
-    let opened = false;
 
-    // Bound IMMEDIATELY, not inside targetWs 'open': the BROWSER's socket is OPEN the moment
-    // handleUpgrade returns, so it reports "connected" and starts sending while we're still dialing the
-    // sidecar. Registering the listener on open discarded everything typed in that window — silently.
-    // Queue instead, and flush in order once upstream is up.
-    const pending: Array<{ data: import('ws').RawData; isBinary: boolean }> = [];
+    // AUTH GATE — deliberately AFTER the handshake, not before it. The upgrade must complete in the
+    // SAME tick as the 'upgrade' event: on Bun (reproduced on 1.4.0) a `handleUpgrade` deferred past a
+    // macrotask — exactly what awaiting a token verification costs on a cold key cache — lands in ws's
+    // `completeUpgrade` abort path, and ws's own `abortHandshake` then throws
+    // (`undefined is not an object (evaluating 'message')`). The browser sees a bare close, caddy logs
+    // `502 EOF`, and every terminal pane stays blank. Isolated repro: a microtask-deferred handleUpgrade
+    // succeeds, a `setTimeout(…, 0)`-deferred one throws — which is why this only bit when auth actually
+    // hit the network. Security is unchanged: NOTHING is dialed or forwarded until the token verifies,
+    // and a failed check closes the socket with 1008 before a single byte reaches the sidecar.
+    let targetWs: WebSocket;
+    let opened = false;
+    // Anything typed between the 101 and the auth verdict. Bounded like `pending` below; on rejection it
+    // is dropped with the socket.
+    const preAuth: Array<{ data: import('ws').RawData; isBinary: boolean }> = [];
+    let gateOpen = false;
     clientWs.on('message', (data, isBinary) => {
-      // App-level liveness probe (Layer 2): the client can't read protocol pongs from JS, so it sends
-      // `{type:'ping'}` and expects `{type:'pong'}`. We RELAY it — we must not answer it here. A
-      // proxy-local reply only proves THIS hop is alive: if the proxy→sidecar leg is half-open, or the
-      // sidecar has already dropped this client from its subscriber set, the browser still gets pongs,
-      // keeps `readyState === OPEN`, shows a green "connected" dot, and every keystroke disappears.
-      // The probe is only worth anything end-to-end, so the sidecar owns the reply (it answers in its
-      // own ws message handler); a sidecar that doesn't reply fails the probe, which is the honest
-      // outcome — the client then reconnects rather than trusting a dead pipe.
-      const spurious = isSpuriousKittyKey(data, isBinary);
-      if (spurious) {
-        console.warn('[ws-proxy] BLOCKED kitty key input', JSON.stringify({
-          url: req.url?.split('?')[0], seq: spurious, ua: req.headers['user-agent'], ref: req.headers.referer,
-        }));
+      if (gateOpen || preAuth.length >= 256) return; // bounded: never buffer unboundedly
+      // Same kitty-key filter the bridged handler applies. These frames are flushed straight into
+      // `pending`, so without it a spurious `CSI …u` sent during the auth window would reach the shell
+      // by the one path that skips the guard.
+      if (isSpuriousKittyKey(data, isBinary)) {
+        console.warn('[ws-proxy] BLOCKED kitty key input (pre-auth)', JSON.stringify({ url: req.url?.split('?')[0], ua: req.headers['user-agent'] }));
         return;
       }
-      if (targetWs.readyState === WebSocket.OPEN) targetWs.send(data, { binary: isBinary });
-      else if (!opened && pending.length < 256) pending.push({ data, isBinary }); // bounded: never buffer unboundedly
+      preAuth.push({ data, isBinary });
     });
-
-    targetWs.on('open', () => {
-      opened = true;
-      for (const m of pending) {
-        if (targetWs.readyState === WebSocket.OPEN) targetWs.send(m.data, { binary: m.isBinary });
-      }
-      pending.length = 0;
-      targetWs.on('message', (data, isBinary) => {
-        if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data, { binary: isBinary });
-      });
-    });
-
-    // Keepalive: a proxied sidecar socket carries no app-level heartbeat, so an idle WS gets silently dropped
-    // by an intermediary (Cloudflare tunnel idles WS at ~100s) leaving the BROWSER half-open — readyState
-    // stays OPEN, no onclose fires, the "connected" dot stays green and keystrokes vanish into a dead pipe.
-    // Ping the client (browsers auto-pong at the protocol level) to keep intermediaries from idling us out,
-    // and terminate a peer that misses a pong so the client gets a real close → its reconnect kicks in.
-    // Tolerate ONE missed pong before terminating (~2 intervals of grace): a backgrounded mobile tab is
-    // JS/network-frozen and can't auto-pong for a cycle, so a 1-strike policy force-closed it every 30s and
-    // churned reconnects. Two strikes lets a brief freeze ride through; a truly dead pipe still gets cut.
-    let missedPongs = 0;
-    clientWs.on('pong', () => { missedPongs = 0; });
-    const pingInterval = setInterval(() => {
+    void authed.then((user) => {
       if (clientWs.readyState !== WebSocket.OPEN) return;
-      if (missedPongs >= 2) { console.warn('[ws-proxy] client missed pongs — terminating (likely backgrounded/frozen client)'); clientWs.terminate(); return; }
-      missedPongs++;
-      clientWs.ping();
-    }, WS_PING_INTERVAL);
-
-    targetWs.on('close', () => { clearInterval(pingInterval); clientWs.close(); });
-    targetWs.on('error', (e) => {
-      // Pre-open failure = the sidecar daemon is unreachable (e.g. it idle-exited, or is not up yet
-      // after a restart). This is TRANSIENT: the daemon (and its shells) survive a server/proxy blip, and
-      // we revive it right below — so flag `fatal:false`. The client must keep the pane alive and re-attach
-      // (a mobile client that backgrounded for minutes recovers its still-running sidecar on resume), NOT show a
-      // permanent "session unavailable". Only the daemon's own `session not found` (post-open) is fatal.
-      if (!opened) {
-        if (clientWs.readyState === WebSocket.OPEN) {
-          try { clientWs.send(JSON.stringify({ type: 'error', message: 'sidecar daemon unavailable', fatal: false })); } catch { /* socket gone */ }
-        }
-      } else {
-        console.warn('[ws-proxy] target error:', e.message);
+      if (!user) {
+        console.warn(`[ws-proxy] rejected unauthenticated upgrade for ${req.url?.split('?')[0]}`);
+        clientWs.close(1008, 'unauthorized');
+        return;
       }
-      clientWs.close();
+      gateOpen = true;
+      startBridge();
     });
-    clientWs.on('close', () => { clearInterval(pingInterval); if (targetWs.readyState === WebSocket.OPEN) targetWs.close(); });
-    clientWs.on('error', (e) => { console.error(`[ws-proxy] client error:`, e.message); targetWs.close(); });
+
+    function startBridge() {
+      targetWs = new WebSocket(targetUrl);
+
+      // Bound IMMEDIATELY, not inside targetWs 'open': the BROWSER's socket is OPEN the moment
+      // handleUpgrade returns, so it reports "connected" and starts sending while we're still dialing the
+      // sidecar. Registering the listener on open discarded everything typed in that window — silently.
+      // Queue instead, and flush in order once upstream is up.
+      const pending: Array<{ data: import('ws').RawData; isBinary: boolean }> = preAuth.splice(0);
+      clientWs.on('message', (data, isBinary) => {
+        // App-level liveness probe (Layer 2): the client can't read protocol pongs from JS, so it sends
+        // `{type:'ping'}` and expects `{type:'pong'}`. We RELAY it — we must not answer it here. A
+        // proxy-local reply only proves THIS hop is alive: if the proxy→sidecar leg is half-open, or the
+        // sidecar has already dropped this client from its subscriber set, the browser still gets pongs,
+        // keeps `readyState === OPEN`, shows a green "connected" dot, and every keystroke disappears.
+        // The probe is only worth anything end-to-end, so the sidecar owns the reply (para-pty answers in
+        // its ws message handler); a sidecar that doesn't reply fails the probe, which is the honest
+        // outcome — the client then reconnects rather than trusting a dead pipe.
+        const spurious = isSpuriousKittyKey(data, isBinary);
+        if (spurious) {
+          console.warn('[ws-proxy] BLOCKED kitty key input', JSON.stringify({
+            url: req.url?.split('?')[0], seq: spurious, ua: req.headers['user-agent'], ref: req.headers.referer,
+          }));
+          return;
+        }
+        if (targetWs.readyState === WebSocket.OPEN) targetWs.send(data, { binary: isBinary });
+        else if (!opened && pending.length < 256) pending.push({ data, isBinary }); // bounded: never buffer unboundedly
+      });
+
+      targetWs.on('open', () => {
+        opened = true;
+        for (const m of pending) {
+          if (targetWs.readyState === WebSocket.OPEN) targetWs.send(m.data, { binary: m.isBinary });
+        }
+        pending.length = 0;
+        targetWs.on('message', (data, isBinary) => {
+          if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data, { binary: isBinary });
+        });
+      });
+
+      // Keepalive: a proxied sidecar socket carries no app-level heartbeat, so an idle WS gets silently dropped
+      // by an intermediary (Cloudflare tunnel idles WS at ~100s) leaving the BROWSER half-open — readyState
+      // stays OPEN, no onclose fires, the "connected" dot stays green and keystrokes vanish into a dead pipe.
+      // Ping the client (browsers auto-pong at the protocol level) to keep intermediaries from idling us out,
+      // and terminate a peer that misses a pong so the client gets a real close → its reconnect kicks in.
+      // Tolerate ONE missed pong before terminating (~2 intervals of grace): a backgrounded mobile tab is
+      // JS/network-frozen and can't auto-pong for a cycle, so a 1-strike policy force-closed it every 30s and
+      // churned reconnects. Two strikes lets a brief freeze ride through; a truly dead pipe still gets cut.
+      let missedPongs = 0;
+      clientWs.on('pong', () => { missedPongs = 0; });
+      const pingInterval = setInterval(() => {
+        if (clientWs.readyState !== WebSocket.OPEN) return;
+        if (missedPongs >= 2) { console.warn('[ws-proxy] client missed pongs — terminating (likely backgrounded/frozen client)'); clientWs.terminate(); return; }
+        missedPongs++;
+        clientWs.ping();
+      }, WS_PING_INTERVAL);
+
+      targetWs.on('close', () => { clearInterval(pingInterval); clientWs.close(); });
+      targetWs.on('error', (e) => {
+        // Pre-open failure = the sidecar daemon is unreachable (e.g. it idle-exited, or is not up yet
+        // after a restart). This is TRANSIENT: the daemon (and its shells) survive a server/proxy blip, and
+        // we revive it right below — so flag `fatal:false`. The client must keep the pane alive and re-attach
+        // (a mobile client that backgrounded for minutes recovers its still-running sidecar on resume), NOT show a
+        // permanent "session unavailable". Only the daemon's own `session not found` (post-open) is fatal.
+        if (!opened) {
+          if (clientWs.readyState === WebSocket.OPEN) {
+            try { clientWs.send(JSON.stringify({ type: 'error', message: 'sidecar daemon unavailable', fatal: false })); } catch { /* socket gone */ }
+          }
+        } else {
+          console.warn('[ws-proxy] target error:', e.message);
+        }
+        clientWs.close();
+      });
+      clientWs.on('close', () => { clearInterval(pingInterval); if (targetWs.readyState === WebSocket.OPEN) targetWs.close(); });
+      clientWs.on('error', (e) => { console.error(`[ws-proxy] client error:`, e.message); targetWs.close(); });
+    }
   });
 }
-
 server.on('upgrade', (req, socket, head) => {
   if (req.url === '/ws') {
     wss.handleUpgrade(req, socket as any, head, (ws) => {
@@ -1149,7 +1187,6 @@ server.on('upgrade', (req, socket, head) => {
       // is reading it while we verify; pausing makes that explicit and guarantees bytes the client sends
       // between the handshake and our decision are buffered, not dropped. proxySidecarWebSocket resumes
       // it once ws owns the socket.
-      socket.pause();
       // Fail CLOSED on anything: a rejected/thrown/slow auth must destroy the socket, never leave it
       // dangling. Without the catch a throw in authenticateWsUpgrade (token store unavailable, malformed
       // header) produced an unhandled rejection AND an open, unauthenticated, un-proxied socket; without
@@ -1163,17 +1200,15 @@ server.on('upgrade', (req, socket, head) => {
       // upgrade even when auth resolved in milliseconds.
       let authTimer: ReturnType<typeof setTimeout> | undefined;
       const timedOut = new Promise<null>((resolve) => { authTimer = setTimeout(() => resolve(null), WS_AUTH_TIMEOUT_MS); authTimer.unref?.(); });
-      void Promise.race([authed, timedOut])
-        .then((user) => {
-          if (authTimer) clearTimeout(authTimer);
-          if (socket.destroyed) return;
-          if (!user) {
-            console.warn(`[ws-proxy] rejected unauthenticated upgrade for ${req.url?.split('?')[0]}`);
-            abortUpgrade(socket, 401, 'Unauthorized: missing or invalid token');
-            return;
-          }
-          proxySidecarWebSocket(req, socket, head, port);
-        });
+      const verdict = Promise.race([authed, timedOut]).then((user) => { if (authTimer) clearTimeout(authTimer); return user; });
+      // The handshake is NOT deferred behind that verification: on Bun (reproduced on 1.4.0) a
+      // `handleUpgrade` deferred past a macrotask lands in ws's `completeUpgrade` abort path, and ws's
+      // own `abortHandshake` then throws (`undefined is not an object (evaluating 'message')`). The
+      // browser sees a bare close, caddy logs `502 EOF`, and every terminal pane stays blank — and an
+      // UNAUTHENTICATED upgrade hangs instead of being refused. Complete the upgrade now, hand the
+      // in-flight verification down, and let it decide whether to bridge or close (see the AUTH GATE
+      // note in proxySidecarWebSocket).
+      proxySidecarWebSocket(req, socket, head, port, verdict);
     } else {
       // No sidecar registered for this path — a client error, not an auth failure.
       abortUpgrade(socket, 400, 'Unknown upgrade path');
