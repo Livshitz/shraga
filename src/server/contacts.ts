@@ -148,6 +148,19 @@ export function formatUserBlock(contact: Contact | null): string {
   if (contact.role) lines.push(`title: ${contact.role}`);
   if (contact.isOwner) lines.push('role: owner');
   else if (contact.isOperator) lines.push('role: operator');
+  if (contact.slackIds.length) lines.push(`slack: ${contact.slackIds[0]}`);
+  // Delivery routing is stated EXPLICITLY, not left to inference. A long web session (whose
+  // opening brief is many compactions gone) otherwise resolves "who gets this deliverable" from
+  // the ambient workspace — where the owner is named on every other line — and DMs the wrong
+  // person. Real incident 2026-09-09: a video finished for an operator was delivered to the
+  // owner's Slack DM. The slack id is included for the same reason: without it, "DM the person
+  // who asked" needs a lookup the model may resolve against the wrong name.
+  lines.push(
+    'ROUTING: this is who you are talking to. Every result, deliverable, report or file you send',
+    'goes to THIS person — their Slack DM (slack id above) or their email — unless the request',
+    'explicitly names another recipient. Do NOT infer a recipient from who owns the deployment,',
+    'who is named most often in a skill or the workspace, or who usually receives reports.',
+  );
   return `<current_user>\n${lines.join('\n')}\n</current_user>`;
 }
 
