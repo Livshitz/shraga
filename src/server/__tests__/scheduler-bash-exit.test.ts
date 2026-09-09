@@ -116,6 +116,22 @@ describe('scheduler bash-task exit code', () => {
     expect(blocks.some((b) => b.type === 'error')).toBe(false);
   });
 
+  test('a denied first attempt the agent then RE-RAN successfully → ok', async () => {
+    // A PreToolUse hook (the long-running-script guard) denies the foreground call; the agent
+    // re-runs the SAME command and it succeeds. The verdict was latched on the first result, so a
+    // healthy check was stored `error` and paged a human. Last result for the command wins.
+    const { summary, blocks } = await run([
+      ...bashUse('t1'),
+      { type: 'tool_result', toolUseId: 't1', output: 'This script may take several minutes. Use run_in_background: true so you can continue working while it runs.', isError: true },
+      ...bashUse('t2'),
+      { type: 'tool_result', toolUseId: 't2', output: 'OK: healthy', isError: false },
+      { type: 'done' },
+    ]);
+    expect(summary.status).toBe('ok');
+    expect(summary.error).toBeUndefined();
+    expect(blocks.some((b) => b.type === 'error')).toBe(false);
+  });
+
   test('an UNRELATED tool failing does not fail the run', async () => {
     // Only the task's own command decides the outcome — the agent poking around (a failed `ls`, a
     // denied tool) is its business, not a schedule failure.

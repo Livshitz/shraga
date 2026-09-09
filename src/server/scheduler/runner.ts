@@ -311,6 +311,7 @@ export async function runSchedule(
           mcpServers,
           abortController,
           onPermissionRequest,
+          foregroundBashCommand: allowedCmd ?? undefined,
         })) {
           onEvent({ type: 'session_stream', sessionId, event: ev });
           if (ev.type === 'text_delta') {
@@ -331,7 +332,12 @@ export async function runSchedule(
           } else if (ev.type === 'tool_result') {
             assistantBlocks.push({ type: 'tool_result', toolUseId: ev.toolUseId, output: ev.output });
             const use = toolUses.get(ev.toolUseId);
-            if (ev.isError && allowedCmd && use?.tool === 'Bash' && (use.input as any)?.command === allowedCmd) bashFailure = ev.output;
+            // LAST result wins, failures and successes alike. A latched first failure survived the
+            // agent's own successful retry of the same command, so a run that ended green was
+            // reported as a failed schedule and paged a human about a healthy check.
+            if (allowedCmd && use?.tool === 'Bash' && (use.input as any)?.command === allowedCmd) {
+              bashFailure = ev.isError ? ev.output : undefined;
+            }
           } else if (ev.type === 'done') {
             break;
           } else if (ev.type === 'error') {

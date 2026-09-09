@@ -268,7 +268,7 @@ export class ClaudeCodeEngine implements AgentEngine {
       skills: listSkills(),
       disallowedTools: ['Skill'],
       agents: loadAgents(),
-      hooks: buildHooks(),
+      hooks: buildHooks({ exemptBashCommand: opts.foregroundBashCommand }),
     };
 
     const userHandler = opts.onPermissionRequest;

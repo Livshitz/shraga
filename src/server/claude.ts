@@ -209,6 +209,8 @@ export async function* streamChat(opts: {
   onPermissionRequest?: PermissionHandler;
   onDestructiveApproval?: PermissionHandler;
   onUserQuestion?: QuestionHandler;
+  /** See EngineStreamOpts.foregroundBashCommand. */
+  foregroundBashCommand?: string;
   conversationReset?: boolean;
   /** Opaque per-send bag from the client. Never interpreted here — handed to the turn-context seam,
    * where an add-on's contributor reads its own keys. */
@@ -401,6 +403,7 @@ export async function* streamChat(opts: {
     onPermissionRequest: opts.onPermissionRequest,
     onDestructiveApproval: opts.onDestructiveApproval,
     onUserQuestion: opts.onUserQuestion,
+    foregroundBashCommand: opts.foregroundBashCommand,
     turnHints: opts.turnHints,
     conversationReset: opts.conversationReset,
     context: opts.context,

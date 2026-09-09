@@ -19,7 +19,7 @@ const LONG_RUNNING_PATTERNS = [
  * which lets the CLI manage the process asynchronously (the model can
  * continue working and gets notified when the command finishes).
  */
-const forceBackgroundForScripts: HookCallback = async (input) => {
+const forceBackgroundForScripts = (exemptCommand?: string): HookCallback => async (input) => {
   if (input.hook_event_name !== 'PreToolUse') return {};
   const { tool_name, tool_input } = input as PreToolUseHookInput;
   if (tool_name !== 'Bash') return {};
@@ -27,6 +27,10 @@ const forceBackgroundForScripts: HookCallback = async (input) => {
   const ti = tool_input as Record<string, unknown>;
   const cmd = ti.command as string | undefined;
   if (!cmd || ti.run_in_background) return {};
+  // The turn EXISTS to run this one command (a `bash` schedule): there is no other work to
+  // continue with, and its exit code is the run's verdict. Backgrounding it only hides that
+  // exit code behind a task id, so the guard must not fire on it.
+  if (exemptCommand && cmd === exemptCommand) return {};
 
   const isLongRunning = LONG_RUNNING_PATTERNS.some(p => p.test(cmd));
   if (!isLongRunning) return {};
@@ -130,11 +134,13 @@ const guardFirebaseReads: HookCallback = async (input) => {
   };
 };
 
-/** Build the hooks map to pass into SDK query() options. */
-export function buildHooks(): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+/** Build the hooks map to pass into SDK query() options.
+ *  `exemptBashCommand` is the one command the turn was explicitly told to run in the foreground
+ *  (a `bash` schedule's command) — see forceBackgroundForScripts. */
+export function buildHooks(opts?: { exemptBashCommand?: string }): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
   return {
     PreToolUse: [
-      { matcher: 'Bash', hooks: [forceBackgroundForScripts] },
+      { matcher: 'Bash', hooks: [forceBackgroundForScripts(opts?.exemptBashCommand)] },
       { matcher: 'mcp__mcp-slack-use__post_slack_.*', hooks: [resolveSlackMentions] },
       { matcher: 'mcp__mcp-firebase-(?:prod|lab)__get_db.*', hooks: [guardFirebaseReads] },
     ],

@@ -23,6 +23,9 @@ export interface EngineStreamOpts {
   onPermissionRequest?: PermissionHandler;
   onDestructiveApproval?: PermissionHandler;
   onUserQuestion?: QuestionHandler;
+  /** The single command this turn was spawned to run in the foreground (a `bash` schedule).
+   *  Exempted from the long-running-script background guard — see server/hooks.ts. */
+  foregroundBashCommand?: string;
   /** Opaque per-send hints bag, forwarded verbatim from the client. The core interprets no key of it;
    *  an add-on engine reads its own keys (e.g. a duplex engine's `voice` marker). */
   turnHints?: Record<string, unknown>;
