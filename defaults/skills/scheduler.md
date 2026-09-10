@@ -140,7 +140,7 @@ Schedule: { id, name, enabled, trigger, task, scope, createdBy, nextRun?, lastRu
 
 `task.model` / `task.engine` pin what the run executes on, instead of the instance default:
 `model` takes an alias (`opus`, `haiku`) or a provider-qualified id (`cursor/composer-2.5`);
-`engine` names a registered runtime (`claude-code`, `agentx`, `cursor` — availability is
+`engine` names a registered runtime (`claude-code`, `cursor`, or any engine an add-on registers — availability is
 deployment-specific). Both are prepended to the prompt as a `[engine:…,model:…]` directive, so a
 prompt that opens with its OWN model group (`[opus] …`) would out-rank the pin — drop it from the
 prompt text when pinning. `job` tasks run a command, not an agent, so neither applies.

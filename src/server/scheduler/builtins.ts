@@ -112,7 +112,7 @@ export function backfillScope(schedules: Schedule[]): void {
     }
     // Undo the `engine: 'claude-code'` pin reconcile stamped onto the failure notifier. It shipped on
     // a premise the box's own logs disprove — nothing was ever misrouted; the deployment was simply
-    // globally on claude-code then and on agentx now — and it made the alarm the second casualty of
+    // globally on claude-code then and on an add-on engine now — and it made the alarm the second casualty of
     // the real failure mode (an org cap on the pinned provider). Narrow on purpose: exactly the
     // state that clause produced (this id, that engine, no model), so it cannot eat a real choice.
     if (s.id === FAILURE_NOTIFIER_SCHEDULE_ID && task.engine === 'claude-code' && !task.model) {

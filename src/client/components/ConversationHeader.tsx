@@ -41,7 +41,7 @@ export function deriveRuntimeBadges(input: {
   // A recorded model is ground truth about the MODEL whether or not an engine was recorded beside
   // it, so it is never dropped — dropping it made the UI report the REQUESTED runtime for a turn
   // that had already run, the one claim this must never make. What a lone model cannot do is name
-  // the engine: an id is bare or prefixed by PROVIDER, and a provider is not an engine (agentx runs
+  // the engine: an id is bare or prefixed by PROVIDER, and a provider is not an engine (an add-on engine runs
   // anthropic models). So with no `lastEngine`, the engine stays unknown rather than guessed.
   const engine = provenance === 'ran' ? input.actualEngine! : provenance === 'pending' ? requestedEngine : undefined;
   const rawModel =

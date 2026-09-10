@@ -267,7 +267,7 @@ describe('supervisor.sh', () => {
   }, budget(30_000));
 
   // A single dropped probe on a busy box is not a crash-loop. Zero tolerance here reverted a
-  // perfectly healthy 0.1.48 on the feedox box while the process stayed up the whole time.
+  // perfectly healthy 0.1.48 on a production deployment while the process stayed up the whole time.
   test('a single missed probe mid-soak does not revert a healthy upgrade', async () => {
     const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
     const report = path.join(root, 'report.json');

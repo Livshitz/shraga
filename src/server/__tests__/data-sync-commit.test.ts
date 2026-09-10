@@ -158,7 +158,7 @@ describe('isChurnPath', () => {
     expect(isChurnPath('workspace/social/workers/logs/2026-09-07-liscout.task.txt')).toBe(true);
     expect(isChurnPath('workspace/social/workers/logs/2026-09-07-xscout.task.txt')).toBe(true);
     expect(isChurnPath('workspace/social/workers/tasks/20260907-084500-li-post.task.txt')).toBe(true);
-    expect(isChurnPath('workspace/social/workers/launch-agentx-leg.sh.bak-atomic')).toBe(true);
+    expect(isChurnPath('workspace/social/workers/launch-ext-agent-leg.sh.bak-atomic')).toBe(true);
     expect(isChurnPath('workspace/social/workers/recover-scout-payload.py.bak-softgate-20260907092016')).toBe(true);
   });
 
@@ -179,7 +179,7 @@ describe('isChurnPath', () => {
     expect(isChurnPath('skills/social-manager.md')).toBe(false);
     expect(isChurnPath('workspace/social/receipts/2026-09-07-morning.json')).toBe(false);
     expect(isChurnPath('workspace/social/batches/2026-09-07-morning-x-replies.json')).toBe(false);
-    expect(isChurnPath('workspace/social/workers/launch-agentx-leg.sh')).toBe(false);
+    expect(isChurnPath('workspace/social/workers/launch-ext-agent-leg.sh')).toBe(false);
     expect(isChurnPath('jobs/schedule.json')).toBe(false);          // not a job-<id> record
     expect(isChurnPath('mcps/browser-bridge.json')).toBe(false);    // a real deletion, worth one alert
   });

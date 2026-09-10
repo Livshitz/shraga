@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
  * when the server's launchd/systemd parent dies first: the server reparents to pid 1, nothing will
  * ever signal it, and it holds the port FOREVER. The replacement then dies on every respawn while
  * the orphan keeps serving the OLD code, so `kickstart -k` looks successful and changes nothing
- * (observed on feedox 2026-08-28: a deploy "restarted" the service four times, and the process
+ * (observed on a production deployment 2026-08-28: a deploy "restarted" the service four times, and the process
  * answering :3032 was three hours and one version old).
  *
  * Reclaiming is deliberately narrow — an over-broad "kill whatever holds my port" is how a deploy
@@ -22,7 +22,7 @@ export function reclaimStalePort(port: number, opts: { entrypoint?: string; cwd?
 
   // Any state, not just LISTEN: an orphan that closed its listener inside a drain it never finished
   // still OWNS the socket, and looking only for LISTEN made it invisible while it blocked every
-  // replacement (feedox 2026-09-06: ppid-1 orphan, listener closed, port held for six minutes and
+  // replacement (a production deployment 2026-09-06: ppid-1 orphan, listener closed, port held for six minutes and
   // counting). `isStaleSelf` is what keeps this narrow — a bystander is never a candidate.
   const holders = [...new Set([...listeners(port), ...portUsers(port)])]
     .filter((pid) => pid !== process.pid && isStaleSelf(pid, entrypoint, cwd));

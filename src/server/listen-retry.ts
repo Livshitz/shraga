@@ -4,7 +4,7 @@
  * `kickstart -k` starts the replacement while the old process drains (up to 90s), so the new one
  * meets EADDRINUSE. Exiting immediately hands the problem to the service manager — which respawns
  * on a ~10s throttle, meets the same still-draining owner, and exits again. MEASURED 2026-09-06 on
- * the feedox box: one watchdog kick produced ~20 start/exit cycles over five minutes, every one of
+ * a production box: one watchdog kick produced ~20 start/exit cycles over five minutes, every one of
  * them `port already in use`, and every scheduled run in that window died with it. The manager was
  * doing exactly what it was asked to; the retry it was standing in for just belonged here, where
  * the wait is one process holding still instead of N processes racing.

@@ -126,7 +126,7 @@ describe('failure-notifier engine pin', () => {
 
   test('the shipped builtin pins no engine — it follows agent config like every other schedule', () => {
     // The pin was shipped on a premise since disproved by the box's own logs: nothing was ever
-    // misrouted, the deployment was simply globally on claude-code then and on agentx now. Hard-coding
+    // misrouted, the deployment was simply globally on claude-code then and on ext-agent now. Hard-coding
     // that stale state also made the alarm the second casualty of the real failure mode (an org cap
     // on the pinned provider).
     const schedules = ensureBuiltinSchedules([]);
@@ -159,10 +159,10 @@ describe('failure-notifier engine pin', () => {
   });
 
   test('an explicit stored pair folds into one directive group', () => {
-    const schedules = [stored({ kind: 'prompt', prompt: 'p', engine: 'agentx', model: 'cursor/composer-2.5' })];
+    const schedules = [stored({ kind: 'prompt', prompt: 'p', engine: 'ext-agent', model: 'cursor/composer-2.5' })];
     backfillScope(schedules);
     const task = schedules[0].task as { prompt: string; engine?: string; model?: string };
-    expect(task.prompt).toBe('[engine:agentx,model:cursor/composer-2.5] p');
+    expect(task.prompt).toBe('[engine:ext-agent,model:cursor/composer-2.5] p');
     expect(task.engine).toBeUndefined();
     expect(task.model).toBeUndefined();
   });

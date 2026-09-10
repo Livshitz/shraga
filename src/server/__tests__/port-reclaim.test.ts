@@ -1,6 +1,6 @@
 /**
  * Reclaim is allowed to kill exactly one thing: an ORPHANED copy of this deployment holding our
- * port. Widening it to holders that are no longer LISTENing (feedox 2026-09-06: an orphan closed its
+ * port. Widening it to holders that are no longer LISTENing (a production deployment 2026-09-06: an orphan closed its
  * listener inside a drain it never finished, kept the socket, and blocked every replacement) makes
  * that blast radius the only thing standing between us and killing a bystander — so pin it.
  */

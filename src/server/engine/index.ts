@@ -70,7 +70,7 @@ export function resolveAndGetEngine(directives?: { engine?: string }, agentConfi
   const name = resolveEngine(directives, agentConfig);
   // An optional engine may be unregistered on a given boot (add-on not loaded, missing API key or
   // failed init). Rerouting to claude-code here silently switched PROVIDER AND BILLING under the
-  // caller — a cursor/agentx run billed Anthropic while the UI still showed the cursor chips. Fail
+  // caller — an add-on engine's run billed Anthropic while the UI still showed the cursor chips. Fail
   // loudly instead; the degradation is surfaced to whoever asked (user, schedule) as a turn error.
   if (!hasEngine(name)) throw new EngineUnavailableError(name, getAvailableEngines());
   return getEngine(name);

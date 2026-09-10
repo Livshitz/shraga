@@ -29,7 +29,7 @@ import { ScheduleEditor } from '../components/schedules/ScheduleEditor.tsx';
 const ENGINES = {
   engines: [
     { name: 'claude-code', models: [{ value: 'claude-sonnet-5', label: 'Sonnet 5' }, { value: 'claude-haiku-4-5', label: 'Haiku 4.5' }] },
-    { name: 'agentx', models: [{ value: 'cursor/composer-2.5', label: 'Composer 2.5' }, { value: 'anthropic/claude-sonnet-5', label: 'Sonnet 5 (API)' }] },
+    { name: 'ext-agent', models: [{ value: 'cursor/composer-2.5', label: 'Composer 2.5' }, { value: 'anthropic/claude-sonnet-5', label: 'Sonnet 5 (API)' }] },
   ],
   multiEngine: true,
 };
@@ -73,7 +73,7 @@ describe('ScheduleEditor runtime picker', () => {
     // The real shape of 11 of the 15 live schedules: a model-only pin whose engine is inferred.
     const { selects, root } = await mount('[model:cursor/composer-2.5] Run the daily social routine.');
     expect(selects.length).toBe(2);
-    expect(selects[0].value).toBe('agentx');              // inferred from the model, as the server does
+    expect(selects[0].value).toBe('ext-agent');              // inferred from the model, as the server does
     expect(selects[1].value).toBe('cursor/composer-2.5');
     expect(selects[0].disabled).toBe(false);              // registry loaded ⇒ editable
     root.unmount();
@@ -87,9 +87,9 @@ describe('ScheduleEditor runtime picker', () => {
   });
 
   it('a value this server does not offer is shown as itself, never silently swapped', async () => {
-    // Hand-typed: sonnet belongs to claude-code, so agentx's list does not contain it. A plain
-    // <select> would render agentx's FIRST model here and report a runtime that will not run.
-    const { selects, root } = await mount('[engine:agentx,model:claude-sonnet-5] go');
+    // Hand-typed: sonnet belongs to claude-code, so ext-agent's list does not contain it. A plain
+    // <select> would render ext-agent's FIRST model here and report a runtime that will not run.
+    const { selects, root } = await mount('[engine:ext-agent,model:claude-sonnet-5] go');
     expect(selects[1].value).toBe('claude-sonnet-5');
     const shown = [...selects[1].querySelectorAll('option')].find((o) => (o as HTMLOptionElement).value === 'claude-sonnet-5')!;
     expect(shown.textContent).toContain('not offered by this engine');

@@ -4,7 +4,7 @@ import type { AgentEngine } from '../engine/types.ts';
 /**
  * End-to-end through the REAL path a background-job / api turn takes: a registered engine →
  * `streamChat` → `consumeStream` with the lane's hooks. Nothing here is a stand-in for the code
- * under test; only the engine is a stub, and it emits exactly what the agentx engine emits when it
+ * under test; only the engine is a stub, and it emits exactly what the ext-agent engine emits when it
  * dispatches a subagent.
  *
  * The regression: these lanes surfaced NOTHING while a turn ran, and dropped `duplex_task`

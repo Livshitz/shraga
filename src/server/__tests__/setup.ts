@@ -11,7 +11,7 @@ import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-// A dev shell may export ENV_NAME for whichever deployment it's pointed at (e.g. "feedox").
+// A dev shell may export ENV_NAME for whichever deployment it's pointed at (e.g. "prod").
 // env-resolve.ts (imported transitively by index.ts) resolves `.env.${ENV_NAME}` relative to
 // THIS repo root and calls process.exit(1) if that file doesn't exist here — silently killing
 // the whole `bun test` run with no test output. Tests must be hermetic to the ambient shell.
