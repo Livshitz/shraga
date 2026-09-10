@@ -22,8 +22,8 @@ describe('schedule prompt [model] directive', () => {
     expect(directives.model).toBe('claude-haiku-4-5-20251001');
   });
   test('engine + provider-qualified model (the runner prefix shape) both resolve', () => {
-    const { prompt, directives } = parseDirectives('[engine:agentx,model:cursor/composer-2.5] Do the thing.');
-    expect(directives.engine).toBe('agentx');
+    const { prompt, directives } = parseDirectives('[engine:ext-agent,model:cursor/composer-2.5] Do the thing.');
+    expect(directives.engine).toBe('ext-agent');
     expect(directives.model).toBe('cursor/composer-2.5');
     expect(prompt).toBe('Do the thing.');
   });
@@ -37,7 +37,7 @@ describe('schedule prompt [model] directive', () => {
 
 // A schedule prompt may already open with its own [turns:N] group when runner.ts prepends
 // `[model] `. Both groups must survive — the single-group parse dropped the second silently
-// and downgraded the pinned model to the config default (feedox social runs, 08-17..08-19).
+// and downgraded the pinned model to the config default (production social runs, 08-17..08-19).
 describe('stacked directive groups', () => {
   test('[turns:120][opus] keeps both', () => {
     const { prompt, directives } = parseDirectives('[turns:120][opus] Run the routine.');

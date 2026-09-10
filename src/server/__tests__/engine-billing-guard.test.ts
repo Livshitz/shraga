@@ -6,7 +6,7 @@ import { describe, test, expect } from 'bun:test';
  *
  *   a run must never execute on a provider other than the one it asked for.
  *
- * The incident this pins: a scheduled run requested `agentx` + `cursor/composer-2.5`, that engine was
+ * The incident this pins: a scheduled run requested `ext-agent` + `cursor/composer-2.5`, that engine was
  * not registered on that boot, and the resolver silently handed the turn to `claude-code` — which then
  * posted the Cursor model id to the Anthropic SDK. Three vendor-billed attempts later it failed on an
  * Anthropic org limit, while the UI still showed the Cursor chips. Both halves must fail loudly.
@@ -47,11 +47,11 @@ async function runTurn(prompt: string): Promise<WsEvent[]> {
 
 describe('provider/billing guard (streamChat → engine)', () => {
   test('an unregistered engine ends the turn with an actionable error — it does NOT run on claude-code', async () => {
-    expect(hasEngine('agentx')).toBe(false);
-    const events = await runTurn('[engine:agentx] say hi');
+    expect(hasEngine('ext-agent')).toBe(false);
+    const events = await runTurn('[engine:ext-agent] say hi');
     const err = events.find((e) => e.type === 'error') as Extract<WsEvent, { type: 'error' }> | undefined;
     expect(err).toBeDefined();
-    expect(err!.message).toContain('agentx');
+    expect(err!.message).toContain('ext-agent');
     // Actionable: what IS registered, and the env gate that would register the missing one.
     expect(err!.message).toContain('claude-code');
     expect(err!.message).toContain('AGENT_ENGINES');

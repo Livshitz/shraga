@@ -4,15 +4,15 @@ import { deriveRuntimeBadges } from '../ConversationHeader';
 /**
  * The header must report what RAN, not what was requested.
  *
- * Reproduces the incident's exact data: a scheduled run requested engine `agentx` +
+ * Reproduces the incident's exact data: a scheduled run requested engine `ext-agent` +
  * `cursor/composer-2.5`, but the unregistered engine was rerouted to `claude-code`, which ran
- * `claude-sonnet-5` on Anthropic. The header showed `agentx · cursor/composer-2.5` + `API·cursor` —
+ * `claude-sonnet-5` on Anthropic. The header showed `ext-agent · cursor/composer-2.5` + `API·cursor` —
  * the wrong vendor on the billing chip, for a run already billed to Anthropic.
  */
 describe('deriveRuntimeBadges', () => {
   test('the incident: a fallback run reports the engine/model that actually executed', () => {
     const b = deriveRuntimeBadges({
-      requestedEngine: 'agentx',
+      requestedEngine: 'ext-agent',
       requestedModel: 'cursor/composer-2.5',
       actualEngine: 'claude-code',
       actualModel: 'claude-sonnet-5',
@@ -20,18 +20,18 @@ describe('deriveRuntimeBadges', () => {
     expect(b.engine).toBe('claude-code');
     expect(b.rawModel).toBe('claude-sonnet-5');
     expect(b.billingProvider).toBe('anthropic'); // was 'cursor' — the chip named the wrong vendor
-    expect(b.engineMismatch).toBe('agentx'); // and the disagreement is now visible, not laundered
+    expect(b.engineMismatch).toBe('ext-agent'); // and the disagreement is now visible, not laundered
     expect(b.provenance).toBe('ran');
   });
 
   test('no mismatch chip when the run matches the request', () => {
     const b = deriveRuntimeBadges({
-      requestedEngine: 'agentx',
+      requestedEngine: 'ext-agent',
       requestedModel: 'cursor/composer-2.5',
-      actualEngine: 'agentx',
+      actualEngine: 'ext-agent',
       actualModel: 'cursor/composer-2.5',
     });
-    expect(b.engine).toBe('agentx');
+    expect(b.engine).toBe('ext-agent');
     expect(b.rawModel).toBe('cursor/composer-2.5');
     expect(b.billingProvider).toBe('cursor');
     expect(b.engineMismatch).toBeUndefined();
@@ -40,8 +40,8 @@ describe('deriveRuntimeBadges', () => {
 
   test('a bare model id belongs to the engine that ran it — not assumed to be anthropic', () => {
     // The old rule was "no slash ⇒ anthropic", which mislabels any add-on engine running a bare id.
-    const b = deriveRuntimeBadges({ actualEngine: 'agentx', actualModel: 'composer-2.5' });
-    expect(b.billingProvider).toBe('agentx');
+    const b = deriveRuntimeBadges({ actualEngine: 'ext-agent', actualModel: 'composer-2.5' });
+    expect(b.billingProvider).toBe('ext-agent');
   });
 
   test('before any turn has run, the chips describe the SELECTION and say so', () => {
@@ -58,7 +58,7 @@ describe('deriveRuntimeBadges', () => {
     // 45 of 817 live sessions are this shape (written before `lastEngine` existed). Substituting the
     // REQUESTED model for it — the previous rule — reported a runtime that provably did not execute.
     // A bare id still cannot name a provider, so that half is reported unknown rather than guessed.
-    const b = deriveRuntimeBadges({ requestedEngine: 'agentx', requestedModel: 'cursor/composer-2.5', actualModel: 'claude-sonnet-5' });
+    const b = deriveRuntimeBadges({ requestedEngine: 'ext-agent', requestedModel: 'cursor/composer-2.5', actualModel: 'claude-sonnet-5' });
     expect(b.provenance).toBe('ran-model');
     expect(b.rawModel).toBe('claude-sonnet-5');
     expect(b.engine).toBeUndefined();
@@ -69,7 +69,7 @@ describe('deriveRuntimeBadges', () => {
   test('an engine-less PREFIXED recorded model still names its provider (pre-lastEngine sessions)', () => {
     // A `provider/` prefix is direct evidence of what was billed and needs no engine to vouch for it.
     const b = deriveRuntimeBadges({
-      requestedEngine: 'agentx',
+      requestedEngine: 'ext-agent',
       requestedModel: 'cursor/composer-2.5',
       actualModel: 'anthropic/claude-sonnet-4-6',
     });

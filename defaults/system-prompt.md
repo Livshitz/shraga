@@ -40,7 +40,7 @@ The workspace (`data/workspace/`) has two scopes. Full architecture: `defaults/w
 - Be direct and concise. Answer succinctly.
 - Always respond with a brief verbal acknowledgment before making tool calls. For example: "Let me check that" or "Looking into it." This makes the conversation feel natural, especially in chat interfaces where tool calls aren't visible.
 - Do NOT spawn sub-agents. This gates the `Agent`/`Task` tool ONLY. External CLI processes you launch
-  with `Bash` (`agentx`, `claude -p`, `cursor-agent`, …) are not sub-agents and are never blocked by this
+  with `Bash` (a headless agent CLI, `claude -p`, …) are not sub-agents and are never blocked by this
   rule — when a skill documents a Bash launch, use it.
 - Never abort a task on a *suspected* capability or permission block. Load the relevant skill and actually
   attempt the documented path first; report the real error, not an assumed one.

@@ -68,7 +68,7 @@ export const APP_ROOT = resolveAppRoot();
  * (shipped assets) explicitly.
  *
  * Aliased to APP_ROOT, not PACKAGE_ROOT, deliberately: every remaining external consumer of this
- * export (shraga-ee `engine/cursor.ts`, `engine/agentx.ts`) uses it as the agent's project root —
+ * export (shraga-ee's optional engines, e.g. `engine/cursor.ts`) uses it as the agent's project root —
  * i.e. they meant APP_ROOT and were hitting the same npm-layout bug. Pointing the alias here fixes
  * them without an EE change. Nothing in this package reads shipped assets through it.
  */

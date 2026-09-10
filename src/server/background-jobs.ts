@@ -6,10 +6,10 @@
 // polling is not the fix; something has to WAKE the session when the process exits.
 //
 // Shape:
-//   • The registry is owned by the SERVER (module singleton), not by the turn. agentx builds a fresh
+//   • The registry is owned by the SERVER (module singleton), not by the turn. An add-on engine builds a fresh
 //     `Agent` per turn, so a registry created there would die with the turn — the very failure above.
 //     Hosts hand each turn a thin per-session VIEW (`sessionJobRegistry`) over this one store; the
-//     view is duck-compatible with agentx's `ShellJobRegistry`, so `Shell({background:true})` and the
+//     view is duck-compatible with the add-on engine's `ShellJobRegistry`, so `Shell({background:true})` and the
 //     ShellOutput/ShellStatus/ShellKill tools light up with no folklore `nohup`.
 //   • On exit we report through wake.ts — the same "close then report" path polls.ts already uses in
 //     production, so a job outcome lands wherever the session speaks (Slack thread / web UI).
@@ -193,10 +193,10 @@ function pidAgeSeconds(pid: number): number | null {
 /**
  * Env for a job's shell: the server's own, minus anything that looks like a credential.
  *
- * agentx's foreground `Bash` redacts these by default (RealShellOptions.redactEnv). Backgrounding a
+ * An add-on engine's foreground `Bash` redacts these by default (RealShellOptions.redactEnv). Backgrounding a
  * command must not be a way around that — otherwise `Bash({background:true})` becomes a strictly
  * weaker sandbox than `Bash({})`, and `echo $ANTHROPIC_API_KEY` lands in a job log we then feed back
- * into the model. Mirrors agentx's SECRET_ENV_RE; a job that genuinely needs a credential gets it
+ * into the model. Mirrors the add-on engine's SECRET_ENV_RE; a job that genuinely needs a credential gets it
  * explicitly via `JobOwner.env`.
  */
 const SECRET_ENV_RE = /(API_KEY|_TOKEN|_SECRET|_PASSWORD|_PRIVATE_KEY|^AWS_|^GITHUB_TOKEN$|^OPENAI_|^ANTHROPIC_|^GOOGLE_|^GEMINI_|^GROQ_|^NPM_TOKEN$|^SLACK_)/i;
@@ -519,7 +519,7 @@ function pruneOld(): void {
 // ── The per-turn view handed to the agent engine ───────────────────────────────
 
 /**
- * A session-scoped facade over the process-wide store, duck-compatible with agentx's
+ * A session-scoped facade over the process-wide store, duck-compatible with the add-on engine's
  * `ShellJobRegistry` — pass it as `makeRealShellTool({ registry })` and to `makeShellJobTools`.
  *
  * Cheap to build per turn (it holds no state); the jobs it starts belong to the server, so they

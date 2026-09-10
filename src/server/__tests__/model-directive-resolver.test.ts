@@ -9,20 +9,20 @@ afterEach(() => setModelResolver(null));
 
 describe('engine-owned model directives', () => {
   it('resolves a model the alias table does not know, and implies its engine', () => {
-    stub({ 'composer-2.5': { model: 'cursor/composer-2.5', engine: 'agentx' } });
+    stub({ 'composer-2.5': { model: 'cursor/composer-2.5', engine: 'ext-agent' } });
     const r = parseDirectives('[composer-2.5] lfg');
     expect(r.prompt).toBe('lfg');
     expect(r.directives.model).toBe('cursor/composer-2.5');
-    expect(r.directives.engine).toBe('agentx');
+    expect(r.directives.engine).toBe('ext-agent');
   });
 
   it('honours the same token in key form', () => {
-    stub({ 'composer-2.5': { model: 'cursor/composer-2.5', engine: 'agentx' } });
-    expect(parseDirectives('[model:composer-2.5] hi').directives).toMatchObject({ model: 'cursor/composer-2.5', engine: 'agentx' });
+    stub({ 'composer-2.5': { model: 'cursor/composer-2.5', engine: 'ext-agent' } });
+    expect(parseDirectives('[model:composer-2.5] hi').directives).toMatchObject({ model: 'cursor/composer-2.5', engine: 'ext-agent' });
   });
 
   it('never overrides an explicit engine directive', () => {
-    stub({ 'composer-2.5': { model: 'cursor/composer-2.5', engine: 'agentx' } });
+    stub({ 'composer-2.5': { model: 'cursor/composer-2.5', engine: 'ext-agent' } });
     expect(parseDirectives('[engine:cursor,model:composer-2.5] hi').directives.engine).toBe('cursor');
   });
 

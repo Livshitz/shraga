@@ -54,7 +54,7 @@ export function writeRuntimeDirective(text: string, sel: RuntimeSelection): stri
     }
   }
   // An engine the chosen model already implies is not written: `[model:cursor/composer-2.5]` and
-  // `[engine:agentx,model:cursor/composer-2.5]` mean the same thing to the parser, and emitting the
+  // `[engine:ext-agent,model:cursor/composer-2.5]` mean the same thing to the parser, and emitting the
   // longer one would stamp a pin the user never chose onto every schedule that carries a model-only
   // directive (11 of the 15 live ones) the moment the picker is touched.
   const impliedEngine = sel.model ? resolveModelAlias(sel.model)?.engine : undefined;

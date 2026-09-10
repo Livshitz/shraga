@@ -139,7 +139,7 @@ wait_for_version() { # version timeout
 # One dropped probe is not a crash-loop. This runs on a busy box where a single request can lose a
 # 10s race (MCP mounts, a GC pause, the drain window of the restart we just did), and a zero-
 # tolerance soak turns that blip into an automatic rollback of a perfectly good version — observed
-# reverting 0.1.48 on feedox while the process stayed up throughout. Require CONSECUTIVE misses, so
+# reverting 0.1.48 on a production deployment while the process stayed up throughout. Require CONSECUTIVE misses, so
 # a real crash (which never answers again) still fails fast.
 SOAK_MISS_LIMIT="${SOAK_MISS_LIMIT:-3}"
 soak() { # version seconds

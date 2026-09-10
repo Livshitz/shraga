@@ -91,7 +91,7 @@ function RuntimePicker({ prompt, onChange, getToken }: { prompt: string; onChang
   const engineListed = listed(sel.engine, engines.map((e) => e.name));
   // Only an engine the directive NAMES is carried forward. An inferred one belongs to the model it
   // was inferred from: re-emitting it while the user picks another engine's model would silently
-  // pin a pairing nobody chose (agentx running a claude-code model).
+  // pin a pairing nobody chose (one engine running another engine's model).
   const set = (next: { engine?: string; model?: string }) =>
     onChange(writeRuntimeDirective(prompt, { engine: sel.engineExplicit ? sel.engine : undefined, model: sel.model, ...next }));
   const selectClass = 'h-8 rounded-md border border-input bg-background px-2 text-xs';

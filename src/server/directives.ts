@@ -38,7 +38,7 @@ const DIRECTIVE_KEYS = ['model', 'turns', 'thinking', 'think', 'effort', 'engine
 const isQualifiedModel = (v: string) => /^[a-z0-9._-]+\/[a-z0-9./_-]+$/.test(v);
 
 /** Resolves a model token the alias table doesn't know against the REGISTERED engines' own model
- *  lists, and reports which engine owns it. Without this, `[composer-2.5]` (an agentx model) was
+ *  lists, and reports which engine owns it. Without this, `[composer-2.5]` (an add-on engine's model) was
  *  warned about and dropped, so the turn silently ran on the previous engine/model. Injected by
  *  `initEngines()` — directives.ts stays pure and dependency-free for CE and for tests. */
 export type ModelResolver = (token: string) => { model: string; engine?: string } | null;
