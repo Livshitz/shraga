@@ -365,7 +365,9 @@ export class WebhookStreamer {
 }
 
 /** PROACTIVE post — a scheduled run, a deploy notice, a downtime report. No preceding user turn,
- *  so there is no row to patch: the receiver mints one. Same signed transport, same fence. */
-export function postNotice(cb: WebhookTarget, convId: string, text: string): Promise<boolean> {
-  return postDelivery(cb, { type: 'post', convId, text });
+ *  so there is no row to patch: the receiver mints one. Same signed transport, same fence.
+ *  `notify` is OPT-IN: it asks the receiver to also push to the owner's device. Omitted (not
+ *  `false`) when unset, so a plain notice's wire body is byte-identical to before. */
+export function postNotice(cb: WebhookTarget, convId: string, text: string, opts?: { notify?: boolean }): Promise<boolean> {
+  return postDelivery(cb, { type: 'post', convId, text, ...(opts?.notify ? { notify: true } : {}) });
 }

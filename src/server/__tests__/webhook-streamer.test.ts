@@ -144,6 +144,21 @@ describe('failure handling', () => {
     await postNotice(cb, 'c1', 'deploy done');
     expect(received[0].body).toEqual({ type: 'post', convId: 'c1', text: 'deploy done' });
   });
+
+  test('`notify` is opt-in: absent unless asked, and SIGNED when present', async () => {
+    reset();
+    await postNotice(cb, 'c1', 'silent', { notify: false });
+    await postNotice(cb, 'c1', 'buzz', { notify: true });
+    // `notify:false` must not put the key on the wire at all — the plain body stays byte-identical.
+    expect((received[0] as any).raw).toBe(JSON.stringify({ type: 'post', convId: 'c1', text: 'silent' }));
+    expect(received[1].body).toEqual({ type: 'post', convId: 'c1', text: 'buzz', notify: true });
+    // The field is inside the signed bytes, so a receiver verifying the raw body accepts it and a
+    // relay that strips or adds it breaks the signature.
+    const r = received[1] as any;
+    const expected = 'v1=' + createHmac('sha256', cb.secret).update(`${cb.connId}.${r.headers['x-agent-delivery']}.${r.headers['x-agent-timestamp']}.${r.raw}`).digest('hex');
+    expect(r.raw).toContain('"notify":true');
+    expect(r.headers['x-agent-signature']).toBe(expected);
+  });
 });
 
 // ── FROZEN SIGNATURE VECTOR ──────────────────────────────────────────────────────────────────────
