@@ -764,6 +764,7 @@ export class DataSync {
     'uploads/', 'repos/', '.tmp/', 'schedules.json.bak', 'git-log.json',
     '.internal-token', 'comms-log.jsonl', 'sessions/', 'unread/', '.DS_Store',
     'scheduler/', '.mcp-catalog.json',
+    'workspace/users/*/.claude/', // per-user Claude logins (claude-account.ts) — credentials, never commit
   ];
 
   /** Write or refresh .gitignore, appending any canonical entries it's missing (idempotent). */
