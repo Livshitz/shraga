@@ -26,6 +26,10 @@ export interface Usage {
   fetchedAt?: string;
   /** Server is serving its last known-good reading because the live attempt failed. */
   stale?: boolean;
+  /** Why the last refresh failed (server-worded). Present only with `stale`. */
+  error?: string;
+  /** When the server will next try upstream (ISO). */
+  retryAt?: string;
 }
 
 const WINDOW = 120;
@@ -227,8 +231,14 @@ export function UsageCard({ usage }: { usage: Usage }) {
       </div>
       <div className="-mt-1 flex items-baseline justify-between gap-2 pb-2 text-[10px] text-muted-foreground">
         {usage.account && <span className="truncate" title={usage.account}>{usage.account}</span>}
-        <span className="shrink-0">{ageLabel(usage)}</span>
+        <span className={cn('shrink-0', usage.stale && 'text-amber-500')}>{ageLabel(usage)}</span>
       </div>
+      {usage.stale && usage.error && (
+        // A days-old reading must say WHY it is old — otherwise it reads as current.
+        <div data-refresh-error className="-mt-1 pb-2 text-[10px] text-amber-500 break-words">
+          {usage.error}{untilLabel(usage.retryAt ?? null) && ` · retrying in ${untilLabel(usage.retryAt ?? null)}`}
+        </div>
+      )}
       <div className="flex flex-col gap-3">
         {usage.limits.map((l, i) => {
           const until = untilLabel(l.resetsAt);

@@ -41,7 +41,30 @@ export interface ClaudeUsage {
   /** True when this is the last known-good reading being served because the current attempt failed
    *  (429 cooldown, 403, network). The gauge stays VISIBLE and says how old it is. */
   stale?: boolean;
+  /** Why the last refresh failed, in words (e.g. "rate limited by the usage endpoint (429)"). Set only
+   *  alongside `stale` — a multi-day-old reading must say WHY it is old, not just that it is. */
+  error?: string;
+  /** When the next upstream attempt is due (ISO), if the failure told us (Retry-After / cooldown). */
+  retryAt?: string;
 }
+
+/** The subset of the Agent SDK's `rate_limit_event.rate_limit_info` we consume. Observed live: it
+ *  carries status/resetsAt/rateLimitType but NO utilization while allowed — so it can only ever say
+ *  "this window is exhausted", never a percentage. That is exactly the reading the throttled usage
+ *  endpoint fails to deliver when it matters most (the account at its limit). */
+export interface RateLimitInfo {
+  status: string;
+  resetsAt?: number;
+  rateLimitType?: string;
+}
+
+/** SDK rateLimitType -> the usage endpoint's window, so an exhausted window lands on the row it is. */
+const RATE_LIMIT_WINDOW: Record<string, { kind: string; group: string; scopeLabel?: string }> = {
+  five_hour: { kind: 'session', group: 'session' },
+  seven_day: { kind: 'weekly_all', group: 'weekly' },
+  seven_day_opus: { kind: 'weekly_scoped', group: 'weekly', scopeLabel: 'Opus' },
+  seven_day_sonnet: { kind: 'weekly_scoped', group: 'weekly', scopeLabel: 'Sonnet' },
+};
 
 export class ClaudeUsageOptions {
   credentialsPath = path.join(homedir(), '.claude', '.credentials.json');
@@ -151,6 +174,10 @@ export class ClaudeUsageReader {
   private lastGood: { at: number; value: ClaudeUsage } | null = null;
   /** One-shot rehydrate of `lastGood` from disk, awaited by the first get(). */
   private restored: Promise<void> | null = null;
+  /** Why the most recent upstream attempt failed; cleared by a success. Surfaced on stale readings. */
+  private lastError: { reason: string; retryAt?: number } | null = null;
+  /** Latest exhausted windows reported by the agent's own inference calls (SDK rate_limit_event). */
+  private exhausted = new Map<string, number>();
 
   public constructor(options?: Partial<ClaudeUsageOptions>) {
     this.options = { ...new ClaudeUsageOptions(), ...options };
@@ -158,6 +185,40 @@ export class ClaudeUsageReader {
 
   /** null => this box is not on a Claude subscription, or we could not prove that it ever was. */
   async get(): Promise<ClaudeUsage | null> {
+    return this.overlay(await this.read());
+  }
+
+  /** Fed from every agent turn's `rate_limit_event`. Costs zero upstream calls. 'rejected' marks the
+   *  window exhausted until its reset; any other status for that window clears the mark. */
+  observeRateLimit(info: RateLimitInfo | null | undefined) {
+    const type = info?.rateLimitType;
+    if (!type || !RATE_LIMIT_WINDOW[type]) return;
+    if (info.status === 'rejected' && typeof info.resetsAt === 'number') {
+      if (!this.exhausted.has(type)) console.warn(`${TAG} agent reports ${type} limit reached; resets ${new Date(info.resetsAt * 1000).toISOString()}`);
+      this.exhausted.set(type, info.resetsAt * 1000);
+    } else {
+      this.exhausted.delete(type);
+    }
+  }
+
+  /** Paint any window the agent has PROVEN exhausted at 100% over whatever the endpoint last said —
+   *  the endpoint's reading may be days old. Never conjures a gauge for a box with no reading. */
+  private overlay(usage: ClaudeUsage | null): ClaudeUsage | null {
+    if (!usage || !this.exhausted.size) return usage;
+    const now = Date.now();
+    const limits = [...usage.limits];
+    for (const [type, resetsAtMs] of this.exhausted) {
+      if (resetsAtMs <= now) { this.exhausted.delete(type); continue; }
+      const w = RATE_LIMIT_WINDOW[type];
+      const hit = { ...w, percent: 100, severity: 'exceeded', resetsAt: new Date(resetsAtMs).toISOString() };
+      const i = limits.findIndex(l => l.kind === w.kind && (!w.scopeLabel || l.scopeLabel === w.scopeLabel));
+      if (i >= 0) limits[i] = { ...limits[i], ...hit, scopeLabel: limits[i].scopeLabel ?? w.scopeLabel };
+      else limits.push(hit);
+    }
+    return { ...usage, limits };
+  }
+
+  private async read(): Promise<ClaudeUsage | null> {
     await (this.restored ??= this.restore());
     const now = Date.now();
     if (now < this.cooldownUntil) return this.stale();
@@ -202,12 +263,31 @@ export class ClaudeUsageReader {
 
   /** Last known-good reading, marked stale. Never invents numbers — null when we never had any. */
   private stale(): ClaudeUsage | null {
-    return this.lastGood ? { ...this.lastGood.value, stale: true } : null;
+    if (!this.lastGood) return null;
+    const err = this.lastError;
+    return {
+      ...this.lastGood.value,
+      stale: true,
+      error: err?.reason ?? 'refresh failed (no detail recorded)',
+      ...(err?.retryAt ? { retryAt: new Date(err.retryAt).toISOString() } : {}),
+    };
+  }
+
+  private fail(reason: string, retryAt?: number): null {
+    this.lastError = { reason, retryAt };
+    return null;
   }
 
   private async fetchUsage(): Promise<Omit<ClaudeUsage, 'fetchedAt'> | null> {
     const creds = await this.readCredentials();
-    if (!creds) return null;
+    if (!creds) return this.fail('no usable Claude OAuth credentials on this box');
+    // Only the Claude Code CLI refreshes this token (it does so when the agent runs). An expired one
+    // is a guaranteed 401 — prod logged 33 in a row overnight — so skip the call and say so instead.
+    if (creds.expiresAt !== null && creds.expiresAt <= Date.now()) {
+      const at = new Date(creds.expiresAt).toISOString();
+      console.warn(`${TAG} oauth token expired at ${at}; skipping upstream until Claude Code refreshes it`);
+      return this.fail(`OAuth token expired at ${at} — refreshes on the next agent run`);
+    }
 
     try {
       const res = await fetch(this.options.endpoint, {
@@ -225,30 +305,32 @@ export class ClaudeUsageReader {
         // The reason lives in the BODY, not the status: "too many requests" (our own poll rate) and
         // an account/org-level throttle read identically from the outside, and only the first one is
         // ours to fix. Backing off blind once cost a day of a hidden gauge, so surface it.
-        this.enterCooldown(res.headers.get('retry-after'), await describeError(res));
-        return null;
+        const detail = await describeError(res);
+        return this.fail(`usage endpoint rate-limited this account (429): ${detail}`, this.enterCooldown(res.headers.get('retry-after'), detail));
       }
       if (!res.ok) {
-        console.warn(`${TAG} usage endpoint returned ${res.status}; hiding widget — ${await describeError(res)}`);
-        return null;
+        const detail = await describeError(res);
+        console.warn(`${TAG} usage endpoint returned ${res.status}; hiding widget — ${detail}`);
+        return this.fail(`usage endpoint returned ${res.status}: ${detail}`);
       }
       const body: any = await res.json();
       const limits = Array.isArray(body?.limits) ? body.limits.map(toLimit).filter(Boolean) as ClaudeUsageLimit[] : [];
       if (!limits.length) {
         console.warn(`${TAG} usage response carried no limits[]; hiding widget`);
-        return null;
+        return this.fail('usage endpoint answered with no limits');
       }
       this.rateLimitStreak = 0;
+      this.lastError = null;
       return { subscriptionType: creds.subscriptionType, account: await this.readAccount(), limits };
     } catch (err) {
       console.warn(`${TAG} usage lookup failed:`, (err as Error).message);
-      return null;
+      return this.fail(`usage lookup failed: ${(err as Error).message}`);
     }
   }
 
   /** Climb the backoff ladder one rung per consecutive 429, capped at the last rung. `Retry-After`
    *  (seconds, or an HTTP-date) only ever EXTENDS the wait — never shortens the rung we earned. */
-  private enterCooldown(retryAfter: string | null, detail: string) {
+  private enterCooldown(retryAfter: string | null, detail: string): number {
     const ladder = this.options.rateLimitBackoffMs;
     const rung = ladder[Math.min(this.rateLimitStreak, ladder.length - 1)] ?? 60_000;
     this.rateLimitStreak++;
@@ -259,6 +341,7 @@ export class ClaudeUsageReader {
       `${TAG} usage endpoint returned 429 (ua=claude-code/${claudeCodeVersion()}, retry-after=${retryAfter ?? 'none'}); ` +
       `hiding widget and backing off ${Math.round(waitMs / 1000)}s — ${detail}`,
     );
+    return this.cooldownUntil;
   }
 
   /** Re-read per poll from whichever source holds them — the token lives ~8h and Claude Code
@@ -266,7 +349,7 @@ export class ClaudeUsageReader {
    *  Neither source is a single fixed name any more: newer CLIs write a per-profile SUFFIX
    *  (`.credentials-<hash>.json`, `Claude Code-credentials-<hash>`) and leave the bare name holding
    *  non-OAuth data, so we try every candidate before concluding "no subscription". */
-  private async readCredentials(): Promise<{ accessToken: string; subscriptionType: string | null } | null> {
+  private async readCredentials(): Promise<Credentials | null> {
     for (const file of await this.credentialFiles()) {
       try {
         const creds = parseCredentials(await readFile(file, 'utf8'), `credentials file ${path.basename(file)}`);
@@ -324,7 +407,9 @@ export class ClaudeUsageReader {
 
 /** The ONE gate, shared by both sources: a usable accessToken carrying user:profile. Never throws —
  *  every rejection is a logged null, i.e. hidden widget and zero upstream calls. */
-function parseCredentials(raw: string, source: string): { accessToken: string; subscriptionType: string | null } | null {
+interface Credentials { accessToken: string; subscriptionType: string | null; expiresAt: number | null }
+
+function parseCredentials(raw: string, source: string): Credentials | null {
   let oauth: any;
   try {
     oauth = JSON.parse(raw)?.claudeAiOauth;
@@ -340,7 +425,8 @@ function parseCredentials(raw: string, source: string): { accessToken: string; s
     console.warn(`${TAG} oauth token lacks the ${REQUIRED_SCOPE} scope; hiding widget`);
     return null;
   }
-  return { accessToken: oauth.accessToken, subscriptionType: oauth.subscriptionType ?? null };
+  return { accessToken: oauth.accessToken, subscriptionType: oauth.subscriptionType ?? null,
+    expiresAt: typeof oauth.expiresAt === 'number' && Number.isFinite(oauth.expiresAt) ? oauth.expiresAt : null };
 }
 
 /** Anthropic answers errors as `{ error: { type, message } }`. Never throws and never returns more

@@ -28,6 +28,20 @@ describe('UsageMetric gate', () => {
   });
 });
 
+describe('a stale reading states why', () => {
+  it('shows the server-worded failure reason and the retry countdown', () => {
+    const retryAt = new Date(Date.now() + 30 * 60_000).toISOString();
+    const html = renderToStaticMarkup(<UsageCard usage={{ ...REAL, fetchedAt: new Date(Date.now() - 3 * 86_400_000).toISOString(), stale: true, error: 'usage endpoint rate-limited this account (429)', retryAt }} />);
+    expect(html).toContain('3d old — refresh failed');
+    expect(html).toContain('usage endpoint rate-limited this account (429)');
+    expect(html).toContain('retrying in 30m');
+  });
+
+  it('shows no failure line on a fresh reading', () => {
+    expect(renderToStaticMarkup(<UsageCard usage={REAL} />)).not.toContain('data-refresh-error');
+  });
+});
+
 describe('binding limit', () => {
   it('picks the fullest window, whichever kind it is', () => {
     expect(binding(REAL.limits)?.kind).toBe('session');
