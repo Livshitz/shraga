@@ -33,6 +33,9 @@ export default defineConfig({
     // fs.allow (project root only) would 403 their source in dev. Allow the parent dir so
     // symlinked dev packages serve. Dev-only; prod bundles them.
     fs: { allow: [path.resolve(__dirname, '..')] },
+    // Agent runtime state (data/ holds git clones + worktrees the agent churns constantly) is not
+    // client source — watching it pegs CPU on reloads and OOMs small boxes.
+    watch: { ignored: ['**/data/**', '**/.wt/**', '**/.tmp/**', '**/dist/**'] },
     proxy: (() => {
       // Backend port — overridable so a second dev stack can run on its own ports (DEV_SERVER_PORT).
       const p = process.env.DEV_SERVER_PORT || '3033';

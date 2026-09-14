@@ -227,6 +227,9 @@ export function watchWorkspace(cb: (event: { action: 'created' | 'modified' | 'd
     pending.clear();
     timer = null;
   };
+  // Last seen mtime:size per path. Bun's recursive watcher can get stuck re-emitting an event for an
+  // unchanged file (observed: ~14/s for hours) — each one fans out to a full tree refetch per client.
+  const seen = new Map<string, string>();
   let watcher: import('node:fs').FSWatcher;
   try {
     watcher = watch(WORKSPACE_DIR, { recursive: true }, (eventType, filename) => {
@@ -234,7 +237,11 @@ export function watchWorkspace(cb: (event: { action: 'created' | 'modified' | 'd
       const rel = String(filename).split(path.sep).join('/');
       if (rel.split('/').some((seg) => seg.startsWith('.'))) return;
       const full = path.join(WORKSPACE_DIR, rel);
-      const action: 'created' | 'modified' | 'deleted' = existsSync(full)
+      let sig: string | undefined;
+      try { const st = statSync(full); sig = `${st.mtimeMs}:${st.size}`; } catch {}
+      if (sig !== undefined && seen.get(rel) === sig) return;
+      if (sig === undefined) seen.delete(rel); else seen.set(rel, sig);
+      const action: 'created' | 'modified' | 'deleted' = sig !== undefined
         ? (eventType === 'rename' ? 'created' : 'modified')
         : 'deleted';
       pending.set(rel, action);
