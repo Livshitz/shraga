@@ -169,6 +169,7 @@ function AppInner() {
     }
   }, [bumpSidebar]);
 
+  const workspaceRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const markReadRef = useRef<((sid: string) => void) | null>(null);
   const unreadEventRef = useRef<((event: ServerEvent) => void) | null>(null);
   const activeSessionRef = useRef(activeSessionId);
@@ -186,7 +187,13 @@ function AppInner() {
       if (event.type === 'permission_request') requestDesktopAttention(true);
       switch (event.type) {
         case 'workspace_change':
-          refreshWorkspace();
+          // A burst of changes (one event per path) collapses into a single tree refetch.
+          if (!workspaceRefreshTimer.current) {
+            workspaceRefreshTimer.current = setTimeout(() => {
+              workspaceRefreshTimer.current = null;
+              refreshWorkspace();
+            }, 1000);
+          }
           break;
         case 'session_title_updated':
           bumpSidebar();
