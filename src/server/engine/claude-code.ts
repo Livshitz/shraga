@@ -17,6 +17,7 @@ import { getPromptSuffix } from '../prompt-suffix.ts';
 import { APP_ROOT } from '../paths.ts';
 import { writeMcpConfigFile } from './mcp-config-file.ts';
 import { claudeUsage } from '../claude-usage.ts';
+import { claudeAccountDir, applyClaudeAccount } from '../claude-account.ts';
 const IMMUTABLE_SYSTEM_PROMPT = readFileSync(path.resolve(import.meta.dirname, '../../../defaults/system-prompt.md'), 'utf-8');
 const DEFAULT_USER_PROMPT = `You are a helpful assistant with access to MCP tools.`;
 const DEFAULT_ALLOWED_TOOLS = ['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch'];
@@ -246,6 +247,9 @@ export class ClaudeCodeEngine implements AgentEngine {
     const setIfBlank = (key: string, value: string) => { if (!sdkEnv[key]?.trim()) sdkEnv[key] = value; };
     setIfBlank('BASH_DEFAULT_TIMEOUT_MS', process.env.AGENT_SHELL_TIMEOUT_MS?.trim() || '60000');
     setIfBlank('BASH_MAX_TIMEOUT_MS', process.env.AGENT_SHELL_MAX_TIMEOUT_MS?.trim() || '600000');
+    // Per-user subscription (CLAUDE_ACCOUNTS_DIR/<email>): run on that login, never the box's credentials.
+    const accountDir = claudeAccountDir(opts.userEmail);
+    if (accountDir) applyClaudeAccount(sdkEnv, accountDir);
     sdkEnv.INTERNAL_API_TOKEN = signInternalToken(opts.uid, opts.userEmail || 'unknown');
 
     const baseAllowed = config.allowedTools ?? DEFAULT_ALLOWED_TOOLS;
@@ -426,7 +430,7 @@ export class ClaudeCodeEngine implements AgentEngine {
           const src = m.apiKeySource as string | undefined;
           const authSource: 'subscription' | 'api-key' | undefined =
             src == null ? undefined : src === 'none' || src === 'oauth' ? 'subscription' : 'api-key';
-          if (authSource) console.log(`[claude] Auth: ${authSource} (apiKeySource=${src})`);
+          if (authSource) console.log(`[claude] Auth: ${authSource} (apiKeySource=${src}) account=${accountDir ? opts.userEmail!.trim().toLowerCase() : 'default'}`);
           if (m.model) {
             console.log(`[claude] Init model=${m.model}${m.model !== options['model'] ? ` (requested ${options['model']})` : ''}`);
             // If the user explicitly asked to switch models via a [directive], announce the change
@@ -465,7 +469,7 @@ export class ClaudeCodeEngine implements AgentEngine {
         if (m.type === 'system') continue;
         // Free, always-current limit status from the agent's own inference calls — the only signal
         // that still works while the usage endpoint is throttling this account.
-        if (m.type === 'rate_limit_event') { claudeUsage.observeRateLimit(m.rate_limit_info); continue; }
+        if (m.type === 'rate_limit_event') { if (!accountDir) claudeUsage.observeRateLimit(m.rate_limit_info); continue; }
 
         if (m.type === 'result') {
           lastSessionId = m.session_id || lastSessionId;

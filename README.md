@@ -194,6 +194,13 @@ with:
 - **Your Claude subscription (recommended).** Run `claude auth login` once and leave
   `ANTHROPIC_API_KEY` unset. The agent runs on your plan, with no metered API charges.
 - **An API key.** Set `ANTHROPIC_API_KEY` in `.env` if you would rather pay per token.
+- **Per-user subscriptions (optional).** Set `CLAUDE_ACCOUNTS_DIR` (e.g. `/opt/shraga/shared/claude-accounts`,
+  outside `data/`). A requester whose email (lowercased) has a folder there runs on that folder's login;
+  everyone else keeps the default. Log each user in once:
+  `CLAUDE_CONFIG_DIR=/opt/shraga/shared/claude-accounts/you@example.com claude auth login`.
+  A folder without a login fails the run with the CLI's 401 — it never falls back to the default account.
+  Routed runs don't feed the usage gauge. Same trust model as the default login: the agent's Bash can
+  read a routed login just as it can read the default one.
 
 ## Configuration
 
