@@ -177,9 +177,84 @@ describe('last known-good reading survives a failure', () => {
     expect(afterRestart?.fetchedAt).toBe(first!.fetchedAt);
   });
 
+  it('says WHY it is stale: a 429 carries the reason and when it will retry', async () => {
+    const r = await shortTtl();
+    await r.get();
+    await Bun.sleep(5);
+    status = 429; retryAfter = '3600'; payload = { error: { type: 'rate_limit_error', message: 'Rate limited. Please try again later.' } };
+    const u = await r.get();
+    expect(u?.stale).toBe(true);
+    expect(u?.error).toContain('429');
+    expect(u?.error).toContain('Rate limited');
+    expect(Date.parse(u!.retryAt!) - Date.now()).toBeGreaterThan(3_500_000);
+  });
+
+  it('a success clears the recorded failure', async () => {
+    const r = await shortTtl();
+    status = 500;
+    await r.get();
+    status = 200;
+    await Bun.sleep(5);
+    const u = await r.get();
+    expect(u?.stale).toBeUndefined();
+    expect(u?.error).toBeUndefined();
+  });
+
+  it('makes ZERO upstream calls with an expired token, and says so on the stale reading', async () => {
+    const p = path.join(dir, `exp${Math.random().toString(36).slice(2)}.json`);
+    await writeFile(p, JSON.stringify(OK_CREDS));
+    const r = new ClaudeUsageReader({ credentialsPath: p, endpoint, ttlMs: 1, cachePath: CACHE(), readKeychain: NEVER_KEYCHAIN });
+    await r.get();
+    await writeFile(p, JSON.stringify({ claudeAiOauth: { ...OK_CREDS.claudeAiOauth, expiresAt: Date.now() - 1000 } }));
+    await Bun.sleep(5);
+    const before = hits;
+    const u = await r.get();
+    expect(hits).toBe(before);
+    expect(u?.stale).toBe(true);
+    expect(u?.error).toContain('expired');
+  });
+
   it('still answers null when there was never a good reading', async () => {
     status = 500;
     const r = await shortTtl();
+    expect(await r.get()).toBeNull();
+  });
+});
+
+describe('agent-reported rate limits (SDK rate_limit_event)', () => {
+  const inAnHour = () => Math.floor(Date.now() / 1000) + 3600;
+
+  it('paints a rejected window at 100% over a days-old endpoint reading, with zero extra calls', async () => {
+    const r = await reader(OK_CREDS);
+    await r.get();
+    r.observeRateLimit({ status: 'rejected', rateLimitType: 'five_hour', resetsAt: inAnHour() });
+    const u = await r.get();
+    const session = u?.limits.find(l => l.kind === 'session');
+    expect(session?.percent).toBe(100);
+    expect(session?.severity).toBe('exceeded');
+    expect(u?.limits.find(l => l.kind === 'weekly_all')?.percent).toBe(0); // other rows untouched
+    expect(hits).toBe(1);
+  });
+
+  it('adds a row for an exhausted window the endpoint did not report', async () => {
+    const r = await reader(OK_CREDS);
+    r.observeRateLimit({ status: 'rejected', rateLimitType: 'seven_day_opus', resetsAt: inAnHour() });
+    const opus = (await r.get())?.limits.find(l => l.scopeLabel === 'Opus');
+    expect(opus?.percent).toBe(100);
+  });
+
+  it('an allowed event, or the reset passing, clears the mark', async () => {
+    const r = await reader(OK_CREDS);
+    r.observeRateLimit({ status: 'rejected', rateLimitType: 'five_hour', resetsAt: inAnHour() });
+    r.observeRateLimit({ status: 'allowed', rateLimitType: 'five_hour', resetsAt: inAnHour() });
+    expect((await r.get())?.limits.find(l => l.kind === 'session')?.percent).toBe(5);
+    r.observeRateLimit({ status: 'rejected', rateLimitType: 'five_hour', resetsAt: Math.floor(Date.now() / 1000) - 1 });
+    expect((await r.get())?.limits.find(l => l.kind === 'session')?.percent).toBe(5);
+  });
+
+  it('never conjures a gauge for a box with no reading', async () => {
+    const r = await reader({ claudeAiOauth: { accessToken: 'tok', scopes: ['user:inference'] } });
+    r.observeRateLimit({ status: 'rejected', rateLimitType: 'five_hour', resetsAt: inAnHour() });
     expect(await r.get()).toBeNull();
   });
 });
@@ -279,7 +354,7 @@ describe('macOS keychain fallback', () => {
   it('never consults the keychain on linux — the file is the only source there', async () => {
     let consulted = false;
     const r = new ClaudeUsageReader({
-      credentialsPath: MISSING(), endpoint, platform: 'linux',
+      credentialsPath: MISSING(), cachePath: CACHE(), endpoint, platform: 'linux',
       readKeychain: async () => { consulted = true; return JSON.stringify(OK_CREDS); },
     });
     expect(await r.get()).toBeNull();
