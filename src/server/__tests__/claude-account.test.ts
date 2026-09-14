@@ -1,47 +1,34 @@
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, beforeEach } from 'bun:test';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { claudeAccountDir, applyClaudeAccount } from '../claude-account.ts';
 
-let root: string;
-const prevEnv = process.env.CLAUDE_ACCOUNTS_DIR;
+let ws: string;
+const book: Record<string, { id: string }> = { 'elya@example.com': { id: 'c-elya' }, 'nolog@example.com': { id: 'c-nolog' } };
+const find = (email: string) => book[email] ?? null;
 
 beforeEach(() => {
-  root = mkdtempSync(path.join(tmpdir(), 'claude-accounts-'));
-  mkdirSync(path.join(root, 'elya@example.com'));
-});
-afterEach(() => {
-  if (prevEnv === undefined) delete process.env.CLAUDE_ACCOUNTS_DIR; else process.env.CLAUDE_ACCOUNTS_DIR = prevEnv;
+  ws = mkdtempSync(path.join(tmpdir(), 'claude-accounts-'));
+  mkdirSync(path.join(ws, 'users', 'c-elya', '.claude'), { recursive: true });
+  mkdirSync(path.join(ws, 'users', 'c-nolog'), { recursive: true });
 });
 
 describe('claudeAccountDir', () => {
-  test('hit: existing folder, email matched case-insensitively (env root)', () => {
-    process.env.CLAUDE_ACCOUNTS_DIR = root;
-    expect(claudeAccountDir(' Elya@Example.COM ')).toBe(path.join(root, 'elya@example.com'));
+  test('hit: contact by email (case-insensitive) with a .claude dir', () => {
+    expect(claudeAccountDir(' Elya@Example.COM ', find, ws)).toBe(path.join(ws, 'users', 'c-elya', '.claude'));
   });
-  test('no folder for that email → default', () => {
-    expect(claudeAccountDir('other@example.com', root)).toBeNull();
+  test('contact without a .claude dir → default', () => {
+    expect(claudeAccountDir('nolog@example.com', find, ws)).toBeNull();
   });
-  test('a FILE named like the email is not an account', () => {
-    writeFileSync(path.join(root, 'file@example.com'), 'x');
-    expect(claudeAccountDir('file@example.com', root)).toBeNull();
+  test('a FILE named .claude is not an account', () => {
+    writeFileSync(path.join(ws, 'users', 'c-nolog', '.claude'), 'x');
+    expect(claudeAccountDir('nolog@example.com', find, ws)).toBeNull();
   });
-  test('unset env → default', () => {
-    delete process.env.CLAUDE_ACCOUNTS_DIR;
-    expect(claudeAccountDir('elya@example.com')).toBeNull();
-  });
-  test('no email → default', () => {
-    expect(claudeAccountDir(undefined, root)).toBeNull();
-    expect(claudeAccountDir('  ', root)).toBeNull();
-  });
-  test('traversal / separators rejected even when the target dir exists', () => {
-    mkdirSync(path.join(root, 'inner'));
-    const nested = path.join(root, 'inner');
-    expect(claudeAccountDir('..', nested)).toBeNull();
-    expect(claudeAccountDir('../elya@example.com', nested)).toBeNull();
-    expect(claudeAccountDir('inner/../elya@example.com', root)).toBeNull();
-    expect(claudeAccountDir('x\\..\\elya@example.com', root)).toBeNull();
+  test('unknown email / no email → default', () => {
+    expect(claudeAccountDir('other@example.com', find, ws)).toBeNull();
+    expect(claudeAccountDir(undefined, find, ws)).toBeNull();
+    expect(claudeAccountDir('  ', find, ws)).toBeNull();
   });
 });
 
