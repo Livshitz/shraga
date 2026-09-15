@@ -4,6 +4,9 @@ This directory holds **per-user MCP overlays only**. One file per user:
 
     data/mcps/<uid>.json     →  read by getUserMcpConfig(uid)  (src/server/mcp.ts)
 
+**Server-owned: do not edit these files directly** (agent file tools are write-denied here). MCP servers
+are managed by the owner in the UI, or via `PUT /api/mcps`; the server writes the file.
+
 Nothing else in this directory is loaded. There is **no `_global.json`** — a file by that name
 looks live and is not. Grep the loader before trusting any file here:
 
@@ -22,7 +25,7 @@ the server spawns; non-owners get 403) — strips any global name from the overl
 
 ## Cached vs live
 
-- `data/mcps/<uid>.json` — re-read on every call. Edit it and the next turn sees it.
+- `data/mcps/<uid>.json` — re-read on every call. A change saved via the UI / `PUT /api/mcps` is seen by the next turn.
 - `data/shraga.config.ts` — re-read when its mtime/size changes (`refreshConfig()` in
   `src/server/shraga-config.ts`). Edit it and the next turn sees it too; **no restart needed**.
   If the edited file fails to load, the process keeps the **last-good** config and logs

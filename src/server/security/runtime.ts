@@ -62,7 +62,14 @@ export class SecurityRuntime {
   public constructor(options?: Partial<SecurityRuntimeOptions>) {
     this.options = { ...new SecurityRuntimeOptions(), ...options };
     const { policy, audit, guard, log, clock } = this.options;
-    this.audit = new Audit({ log, ...audit });
+    this.audit = new Audit({
+      log, ...audit,
+      // Standby instances share DATA_DIR: only the active one alerts (false = ask again after promotion).
+      onAnomaly: (info) => {
+        if (audit.onAnomaly?.(info) === false || !this.active()) return false;
+        this.options.notify(`Audit log entry ${info.file} in ${info.dir} is a ${info.kind}, not a regular file — possibly planted to divert or disable auditing. Appends to that month are refused until root removes it (chattr -a the audit dir, rm the entry, re-run harden-audit.sh).`);
+      },
+    });
     this.policy = new Policy({ log, isActive: () => this.active(), ...policy, onTamper: (info) => { policy.onTamper?.(info); this.onTamper(info); } });
     this.guard = new Guard({
       log, clock, isActive: () => this.active(),

@@ -29,6 +29,35 @@ beforeAll(() => { root = mkdtempSync(path.join(tmpdir(), 'sec-runtime-')); proce
 afterAll(() => { rmSync(root, { recursive: true, force: true }); if (prevOwners === undefined) delete process.env.OWNERS; else process.env.OWNERS = prevOwners; });
 afterEach(() => __resetSecurityForTest());
 
+describe('planted audit month entry → owner alert via notify', () => {
+  test('active runtime notifies once; a standby does not, and alerts after promotion', async () => {
+    const { mkdirSync, symlinkSync } = await import('node:fs');
+    const { __resetAuditHeadsForTest } = await import('../audit.ts');
+    const quiet = { info() {}, warn() {}, error() {} };
+    for (const standby of [false, true]) {
+      __resetAuditHeadsForTest();
+      const dir = mkdtempSync(path.join(root, 'plant-'));
+      const auditDir = path.join(dir, 'audit');
+      mkdirSync(auditDir);
+      const month = `${new Date().toISOString().slice(0, 7)}.jsonl`;
+      if (standby) mkdirSync(path.join(auditDir, month)); else symlinkSync(path.join(dir, 'outside'), path.join(auditDir, month));
+      const notes: string[] = [];
+      let active = !standby;
+      const rt = new SecurityRuntime({
+        policy: { path: path.join(dir, 'security', 'policy.json'), whitelistPath: path.join(dir, 'w.json'), watch: false },
+        audit: { dir: auditDir }, notify: (t) => notes.push(t), isActive: () => active, log: quiet,
+      });
+      expect(rt.audit.append({ type: 'turn.start' })).toBeNull();
+      if (standby) { expect(notes).toEqual([]); active = true; rt.audit.verify(); }
+      rt.audit.append({ type: 'turn.end' }); rt.audit.verify();
+      expect([standby, notes.length]).toEqual([standby, 1]);
+      expect(notes[0]).toContain(month);
+      expect(notes[0]).toContain(standby ? 'directory' : 'symlink');
+      expect(rt.audit.verify()).toMatchObject({ ok: false, brokenAt: { file: month, reason: 'not-regular-file' } });
+    }
+  });
+});
+
 describe('API-key principal role = creator role capped by the key role', () => {
   test('guest key from an owner → guest; operator key from a member → member; no role → creator', async () => {
     const { apiKeyPrincipal } = await import('../../api-keys.ts');

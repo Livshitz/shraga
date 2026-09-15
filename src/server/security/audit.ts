@@ -29,13 +29,21 @@
 //
 // `chattr +a` compatibility — everything this module does inside the dir must work when the dir and its month files are
 // append-only: an append-only DIR allows creating entries but not unlinking/renaming them; an append-only FILE opens
-// for write only with O_APPEND and never with O_TRUNC. So: appends use appendFileSync (O_APPEND) ✓, sealTail appends
+// for write only with O_APPEND and never with O_TRUNC. So: appends open O_APPEND (appendRegular) ✓, sealTail appends
 // '\n' ✓, reads are read-only ✓ — and the lock lives OUTSIDE the dir, because rmdir of a lock inside an append-only dir
 // is EPERM (the first append would leave it held forever, then every append fails breaking it). A pre-tamper build
 // locks `<dir>/.lock` instead: during a blue-green flip between such a build and this one the two don't exclude each
 // other (verify() reports a fork), and harden-audit.sh refuses to run while `<dir>/.lock` exists.
+//
+// Planted entries — `+a` on the dir can't stop the server user from CREATING a month entry, e.g. next month's name as
+// a symlink to a file outside (appends would land there, truncatable) or as a directory (appends would fail forever).
+// Only regular files count as month files: every listing lstat()s, every open is O_NOFOLLOW + fstat-must-be-regular.
+// A non-regular entry is skipped by recovery/query/readAuditHead, reported by verify() as `not-regular-file`, and on
+// first sight per process counted in `failures`, logged, and handed to `onAnomaly` (runtime → owner alert). An append
+// whose month entry is planted is REFUSED (null) rather than written under another name, which would fork the chain:
+// that month's records are lost, loudly, until root removes the entry (chattr -a the dir, rm, re-run harden-audit.sh).
 import { createHash } from 'node:crypto';
-import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmdirSync, statSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmdirSync, statSync, writeSync, type Stats } from 'node:fs';
 import path from 'node:path';
 import { dataPath } from '../paths.ts';
 
@@ -69,7 +77,9 @@ export interface AuditEvent {
 export interface AuditRecord extends AuditEvent { ts: string; prevHash: string; hash: string }
 export interface AuditQuery { from?: string | number | Date; to?: string | number | Date; type?: AuditEventType | AuditEventType[]; principal?: string; limit: number; cursor?: string }
 export interface AuditPage { items: AuditRecord[]; nextCursor?: string }
-export interface AuditVerify { ok: boolean; lines: number; brokenAt?: { file: string; line: number; reason: 'unparseable' | 'prev-hash' | 'hash' | 'unreadable' } }
+export interface AuditVerify { ok: boolean; lines: number; brokenAt?: { file: string; line: number; reason: 'unparseable' | 'prev-hash' | 'hash' | 'unreadable' | 'not-regular-file' } }
+/** A month-named entry that isn't a regular file (see header: planted entries). */
+export interface AuditAnomaly { dir: string; file: string; kind: string }
 
 export const GENESIS_HASH = '0'.repeat(64);
 const FILE_RE = /^\d{4}-\d{2}\.jsonl$/;
@@ -103,9 +113,34 @@ export function canonical(v: unknown): string {
 
 const hashOf = (rec: Omit<AuditRecord, 'hash'>) => sha256(rec.prevHash + canonical(rec));
 
+const kindOf = (st: Stats) => st.isSymbolicLink() ? 'symlink' : st.isDirectory() ? 'directory' : st.isFIFO() ? 'fifo' : st.isSocket() ? 'socket' : 'special file';
+/** Open `file` only if it is a regular file: O_NOFOLLOW (a symlink → ELOOP), O_NONBLOCK (a swapped-in FIFO can't hang
+ *  the sync caller), then fstat on the fd — closes the lstat→open race for directories and specials too. */
+function openRegular(file: string, flags: number, mode?: number): number {
+  const fd = openSync(file, flags | constants.O_NOFOLLOW | constants.O_NONBLOCK, mode);
+  const st = fstatSync(fd);
+  if (!st.isFile()) { closeSync(fd); throw Object.assign(new Error(`${path.basename(file)} is a ${kindOf(st)}, not a regular file`), { code: 'ENOTREG' }); }
+  return fd;
+}
+/** O_APPEND write (works on a `chattr +a` file) to a regular file, created 0600 if missing. */
+function appendRegular(file: string, data: string): void {
+  const fd = openRegular(file, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT, 0o600);
+  try { const buf = Buffer.from(data); for (let off = 0; off < buf.length;) off += writeSync(fd, buf, off, buf.length - off); } finally { closeSync(fd); }
+}
+/** Month entries of `dir`, sorted: regular files, and every other entry under a month name. Throws readdir errors. */
+function listMonths(dir: string): { files: string[]; planted: AuditAnomaly[] } {
+  const files: string[] = [], planted: AuditAnomaly[] = [];
+  for (const f of readdirSync(dir).filter(f => FILE_RE.test(f)).sort()) {
+    let st: Stats;
+    try { st = lstatSync(path.join(dir, f)); } catch (e: any) { if (e.code === 'ENOENT') continue; throw e; }
+    if (st.isFile()) files.push(f); else planted.push({ dir, file: f, kind: kindOf(st) });
+  }
+  return { files, planted };
+}
+
 /** Lines of `file` from the end backwards, starting before byte `end`. `start` = byte offset of the line. */
 function* reverseLines(file: string, end?: number): Generator<{ line: string; start: number }> {
-  const fd = openSync(file, 'r');
+  const fd = openRegular(file, constants.O_RDONLY);
   try {
     let pos = Math.min(end ?? Infinity, fstatSync(fd).size);
     let tail = Buffer.alloc(0);
@@ -126,7 +161,7 @@ function* reverseLines(file: string, end?: number): Generator<{ line: string; st
 
 /** Lines of `file` in order, read in chunks (1-based line numbers, empty lines skipped but counted). */
 function* forwardLines(file: string): Generator<{ line: string; n: number }> {
-  const fd = openSync(file, 'r');
+  const fd = openRegular(file, constants.O_RDONLY);
   try {
     let pos = 0, n = 0, rest = Buffer.alloc(0);
     for (;;) {
@@ -147,13 +182,13 @@ function* forwardLines(file: string): Generator<{ line: string; n: number }> {
 /** If `file` is non-empty and doesn't end with '\n', append one — a partial line must not absorb the next record. */
 function sealTail(file: string): boolean {
   let fd: number;
-  try { fd = openSync(file, 'r'); } catch (e: any) { if (e.code === 'ENOENT') return false; throw e; }
+  try { fd = openRegular(file, constants.O_RDONLY); } catch (e: any) { if (e.code === 'ENOENT') return false; throw e; }
   let partial = false;
   try {
     const size = fstatSync(fd).size;
     if (size) { const b = Buffer.alloc(1); readSync(fd, b, 0, 1, size - 1); partial = b[0] !== 10; }
   } finally { closeSync(fd); }
-  if (partial) appendFileSync(file, '\n');
+  if (partial) appendRegular(file, '\n');
   return partial;
 }
 
@@ -190,7 +225,7 @@ function tailHash(dir: string, files: string[], bound?: { file: string; size: nu
  *  when there's no record; throws if the dir exists but can't be read. */
 export function readAuditHead(dir: string = dataPath('audit')): string {
   let files: string[];
-  try { files = readdirSync(dir).filter(f => FILE_RE.test(f)).sort(); } catch (e: any) { if (e.code === 'ENOENT') return GENESIS_HASH; throw e; }
+  try { files = listMonths(dir).files; } catch (e: any) { if (e.code === 'ENOENT') return GENESIS_HASH; throw e; }
   return tailHash(dir, files);
 }
 
@@ -199,11 +234,13 @@ interface Head {
   lastHash: string; lastMonth: string; healthy: boolean;
   /** The file and its size right after our last append/recovery. Anything else on disk = another process wrote. */
   lastWrite: { file: string; size: number } | null;
+  /** Planted entries seen (`file:kind`) → whether `onAnomaly` accepted the alert. Logged/counted once, alerted once. */
+  planted?: Map<string, boolean>;
 }
-/** Size of `file` (0 if missing or no file). */
+/** Size of `file` itself, not a symlink target (0 if missing or no file). */
 const sizeOf = (file: string): number => {
   if (!file) return 0;
-  try { return statSync(file).size; } catch (e: any) { if (e.code === 'ENOENT') return 0; throw e; }
+  try { return lstatSync(file).size; } catch (e: any) { if (e.code === 'ENOENT') return 0; throw e; }
 };
 const heads = new Map<string, Head>();
 /** Test-only: forget shared heads, so the next Audit on a dir gets its own state (simulates another process). */
@@ -217,6 +254,8 @@ export class AuditOptions {
   maxString: number = 256;
   maxMetaBytes: number = 2048;
   log: Pick<Console, 'info' | 'warn' | 'error'> = console;
+  /** A non-regular month entry was found (once per entry per process). Return `false` to be asked again next time it's seen. */
+  onAnomaly: (info: AuditAnomaly) => void | boolean = () => {};
 }
 
 export class Audit {
@@ -238,13 +277,30 @@ export class Audit {
   /** False while the dir exists but can't be read (appends fail instead of forking from genesis). */
   public get healthy(): boolean { return this.state.healthy; }
 
-  /** Month files, sorted. A missing dir is empty; any other read error is logged and thrown. */
-  private files(): string[] {
-    try { return readdirSync(this.options.dir).filter(f => FILE_RE.test(f)).sort(); } catch (e: any) {
-      if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return [];
+  /** Month entries, sorted; planted ones reported. A missing dir is empty; any other read error is logged and thrown. */
+  private scan(): { files: string[]; planted: AuditAnomaly[] } {
+    let r: { files: string[]; planted: AuditAnomaly[] };
+    try { r = listMonths(this.options.dir); } catch (e: any) {
+      if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return { files: [], planted: [] };
       this.options.log.error(`[audit] cannot read ${this.options.dir}: ${e.message}`);
       throw e;
     }
+    r.planted.forEach(p => this.reportPlanted(p));
+    return r;
+  }
+
+  /** Regular month files only, sorted. */
+  private files(): string[] { return this.scan().files; }
+
+  /** First sight: count + log. Until `onAnomaly` accepts it: alert. */
+  private reportPlanted(p: AuditAnomaly): void {
+    const seen = (this.state.planted ??= new Map()), key = `${p.file}:${p.kind}`;
+    if (!seen.has(key)) {
+      this._failures++; seen.set(key, false);
+      this.options.log.error(`[audit] ${p.file} in ${p.dir} is a ${p.kind}, not a regular file — ignored, appends to that month refused; remove it as root (chattr -a the dir first)`);
+    }
+    if (seen.get(key)) return;
+    try { seen.set(key, this.options.onAnomaly(p) !== false); } catch (e: any) { this.options.log.error(`[audit] anomaly alert failed: ${e.message}`); }
   }
 
   /** Tail of the newest non-empty file → last good hash. Reads backwards from the end only. */
@@ -336,15 +392,22 @@ export class Audit {
       }
       const now = new Date(this.options.clock());
       const month = [now.toISOString().slice(0, 7), s.lastMonth].sort()[1];
-      file = path.join(this.options.dir, `${month}.jsonl`);
-      const size = sizeOf(file);
+      const target = path.join(this.options.dir, `${month}.jsonl`);
+      let st: Stats | undefined;
+      try { st = lstatSync(target); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
+      if (st && !st.isFile()) {
+        this.reportPlanted({ dir: this.options.dir, file: `${month}.jsonl`, kind: kindOf(st) });
+        throw new Error(`${month}.jsonl is a ${kindOf(st)}, not a regular file — refused (writing elsewhere would fork the chain)`);
+      }
+      file = target;
+      const size = st?.size ?? 0;
       const base = { ts: now.toISOString(), type: event.type } as Omit<AuditRecord, 'hash'>; // prevHash set last, for line readability
       const opt = { principal: this.str(event.principal), role: this.str(event.role), sessionId: this.str(event.sessionId), target: this.str(event.target), reason: this.str(event.reason), meta: this.sanitize(event.meta) };
       for (const [k, v] of Object.entries(opt)) if (v !== undefined) (base as any)[k] = v;
       base.prevHash = s.lastHash;
       const rec: AuditRecord = { ...base, hash: hashOf(base) };
       const line = `${JSON.stringify(rec)}\n`;
-      appendFileSync(file, line, { mode: 0o600 });
+      appendRegular(file, line);
       s.lastHash = rec.hash; s.lastMonth = month;
       s.lastWrite = { file, size: size + Buffer.byteLength(line) }; // expected, not re-stat'd: a racing writer must still mismatch
       return rec;
@@ -361,7 +424,9 @@ export class Audit {
   /**
    * Newest first, streaming backwards over ALL month files (no month-name pruning: a skewed clock can put any ts in any
    * file); each record is filtered by its own ts. Cursor is opaque (file + byte offset).
-   * Throws (after logging) if the dir or a month file can't be read — never a silently short page.
+   * Throws (after logging) if the dir or a month file can't be read — never a silently short page. Planted
+   * (non-regular) entries are skipped, not thrown: they're alerted and verify() reports them, and throwing would let
+   * one planted name (undeletable under +a) blind the audit viewer.
    */
   public query(q: AuditQuery): AuditPage {
     const limit = Math.max(1, Math.min(MAX_QUERY, Math.floor(q.limit) || 1));
@@ -394,12 +459,13 @@ export class Audit {
 
   /** Recompute the chain. No file = all files as one chain; a file = that file, seeded from the previous file's tail. */
   public verify(file?: string): AuditVerify {
-    let all: string[];
-    try { all = this.files(); } catch { return { ok: false, lines: 0, brokenAt: { file: '', line: 0, reason: 'unreadable' } }; }
-    let targets = all, expected = GENESIS_HASH, lines = 0, f = '';
+    let all: string[], planted: Set<string>;
+    try { const s = this.scan(); all = s.files; planted = new Set(s.planted.map(p => p.file)); } catch { return { ok: false, lines: 0, brokenAt: { file: '', line: 0, reason: 'unreadable' } }; }
+    let targets = [...all, ...planted].sort(), expected = GENESIS_HASH, lines = 0, f = '';
     try {
       if (file) {
         const base = path.basename(file), i = all.indexOf(base);
+        if (planted.has(base)) return { ok: false, lines: 0, brokenAt: { file: base, line: 0, reason: 'not-regular-file' } };
         if (i === -1) return { ok: false, lines: 0, brokenAt: { file: base, line: 0, reason: 'unparseable' } };
         targets = [base];
         for (let j = i - 1; j >= 0 && expected === GENESIS_HASH; j--) {
@@ -408,6 +474,7 @@ export class Audit {
         }
       }
       for (f of targets) {
+        if (planted.has(f)) return { ok: false, lines, brokenAt: { file: f, line: 0, reason: 'not-regular-file' } };
         for (const { line, n } of forwardLines(path.join(this.options.dir, f))) {
           lines++;
           const r = parse(line);
