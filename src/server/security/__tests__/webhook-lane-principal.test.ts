@@ -9,6 +9,7 @@ delete process.env.DATA_SYNC_ENABLE;
 delete process.env.DATA_SYNC_REPO;
 
 const CREATOR = `wl-${Date.now()}@lane.test`;
+const OWNER = `wl-owner-${Date.now()}@lane.test`;
 const root = mkdtempSync(path.join(tmpdir(), 'wl-principal-'));
 const { initSecurity, __resetSecurityForTest } = await import('../runtime.ts');
 const { registerEngine } = await import('../../engine/index.ts');
@@ -34,6 +35,10 @@ test('a guest-capped key on the webhook lane runs its turn as guest (creator is 
   Object.assign(apiKeyStore().options, new ApiKeyStore({ path: path.join(root, 'api-keys.json'), isActive: () => true }).options);
   const capped = apiKeyStore().create(CREATOR, CREATOR, 'lane-guest', { role: 'guest' });
   const uncapped = apiKeyStore().create(CREATOR, CREATOR, 'lane-plain');
+  // Intended: the lane is owner-configured, and an owner's UNCAPPED key is a delegated login credential ⇒ owner turn.
+  const ownerKey = apiKeyStore().create(OWNER, OWNER, 'lane-owner');
+  const prevOwners = process.env.OWNERS;
+  process.env.OWNERS = OWNER;
 
   const cb = Bun.serve({ port: 0, fetch: () => Response.json({ ok: true }) });
   const app = express(); app.use(express.json());
@@ -45,13 +50,19 @@ test('a guest-capped key on the webhook lane runs its turn as guest (creator is 
       method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
       body: JSON.stringify({ connId: 'c', convId, msgId: 'm', prompt: '[engine:wl-probe-engine] hi', callback: { url: `http://localhost:${cb.port}/cb`, secret: 's' } }),
     });
-    const sidCapped = `wl-capped-${Date.now()}`, sidPlain = `wl-plain-${Date.now()}`;
+    const sidCapped = `wl-capped-${Date.now()}`, sidPlain = `wl-plain-${Date.now()}`, sidOwner = `wl-owner-${Date.now()}`;
     expect((await turn(capped.key, sidCapped)).status).toBe(200);
     expect((await turn(uncapped.key, sidPlain)).status).toBe(200);
+    expect((await turn(ownerKey.key, sidOwner)).status).toBe(200);
+    const sids = [sidCapped, sidPlain, sidOwner];
     const recs = (type: 'turn.start' | 'turn.end') => rt.audit.query({ limit: 1000, type }).items;
-    for (let i = 0; i < 40 && recs('turn.end').filter(r => r.sessionId === sidCapped || r.sessionId === sidPlain).length < 2; i++) await Bun.sleep(50);
+    for (let i = 0; i < 40 && recs('turn.end').filter(r => sids.includes(r.sessionId as string)).length < sids.length; i++) await Bun.sleep(50);
     const start = (sid: string) => recs('turn.start').find(r => r.sessionId === sid);
     expect(start(sidCapped)).toMatchObject({ principal: `apikey:${capped.id}`, role: 'guest' });
     expect(start(sidPlain)).toMatchObject({ principal: `apikey:${uncapped.id}`, role: 'operator' }); // control: no cap ⇒ creator
-  } finally { server.close(); cb.stop(true); Object.assign(apiKeyStore().options, prevStore); }
+    expect(start(sidOwner)).toMatchObject({ principal: `apikey:${ownerKey.id}`, role: 'owner' });
+  } finally {
+    server.close(); cb.stop(true); Object.assign(apiKeyStore().options, prevStore);
+    if (prevOwners === undefined) delete process.env.OWNERS; else process.env.OWNERS = prevOwners;
+  }
 });

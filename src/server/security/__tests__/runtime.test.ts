@@ -40,9 +40,11 @@ describe('API-key principal role = creator role capped by the key role', () => {
     expect(resolvePrincipal(rt.policy, key('mem@sec-runtime.test', 'operator')).role).toBe('member');
     expect(resolvePrincipal(rt.policy, key('mem@sec-runtime.test', 'guest')).role).toBe('guest');
     expect(resolvePrincipal(rt.policy, key('mem@sec-runtime.test')).role).toBe('member');
-    expect(resolvePrincipal(rt.policy, key(OWNER)).role).toBe('operator'); // never owner: capped at the top role below it
-    expect(resolvePrincipal(rt.policy, key(OWNER, 'operator')).role).toBe('operator');
+    expect(resolvePrincipal(rt.policy, key(OWNER)).role).toBe('owner'); // uncapped = delegated login: creator's role, owner included
+    expect(resolvePrincipal(rt.policy, key(OWNER, 'operator')).role).toBe('operator'); // capped: never owner
     expect(resolvePrincipal(rt.policy, key(OWNER, 'ghost')).role).toBe(rt.policy.current.default);
+    process.env.OWNERS = 'someone-else@sec-runtime.test'; // creator removed from OWNERS → the same key is not owner on the next resolve
+    try { expect(resolvePrincipal(rt.policy, key(OWNER)).role).not.toBe('owner'); } finally { process.env.OWNERS = OWNER; }
   });
 
   test('guard rank uses the same capped resolution: an owner\'s guest-capped key is NOT exempt from IP limits', async () => {
@@ -53,7 +55,7 @@ describe('API-key principal role = creator role capped by the key role', () => {
     const guestKey = apiKeyPrincipal({ id: 'k-guest', uid: OWNER, email: OWNER, role: 'guest' });
     expect(rt.admitTurn(guestKey, { ip: IP })).toMatchObject({ ok: true }); // guest profile rate 10/h admits
     expect(rt.admitTurn(guestKey, { ip: IP })).toMatchObject({ ok: false, status: 429, reason: 'rate' }); // IP bucket (1/h) applies: not exempt
-    const plainKey = apiKeyPrincipal({ id: 'k-plain', uid: OWNER, email: OWNER }); // uncapped → operator (rank 80) → IP-exempt
+    const plainKey = apiKeyPrincipal({ id: 'k-plain', uid: OWNER, email: OWNER }); // uncapped → owner (rank 100) → IP-exempt
     for (let i = 0; i < 3; i++) expect(rt.admitTurn(plainKey, { ip: IP })).toMatchObject({ ok: true });
     rt.close();
   });
