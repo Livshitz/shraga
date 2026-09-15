@@ -41,6 +41,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (uses s
 }
 ```
 
+Optional bridge env: `MCP_BRIDGE_TIMEOUT_MS` (protocol calls, default 60s) and `MCP_BRIDGE_TOOL_TIMEOUT_MS` (`tools/call`, default 30min). Past the bound the bridge answers with a JSON-RPC error instead of hanging.
+
 ## Available MCP Tools
 
 | Tool | Description |
