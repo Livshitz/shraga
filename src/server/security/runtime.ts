@@ -7,10 +7,20 @@
 // Writes are gated on `isActive` (a PASSIVE standby shares DATA_DIR and must not append to data/audit, nor let the
 // Policy migrate/save/mark or judge tamper; `activate()` re-loads the policy on promotion), and noisy events are
 // deduped per key per window, so a busy client isn't one line per request.
-import { Policy, type PolicyOptions, type TamperReason } from './policy.ts';
+import { Policy, type PolicyOptions, type Resolved, type TamperReason } from './policy.ts';
 import { Audit, type AuditEvent, type AuditOptions } from './audit.ts';
 import { Guard, type GuardOptions, type TurnAdmission } from './guard.ts';
-import type { Principal } from './principal.ts';
+import { fromAuthUser, type Principal } from './principal.ts';
+
+/** principal → role. An API key acts for its creator: effective role = the creator's resolved role, CAPPED by the
+ *  key's `attrs.role` when set (lower rank wins — a key never exceeds its creator). */
+export function resolvePrincipal(policy: Policy, p: Principal): Resolved {
+  if (p.kind !== 'apikey') return policy.resolve(p);
+  const creator = policy.resolve(fromAuthUser({ uid: String(p.attrs.uid ?? ''), email: p.email }));
+  if (typeof p.attrs.role !== 'string') return creator;
+  const cap = policy.effective(Infinity, p.attrs.role); // the named role (unknown ⇒ the policy default)
+  return cap.rank < creator.rank ? cap : creator;
+}
 
 export interface Decision {
   role: string;
@@ -70,7 +80,7 @@ export class SecurityRuntime {
   /** Guard a turn start: principal → rank/rate → blocklist, rate, concurrency. Call BEFORE any LLM spend and
    *  `release()` when the turn ends (try/finally). Shadow unless SECURITY_ENFORCE=true. */
   public admitTurn(principal: Principal, ctx: { ip?: string; channel?: string } = {}): TurnAdmission {
-    const r = this.policy.resolve(principal);
+    const r = resolvePrincipal(this.policy, principal); // same resolution as decide(): an API key's role cap applies to guard rank/rate
     return this.guard.admit({ principal, ...ctx, rank: r.rank, rate: r.profile.rate });
   }
 
@@ -96,7 +106,7 @@ export class SecurityRuntime {
 
   /** principal → role/profile, audited as `role.resolve` (deduped per principal+role per window). */
   public decide(principal: Principal, sessionId?: string): Decision {
-    const r = this.policy.resolve(principal);
+    const r = resolvePrincipal(this.policy, principal);
     const p = r.profile;
     const wouldDeny = !(p.tools.includes('*') && p.mcps.includes('*') && p.env.includes('*') && p.outbound);
     this.record({

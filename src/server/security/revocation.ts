@@ -7,7 +7,16 @@
 //   so ANY revocation of that principal kills them.
 // - Firebase ID tokens: `auth_time` (the sign-in time — `iat` is refreshed hourly and would survive revocation).
 // Granularity is one second: a token minted in the same second as, but before, the revocation still passes.
+import { fromAuthUser, fromInternal } from './principal.ts';
 import { security } from './runtime.ts';
+
+/** Canonical id for a revocable principal (`user:` / `internal:` — the kinds a token verifier checks), built by the
+ *  same principal builders the verifiers use (emails lowercased). Other kinds ⇒ null: nothing would ever check them. */
+export function revocablePrincipalId(input: string): string | null {
+  const m = /^(user|internal):(\S+)$/.exec(String(input ?? '').trim());
+  if (!m) return null;
+  return m[1] === 'user' ? fromAuthUser({ uid: m[2], email: m[2] }).id : fromInternal({ uid: m[2] }).id;
+}
 
 /** True when any of `principalIds` has `tokensValidAfter` later than `issuedAtSec`. Uninitialized runtime ⇒ false. */
 export function tokenRevoked(principalIds: string | string[], issuedAtSec: number): boolean {

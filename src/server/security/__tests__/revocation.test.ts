@@ -10,7 +10,7 @@ delete process.env.DATA_SYNC_REPO;
 const auth = await import('../../auth.ts');
 const { authenticateToken, requireAuth, signMcpToken, verifyMcpToken, signInternalToken, addLocalUser, localLogin, verifyToken, MCP_TOKEN_TTL, LOCAL_TOKEN_TTL } = auth;
 const { initSecurity, __resetSecurityForTest } = await import('../runtime.ts');
-const { revokeTokens, tokenRevoked, firebaseIssuedAt } = await import('../revocation.ts');
+const { revokeTokens, tokenRevoked, firebaseIssuedAt, revocablePrincipalId } = await import('../revocation.ts');
 const { fromAuthUser } = await import('../principal.ts');
 const { dataPath } = await import('../../paths.ts');
 const { JwtHelper } = await import('edge.libx.js/build/helpers/jwt.js');
@@ -99,6 +99,20 @@ describe('tokensValidAfter', () => {
     const rec = rt.audit.query({ limit: 100, type: 'token.revoke' }).items.find(r => r.target === `user:${E}`);
     expect(rec).toMatchObject({ principal: 'user:owner@x.test', meta: { validAfter: at } });
     expect(rt.audit.query({ limit: 100, type: 'auth.deny' }).items.some(r => r.reason === 'token-revoked')).toBe(true);
+  });
+
+  test('principal ids are normalized like the verifiers build them; unchecked kinds are rejected', async () => {
+    const M = `Mixed-${tag}@X.test`;
+    expect(revocablePrincipalId(`user:${M}`)).toBe(`user:${M.toLowerCase()}`);
+    expect(revocablePrincipalId('user:FbUidCase')).toBe('user:FbUidCase'); // a bare uid is case-sensitive
+    expect(revocablePrincipalId('internal:Uid1')).toBe('internal:Uid1');
+    for (const bad of ['apikey:abc', 'email:a@b.test', 'slack:U1', 'nope', 'user:']) expect(revocablePrincipalId(bad)).toBeNull();
+
+    const tok = signMcpToken('uid-mixed', M.toLowerCase(), 'refresh');
+    expect(verifyMcpToken(tok)?.uid).toBe('uid-mixed');
+    await Bun.sleep(1100);
+    revokeTokens(revocablePrincipalId(`user:${M}`)!);
+    expect(verifyMcpToken(tok)).toBeNull();
   });
 
   test('revoking internal:<uid> kills that uid\'s scoped internal tokens', async () => {

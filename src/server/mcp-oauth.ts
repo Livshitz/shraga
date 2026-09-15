@@ -17,6 +17,8 @@ import { randomBytes, createHash } from 'node:crypto';
 import { MCP_TOKEN_TTL, requireAuth, signMcpToken, verifyMcpToken, type AuthUser } from './auth.ts';
 import { dataPath } from './paths.ts';
 import { security } from './security/runtime.ts';
+import { fromAuthUser } from './security/principal.ts';
+import { tokenRevoked } from './security/revocation.ts';
 
 // Shared with auth.ts: a legacy token's implied issued-at is exp - TTL, so the TTLs must be the ones signed with.
 const ACCESS_TTL = MCP_TOKEN_TTL.access; // 1h
@@ -51,6 +53,8 @@ interface AuthCode {
   challenge: string;       // PKCE code_challenge (S256)
   resource?: string;
   expiresAt: number;
+  /** Epoch seconds — checked against tokensValidAfter at exchange, so a revocation also kills unexchanged codes. */
+  issuedAt: number;
 }
 const codes = new Map<string, AuthCode>();
 
@@ -160,7 +164,7 @@ export function registerMcpOAuthRoutes(app: Express) {
     const code = randomBytes(32).toString('hex');
     codes.set(code, {
       uid: user.uid, email: user.email, clientId: client_id, redirectUri: redirect_uri,
-      challenge: code_challenge, resource, expiresAt: Date.now() + CODE_TTL_MS,
+      challenge: code_challenge, resource, expiresAt: Date.now() + CODE_TTL_MS, issuedAt: Math.floor(Date.now() / 1000),
     });
     console.log(`[mcp-oauth] issued auth code for ${user.email} → client ${client_id}`);
     res.json({ code });
@@ -180,6 +184,10 @@ export function registerMcpOAuthRoutes(app: Express) {
       if (entry.clientId !== b.client_id) return void res.status(400).json({ error: 'invalid_grant', error_description: 'client_id mismatch' });
       if (!b.code_verifier || !pkceVerify(b.code_verifier, entry.challenge)) {
         return void res.status(400).json({ error: 'invalid_grant', error_description: 'PKCE verification failed' });
+      }
+      if (tokenRevoked(fromAuthUser({ uid: entry.uid, email: entry.email }).id, entry.issuedAt)) {
+        console.warn(`[mcp-oauth] auth code for ${entry.email} predates a token revocation — refused`);
+        return void res.status(400).json({ error: 'invalid_grant', error_description: 'authorization revoked — sign in again' });
       }
       return void res.json({
         access_token: signMcpToken(entry.uid, entry.email, 'access', ACCESS_TTL),

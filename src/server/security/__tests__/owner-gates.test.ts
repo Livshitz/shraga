@@ -49,6 +49,37 @@ const call = (tok: string, method: string, url: string, body?: unknown) => fetch
   ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
 });
 
+/** This server booted PASSIVE; run `fn` as the active instance would (key-store writes, audit). */
+async function asActive<T>(fn: () => Promise<T>): Promise<T> {
+  const sec = (await import('../runtime.ts')).security()!;
+  const prev = sec.options.isActive;
+  sec.options.isActive = () => true;
+  try { return await fn(); } finally { sec.options.isActive = prev; }
+}
+
+const REDIRECT = 'https://client.test/cb';
+async function consent(headers: Record<string, string>, codeChallenge = 'c'.repeat(43)) {
+  const reg = await (await fetch(`${base}/oauth/register`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: [REDIRECT], client_name: 'gate' }),
+  })).json() as { client_id: string };
+  const res = await fetch(`${base}/oauth/authorize/consent`, {
+    method: 'POST', headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify({ client_id: reg.client_id, redirect_uri: REDIRECT, code_challenge: codeChallenge, code_challenge_method: 'S256' }),
+  });
+  return Object.assign(res, { clientId: reg.client_id });
+}
+/** Consent with a real PKCE pair, then return a function that exchanges the code at /oauth/token. */
+async function mintCode(tok: string) {
+  const verifier = 'v'.repeat(50);
+  const challenge = (await import('node:crypto')).createHash('sha256').update(verifier).digest('base64url');
+  const res = await consent({ authorization: `Bearer ${tok}` }, challenge);
+  const { code } = await res.json() as { code: string };
+  return () => fetch(`${base}/oauth/token`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ grant_type: 'authorization_code', code, redirect_uri: REDIRECT, client_id: res.clientId, code_verifier: verifier }),
+  });
+}
+
 const GATED: [string, string, unknown?][] = [
   ['PUT', '/api/config', {}],
   ['PUT', '/api/mcps', {}],
@@ -108,7 +139,25 @@ describe('owner-gated admin routes', () => {
     expect(sec!.decide((await import('../principal.ts')).fromAuthUser({ uid: OWNER, email: OWNER })).role).toBe('owner');
   });
 
-  test('GET /api/api-keys: own keys only for a non-owner, all for an owner', async () => {
+  test('PASSIVE: key-store writes on both mounts → 409', async () => {
+    expect((await call(bobTok, 'POST', '/api/api-keys', { label: 'x' })).status).toBe(409);
+    expect((await call(bobTok, 'DELETE', '/api/api-keys/nope')).status).toBe(409);
+    expect((await call(ownerTok, 'POST', '/api/owner/api-keys', { label: 'x' })).status).toBe(409);
+    expect((await call(ownerTok, 'DELETE', '/api/owner/api-keys/nope')).status).toBe(409);
+    expect((await call(bobTok, 'GET', '/api/api-keys')).status).toBe(200);
+  });
+
+  test('self mount ignores role/expiresAt; delete is audited with the caller principal id', () => asActive(async () => {
+    const k = await (await call(bobTok, 'POST', '/api/api-keys', { label: 'self', role: 'operator', expiresAt: Date.now() + 1000 })).json();
+    expect(k.role).toBeUndefined();
+    expect(k.expiresAt).toBeUndefined();
+    expect((await call(ownerTok, 'DELETE', `/api/api-keys/${k.id}`)).status).toBe(200);
+    const sec = (await import('../runtime.ts')).security()!;
+    const recs = sec.audit.query({ limit: 100, type: ['key.create', 'key.revoke'] }).items.filter(r => r.target === `apikey:${k.id}`);
+    expect(recs.map(r => [r.type, r.principal]).sort()).toEqual([['key.create', `user:${BOB}`], ['key.revoke', `user:${OWNER}`]]);
+  }));
+
+  test('GET /api/api-keys: own keys only for a non-owner, all for an owner', () => asActive(async () => {
     const mk = async (tok: string) => (await (await call(tok, 'POST', '/api/api-keys', { label: 'gate' })).json()) as { id: string };
     const ok = await mk(ownerTok), bk = await mk(bobTok);
     const bobList = (await (await call(bobTok, 'GET', '/api/api-keys')).json()).keys as { id: string; uid: string }[];
@@ -117,21 +166,10 @@ describe('owner-gated admin routes', () => {
     expect(bobList.every(k => k.uid === BOB)).toBe(true);
     const ownerList = (await (await call(ownerTok, 'GET', '/api/api-keys')).json()).keys as { id: string }[];
     expect(ownerList.map(k => k.id)).toEqual(expect.arrayContaining([ok.id, bk.id]));
-  });
+  }));
 });
 
 describe('MCP OAuth consent requires an interactive login', () => {
-  const REDIRECT = 'https://client.test/cb';
-  async function consent(headers: Record<string, string>) {
-    const reg = await (await fetch(`${base}/oauth/register`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: [REDIRECT], client_name: 'gate' }),
-    })).json() as { client_id: string };
-    return fetch(`${base}/oauth/authorize/consent`, {
-      method: 'POST', headers: { 'content-type': 'application/json', ...headers },
-      body: JSON.stringify({ client_id: reg.client_id, redirect_uri: REDIRECT, code_challenge: 'c'.repeat(43), code_challenge_method: 'S256' }),
-    });
-  }
-
   test("owner's API key and internal token → 403 + auth.deny audited; an interactive login still gets a code", async () => {
     const sec = (await import('../runtime.ts')).security()!;
     const prevActive = sec.options.isActive;
@@ -158,7 +196,7 @@ describe('MCP OAuth consent requires an interactive login', () => {
 });
 
 describe('owner routes (/api/owner/*) for an owner', () => {
-  test('api keys: create (expiry) → authenticates → listed without secret → revoke → 401', async () => {
+  test('api keys: create (expiry) → authenticates → listed without secret → revoke → 401', () => asActive(async () => {
     const created = await (await call(ownerTok, 'POST', '/api/owner/api-keys', { label: 'owner-probe', expiresAt: Date.now() + 60_000 })).json();
     expect(created.key).toMatch(/^uck_/);
     expect((await call(created.key, 'GET', '/api/config')).status).toBe(200);
@@ -169,12 +207,17 @@ describe('owner routes (/api/owner/*) for an owner', () => {
     expect((await call(ownerTok, 'DELETE', `/api/owner/api-keys/${created.id}`)).status).toBe(200);
     expect((await call(created.key, 'GET', '/api/config')).status).toBe(401);
     expect((await call(ownerTok, 'POST', '/api/owner/api-keys', { role: 'owner' })).status).toBe(400);
-  });
+  }));
 
   test('token revoke: refused while PASSIVE; once active, the revoked user\'s old token 401s and a fresh login works', async () => {
     const passive = await call(ownerTok, 'POST', '/api/owner/tokens/revoke', { principalId: `user:${BOB}` });
     expect(passive.status).toBe(409);
     expect((await call(ownerTok, 'POST', '/api/owner/tokens/revoke', { principalId: 'nope' })).status).toBe(400);
+    for (const principalId of ['apikey:abc', `email:${BOB}`, 'slack:U1']) {
+      const r = await call(ownerTok, 'POST', '/api/owner/tokens/revoke', { principalId });
+      expect(r.status).toBe(400);
+      expect((await r.json()).error).toMatch(/api-keys/);
+    }
 
     const sec = (await import('../runtime.ts')).security()!;
     const prevActive = sec.options.isActive;
@@ -184,13 +227,19 @@ describe('owner routes (/api/owner/*) for an owner', () => {
       expect(sec.policy.valid).toBe(true);
       expect((await call(ownerTok, 'POST', '/api/owner/api-keys', { label: 'member', role: 'member' })).status).toBe(200);
       expect((await call(bobTok, 'GET', '/api/config')).status).toBe(200);
+      const staleExchange = await mintCode(bobTok); // MCP auth code minted before the revocation
       await Bun.sleep(1100); // 1s granularity
-      const r = await call(ownerTok, 'POST', '/api/owner/tokens/revoke', { principalId: `user:${BOB}` });
+      const r = await call(ownerTok, 'POST', '/api/owner/tokens/revoke', { principalId: `user:${BOB.toUpperCase()}` });
       expect(r.status).toBe(200);
-      expect((await r.json()).principalId).toBe(`user:${BOB}`);
+      expect((await r.json()).principalId).toBe(`user:${BOB}`); // normalized to the stored (lowercase) id
       expect((await call(bobTok, 'GET', '/api/config')).status).toBe(401);
+      const stale = await staleExchange();
+      expect(stale.status).toBe(400);
+      expect((await stale.json()).error).toBe('invalid_grant');
       const { localLogin } = await import('../../auth.ts');
-      expect((await call(localLogin(BOB, 'pw-bob')!, 'GET', '/api/config')).status).toBe(200);
+      const fresh = localLogin(BOB, 'pw-bob')!;
+      expect((await call(fresh, 'GET', '/api/config')).status).toBe(200);
+      expect((await (await mintCode(fresh))()).status).toBe(200); // control: a code minted after the revocation exchanges
       expect((await call(ownerTok, 'GET', '/api/config')).status).toBe(200);
     } finally { sec.options.isActive = prevActive; }
   });
