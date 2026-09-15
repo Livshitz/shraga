@@ -52,6 +52,9 @@ export interface AgentSettings {
   skillDiscovery?: boolean;
   thinking?: 'adaptive' | 'enabled' | 'disabled';
   effort?: 'low' | 'medium' | 'high' | 'max';
+  /** claude-code engine: resume the SDK session across turns instead of re-sending the history
+   *  (prompt-cache savings). Default off; a session's `[resume:on|off]` directive wins. */
+  sdkResume?: boolean;
 }
 
 export interface ShragaConfig {

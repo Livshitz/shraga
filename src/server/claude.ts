@@ -3,7 +3,7 @@ import { summarizeText } from './summarize.ts';
 import { dataSync } from './data-sync.ts';
 import type { McpConfig } from './mcp.ts';
 import type { ClaudeAccountRef } from './claude-account.ts';
-import { loadConversation, saveConversation, appendMessage, getSession, setSessionDirectives, addTriggeredSkills, upsertSession, type ConvMessage, type ConvBlock } from './sessions.ts';
+import { loadConversation, saveConversation, appendMessage, getSession, setSessionDirectives, addTriggeredSkills, upsertSession, setClaudeResume, type ConvMessage, type ConvBlock } from './sessions.ts';
 import { createTurnAccumulator, type TurnStreamHooks } from './turn-stream.ts';
 import {
   resolveDefaultSkillsContent,
@@ -324,7 +324,10 @@ export async function* streamChat(opts: {
   const stickyNames = opts.sessionId ? getSession(opts.sessionId)?.triggeredSkills ?? [] : [];
   const newTriggerNames = discoveryEnabled ? matchTriggeredSkillNames(effectivePrompt, opts.context) : [];
   const triggeredNames = [...new Set([...stickyNames, ...newTriggerNames])];
-  const triggeredSkills = skillInjectionBlocks(triggeredNames);
+  // Per-name blocks so an engine that resumes across turns can send only newly triggered ones. Joined
+  // exactly as skillInjectionBlocks(triggeredNames) joins them, so contextBlock is byte-identical.
+  const triggeredSkillBlocks = triggeredNames.map((n) => [n, skillInjectionBlocks([n])] as const).filter(([, b]) => b);
+  const triggeredSkills = triggeredSkillBlocks.map(([, b]) => b).join('\n');
 
   // Per-skill turn budget. Resolved HERE, once every invoked skill is known (the slash command and
   // the triggered/sticky set), and GAP-FILLING only: an inline `[turns:N]` or a session-pinned
@@ -347,6 +350,11 @@ export async function* streamChat(opts: {
   const teamRoster = contacts.formatRoster();
   const userContextBlock = getUserContextBlock(contact);
   const contextBlock = [userBlock, userContextBlock, teamRoster, defaultSkills, triggeredSkills, skillIndex, mcpSkills, workspaceTree].filter(Boolean).join('\n');
+  const contextSections: Record<string, string> = Object.fromEntries(Object.entries({
+    user: userBlock, userContext: userContextBlock, roster: teamRoster, defaultSkills,
+    ...Object.fromEntries(triggeredSkillBlocks.map(([n, b]) => [`skill:${n}`, b])),
+    skillIndex, mcpSkills, workspace: workspaceTree,
+  }).filter(([, v]) => v));
 
   // Load conversation for the engine
   const sessionId = opts.sessionId ?? crypto.randomUUID();
@@ -388,11 +396,16 @@ export async function* streamChat(opts: {
     return;
   }
   console.log(`[stream] engine=${engine.name} user=${opts.uid} session=${sessionId}`);
+  // Another engine's turn never reaches the claude-code transcript, so a stored SDK-resume mapping is
+  // stale from here on — mark it; the claude-code engine then falls back to a fresh query (engine-switch).
+  const resumeState = getSession(sessionId)?.claudeResume;
+  if (engine.name !== 'claude-code' && resumeState && !resumeState.interruptedBy) setClaudeResume(sessionId, undefined, { interruptedBy: engine.name });
 
   yield* engine.stream({
     prompt: turnPrompt,
     conversation,
     contextBlock,
+    contextSections,
     attachments: opts.attachments,
     images: opts.images,
     sessionId,

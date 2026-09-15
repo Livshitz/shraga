@@ -4,6 +4,8 @@ export interface Directives {
   thinking?: 'adaptive' | 'enabled' | 'disabled';
   effort?: 'low' | 'medium' | 'high' | 'max';
   engine?: string;
+  /** claude-code SDK session resume for this conversation (overrides agent-config `sdkResume`). */
+  resume?: boolean;
 }
 
 export interface ParsedPrompt {
@@ -28,7 +30,7 @@ import { MODEL_ALIASES } from './model-aliases.ts';
 
 const DIRECTIVE_RE = /^\s*\[([^\]]*)\]\s*([\s\S]*)/;
 
-const DIRECTIVE_KEYS = ['model', 'turns', 'thinking', 'think', 'effort', 'engine'];
+const DIRECTIVE_KEYS = ['model', 'turns', 'thinking', 'think', 'effort', 'engine', 'resume'];
 
 /** MODEL_ALIASES only covers the bare Anthropic shorthands. A `provider/model` id
  *  (`cursor/composer-2.5`, `openai/gpt-5.6`) is already concrete — gating it on the alias table
@@ -178,6 +180,11 @@ function applyDirective(d: Directives, key: string, val: string): string | undef
       break;
     case 'engine':
       d.engine = val;
+      break;
+    case 'resume':
+      if (['on', 'true', '1'].includes(val)) d.resume = true;
+      else if (['off', 'false', '0'].includes(val)) d.resume = false;
+      else console.warn(`[directives] Invalid resume value: "${val}"`);
       break;
     default:
       console.warn(`[directives] Unknown directive key: "${key}"`);
