@@ -78,6 +78,10 @@ export function isChurnPath(file: string): boolean {
     // their deletion is the design, not a regression — the integrity audit reported dozens of
     // "missing … in reference but not HEAD" lines for a routine GC pass.
     || /(^|\/)jobs\/job-[^/]+\.(json|log|status)$/.test(file)
+    // Rendered artifacts (HTML previews and their exported shots). The Write tool rewrites these
+    // wholesale on each iteration, so a restyle that deletes more than it adds is the normal
+    // editing loop rather than shared state being gutted.
+    || /(^|\/)workspace\/(users\/[^/]+\/)?artifacts\//.test(file)
     || /\.bak(-|\.|$)/.test(file);
 }
 
@@ -269,6 +273,7 @@ export class DataSync {
       ? parseInt(process.env.DATA_SYNC_UNTRACK_BLOCK || '500', 10)
       : parseInt(process.env.DATA_SYNC_DELETIONS_BLOCK || '10', 10);
     const shrinkThreshold = parseInt(process.env.DATA_SYNC_SHRINK_BLOCK || '50', 10);
+    const shrinkRatio = parseFloat(process.env.DATA_SYNC_SHRINK_RATIO_BLOCK || '0.5');
     try {
       // (1) Mass FILE deletions.
       const out = await this.git('diff', '--cached', '--name-only', '--diff-filter=D');
@@ -286,22 +291,40 @@ export class DataSync {
       }
 
       // (2) Large in-file content SHRINK — a single tracked file losing > shrinkThreshold NET lines
-      //     (deleted − added). numstat: "<added>\t<deleted>\t<file>"; binary files show "-\t-".
+      //     (deleted − added) AND losing more than shrinkRatio of itself. numstat:
+      //     "<added>\t<deleted>\t<file>"; binary files show "-\t-".
+      //     Both conditions are required because the absolute count alone cannot tell a gutting
+      //     apart from an edit to a large file: contacts.json lost 95% of itself (111 -> 5 lines),
+      //     while a 915-line prototype restyle losing 64 net lines loses 7% and is ordinary work.
+      //     Net loss is bounded by the original size, so the ratio is always in [0, 1].
       const numstat = await this.git('diff', '--cached', '--numstat');
       const shrunk: string[] = [];
+      const shrunkFiles: string[] = [];
       for (const line of numstat.split('\n').map(l => l.trim()).filter(Boolean)) {
         const [addRaw, delRaw, file] = line.split('\t');
         if (addRaw === '-' || delRaw === '-' || !file) continue; // binary
         const net = (parseInt(delRaw, 10) || 0) - (parseInt(addRaw, 10) || 0);
-        if (net > shrinkThreshold && !isChurnPath(file)) shrunk.push(`• ${file}  (−${net} net lines)`);
+        if (net <= shrinkThreshold || isChurnPath(file)) continue;
+        // Size of the file as it stands in HEAD. Unreadable (e.g. not in HEAD) => no ratio to
+        // judge by, so fall through to blocking rather than silently letting the shrink past.
+        const before = await this.git('show', `HEAD:${file}`)
+          .then(c => c.replace(/\n$/, '').split('\n').length)
+          .catch(() => 0);
+        const ratio = before > 0 ? net / before : 1;
+        if (ratio < shrinkRatio) continue;
+        shrunkFiles.push(file);
+        shrunk.push(`• ${file}  (−${net} of ${before} lines, ${Math.round(ratio * 100)}%)`);
       }
       if (shrunk.length) {
-        console.error(`${TAG} 🚫 BLOCKED large content shrink (${context}): ${shrunk.length} file(s) — net-removal threshold is ${shrinkThreshold}`);
+        console.error(`${TAG} 🚫 BLOCKED large content shrink (${context}): ${shrunk.length} file(s) — thresholds are ${shrinkThreshold} net lines and ${Math.round(shrinkRatio * 100)}% of the file`);
         await this.alertOnce(`shrink:${context}`, shrunk.join('\n'),
-          `🚫 BLOCKED large content shrink in data/ (${context}): a tracked file lost more than ${shrinkThreshold} net lines (guards against wiping shared data like contacts.json)\n\n${shrunk.slice(0, 20).join('\n')}` +
-          `\n\nCommit was aborted. If intended, raise DATA_SYNC_SHRINK_BLOCK or commit manually.`,
+          `🚫 BLOCKED large content shrink in data/ (${context}): a tracked file lost more than ${shrinkThreshold} net lines AND more than ${Math.round(shrinkRatio * 100)}% of itself (guards against wiping shared data like contacts.json)\n\n${shrunk.slice(0, 20).join('\n')}` +
+          `\n\nThose file(s) were unstaged; anything else in this commit will sync normally. If intended, commit them manually.`,
         );
-        await this.git('reset', 'HEAD').catch(() => {});
+        // Unstage ONLY the offending files. A blanket `git reset HEAD` discards every unrelated
+        // file staged in the same flush and re-blocks on the next one — the unclearable-block
+        // pattern already documented for untrackIgnored() above.
+        await this.git('reset', 'HEAD', '--', ...shrunkFiles).catch(() => {});
         return true;
       }
       // Condition cleared — a future recurrence is news again, so let it alert.
