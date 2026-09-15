@@ -5,9 +5,13 @@
 // The chain is ONE chain across months and restarts: on construct the last hash is recovered by reading the
 // newest file backwards from its end (never the whole file). The first-ever line carries GENESIS_HASH.
 // Head state is shared per resolved dir within the process, so several Audit instances on one dir append to one chain.
-// Across PROCESSES (blue-green flip: promoted instance + the old one's drain lines) the head self-syncs: each append
-// first stats its target file, and if it isn't the file/size we last left, re-runs tail recovery before linking.
-// Not a lock: two processes appending in the same instant can still fork (verify() reports it).
+// Across PROCESSES (blue-green flip: promoted instance + the old one's drain lines) every append holds a cross-process
+// mutex — mkdir(<dir>/.lock), atomic on a local fs — across the whole re-sync + write: if the NEWEST month file in the dir
+// isn't the file/size we last left (another process appended or rotated), tail recovery re-runs before linking. So
+// writers that take the lock serialize into one chain. The wait is bounded (LOCK_WAIT_MS): on timeout the append fails
+// (counted, logged, not written). A lock older than LOCK_STALE_MS (holder died mid-section) is broken with a warn.
+// Residual gaps: a writer that doesn't take the lock (a pre-lock build during its own flip) is only size-detected and
+// can still fork; two processes breaking the same stale lock at once can both enter. verify() reports any fork.
 //
 // Crash safety: a partial last line (crash mid-write, failed append) is sealed with '\n' on recovery and after a
 // failed append, so the next record starts on its own line and links to the last GOOD hash. verify() still reports
@@ -21,7 +25,7 @@
 // deleting the newest file(s) or tail lines leaves a valid shorter chain. Neither is detectable without an external
 // head anchor; the OS append-only flag (`chattr +a`) + offsite copy (tamper-protection step) are the mitigation.
 import { createHash } from 'node:crypto';
-import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, statSync } from 'node:fs';
+import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { dataPath } from '../paths.ts';
 
@@ -70,6 +74,11 @@ const isSecretKey = (k: string) => {
 };
 const CHUNK = 64 * 1024;
 const MAX_QUERY = 1000;
+const LOCK_WAIT_MS = 200;
+const LOCK_STALE_MS = 2000;
+const SLEEP = new Int32Array(new SharedArrayBuffer(4));
+/** Synchronous sleep without spinning the CPU (append is sync by contract). */
+const sleepSync = (ms: number) => { Atomics.wait(SLEEP, 0, 0, ms); };
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 
@@ -259,33 +268,53 @@ export class Audit {
     return { _truncated: true, keys: Object.keys(m).slice(0, 20).map(k => k.slice(0, 64)) };
   }
 
+  /** Take <dir>/.lock (mkdir = atomic). Bounded wait with backoff; breaks a stale lock. False on timeout. */
+  private lock(lk: string): boolean {
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    for (let wait = 0.05; ; wait = Math.min(wait * 2, 5)) {
+      try { mkdirSync(lk); return true; } catch (e: any) { if (e.code !== 'EEXIST') throw e; }
+      try {
+        const age = Date.now() - statSync(lk).mtimeMs;
+        if (age > LOCK_STALE_MS) {
+          rmdirSync(lk);
+          this.options.log.warn(`[audit] broke stale lock ${lk} (${Math.round(age)}ms old)`);
+          continue;
+        }
+      } catch (e: any) { if (e.code !== 'ENOENT') throw e; } // released meanwhile → retry after a short sleep
+      if (Date.now() >= deadline) return false;
+      sleepSync(wait);
+    }
+  }
+
   /** Append one event. Never throws; returns the written record, or null on failure. */
   public append(event: AuditEvent): AuditRecord | null {
-    let file: string | undefined;
+    let file: string | undefined, lk: string | undefined;
     const s = this.state;
     try {
       if (!TYPES.has(event?.type)) throw new Error(`unknown audit type "${event?.type}"`);
+      mkdirSync(this.options.dir, { recursive: true });
+      const lockPath = path.join(this.options.dir, '.lock');
+      if (!this.lock(lockPath)) throw new Error(`lock ${lockPath} not acquired within ${LOCK_WAIT_MS}ms`);
+      lk = lockPath;
       if (!s.healthy) this.recover();
       if (!s.healthy) throw new Error('audit dir unreadable; chain head unknown');
-      const now = new Date(this.options.clock());
-      const monthNow = () => [now.toISOString().slice(0, 7), s.lastMonth].sort()[1];
-      let month = monthNow();
-      file = path.join(this.options.dir, `${month}.jsonl`);
-      let size = sizeOf(file);
-      // Self-sync: the target isn't the file/size we last left it at → another process appended or rotated
-      // (blue-green flip: the promoted instance and the old one's drain lines). Re-read the tail before linking.
-      if (!s.lastWrite || s.lastWrite.file !== file || s.lastWrite.size !== size) {
+      // Self-sync under the lock: the NEWEST month file isn't the file/size we last left → another process appended
+      // or rotated (possibly into a later month than our clock). Re-read the tail before linking.
+      const newestName = this.files().at(-1);
+      const newest = newestName ? path.join(this.options.dir, newestName) : '';
+      if (!s.lastWrite || s.lastWrite.file !== newest || s.lastWrite.size !== sizeOf(newest)) {
         this.recover();
         if (!s.healthy) throw new Error('audit dir unreadable; chain head unknown');
-        month = monthNow(); file = path.join(this.options.dir, `${month}.jsonl`); size = sizeOf(file);
       }
+      const now = new Date(this.options.clock());
+      const month = [now.toISOString().slice(0, 7), s.lastMonth].sort()[1];
+      file = path.join(this.options.dir, `${month}.jsonl`);
+      const size = sizeOf(file);
       const base = { ts: now.toISOString(), type: event.type } as Omit<AuditRecord, 'hash'>; // prevHash set last, for line readability
       const opt = { principal: this.str(event.principal), role: this.str(event.role), sessionId: this.str(event.sessionId), target: this.str(event.target), reason: this.str(event.reason), meta: this.sanitize(event.meta) };
       for (const [k, v] of Object.entries(opt)) if (v !== undefined) (base as any)[k] = v;
       base.prevHash = s.lastHash;
       const rec: AuditRecord = { ...base, hash: hashOf(base) };
-      mkdirSync(this.options.dir, { recursive: true });
-      file = path.join(this.options.dir, `${month}.jsonl`);
       const line = `${JSON.stringify(rec)}\n`;
       appendFileSync(file, line, { mode: 0o600 });
       s.lastHash = rec.hash; s.lastMonth = month;
@@ -296,6 +325,8 @@ export class Audit {
       this.options.log.error(`[audit] append failed (${event?.type}): ${e.message}`);
       if (file) try { sealTail(file); } catch (e2: any) { this.options.log.error(`[audit] could not seal ${file}: ${e2.message}`); }
       return null;
+    } finally {
+      if (lk) try { rmdirSync(lk); } catch (e: any) { this.options.log.error(`[audit] could not release ${lk}: ${e.message}`); }
     }
   }
 
