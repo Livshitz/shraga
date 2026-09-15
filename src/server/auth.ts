@@ -29,6 +29,7 @@ const _origGetKey = (JwtHelper as any)['getGooglePublicKey'].bind(JwtHelper);
 };
 import { dataPath } from './paths.ts';
 import { validateApiKey } from './api-keys.ts';
+import { isOwnerEmail } from './owners.ts';
 
 /** Server secret for signing scoped internal tokens — stable per startup. */
 const INTERNAL_SECRET = process.env.INTERNAL_API_TOKEN || randomBytes(32).toString('hex');
@@ -131,19 +132,6 @@ export interface AuthUser {
   email: string;
   /** Owners can see all sessions/schedules across users (view-only bypass — mutations still restricted to owner of record). */
   isOwner: boolean;
-}
-
-/** Owners from env: OWNERS="email1,email2" (case-insensitive). */
-function loadOwners(): string[] {
-  return (process.env.OWNERS ?? '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-}
-
-function isOwnerEmail(email?: string): boolean {
-  // Emailless tokens (e.g. anonymous Firebase users) are never owners — guard the .toLowerCase() crash.
-  return !!email && loadOwners().includes(email.toLowerCase());
 }
 
 export async function verifyToken(token: string): Promise<AuthUser> {

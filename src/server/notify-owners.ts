@@ -10,23 +10,11 @@ import { emitEvent } from './events/bus.ts';
 
 export type Owner = { name?: string; slackId: string };
 
-/** The OWNERS env list, lowercased. THE definition of "an owner of this deployment" — every
- *  medium joins on it, each through whatever identity it happens to hold. */
-export function ownerEmails(): string[] {
-  return (process.env.OWNERS ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-}
-
-/** Is this email address an owner of this deployment?
- *
- *  Exported because a medium that is not Slack cannot use `resolveOwners`: that returns Slack ids
- *  (OWNERS ∩ contacts WITH a Slack id), which is a Slack-shaped answer. A webhook-lane add-on, for
- *  instance, holds a shraga uid + the email of the API key that opened the link, so it joins on the
- *  email instead. An empty/unknown address is NOT an owner — the fail-closed direction, since the
- *  alternative is fanning a deploy report out to whoever happened to open a link. */
-export function isOwnerEmail(email: string | undefined | null): boolean {
-  const e = String(email ?? '').trim().toLowerCase();
-  return !!e && ownerEmails().includes(e);
-}
+// OWNERS parsing lives in ./owners.ts (single definition). Re-exported under the historical names:
+// `isOwnerEmail` joins media that hold an email rather than a Slack id (e.g. webhook-lane); an
+// empty/unknown address is NOT an owner — fail-closed.
+export { getOwners as ownerEmails, isOwnerEmail } from './owners.ts';
+import { isOwnerEmail } from './owners.ts';
 
 /** Owners of THIS deployment (OWNERS env ∩ contacts that have a Slack id). */
 export async function resolveOwners(): Promise<Owner[]> {
