@@ -305,8 +305,6 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
   if (msg.rawThreadTs) triggerContext.thread = msg.rawThreadTs;
   if (contact?.emails[0]) triggerContext.user = contact.emails[0];
 
-  // The real human sender; a message with no Slack user falls back to the bot identity, marked internal.
-  const principal = msg.user ? fromSlack(msg.user, { email: contact?.emails[0] }) : fromInternal({ uid: SLACK_UID, lane: 'slack' });
   // Guard before any spend: blocklist → rate → concurrency (shadow unless SECURITY_ENFORCE).
   const admission = admitTurn(principal, { channel: 'slack' });
   if (!admission.ok) {

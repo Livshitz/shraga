@@ -208,7 +208,7 @@ export class TurnGuardOptions {
   runtime!: SecurityRuntime;
   principal!: Principal;
   sessionId?: string;
-  /** The caller's own role/rank (policy.resolve at turn start). */
+  /** The caller's own role/rank at turn start (SecurityRuntime.decide → resolvePrincipal, the single resolution path). */
   role!: string;
   rank!: number;
   /** Session floor lookup (sessions.getSessionFloor — a Map read). Undefined = no floor recorded. */

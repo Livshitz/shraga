@@ -17,6 +17,7 @@ import path from 'node:path';
 import { dataPath } from '../paths.ts';
 import type { AuditEvent } from './audit.ts';
 import type { Principal } from './principal.ts';
+import { enforcing } from './enforce.ts';
 
 export interface GuardDenial { ok: false; status: 429 | 403; retryAfter?: number; reason: string }
 export type GuardVerdict = { ok: true; wouldDeny?: GuardDenial } | GuardDenial;
@@ -119,7 +120,7 @@ export class GuardOptions {
   /** Writes (blocks.json) only while true. */
   isActive: () => boolean = () => true;
   /** False = shadow: compute + audit, never deny. */
-  enforce: () => boolean = () => process.env.SECURITY_ENFORCE === 'true';
+  enforce: () => boolean = enforcing; // the ONE flag that also governs profile enforcement (enforce.ts)
   /** Audit sink; `dedupeKey` = at most once per window (SecurityRuntime.record semantics). */
   audit: (event: AuditEvent, dedupeKey?: string) => void = () => {};
   /** Manual blocklist match (Policy.blocked). */
