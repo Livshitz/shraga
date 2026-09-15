@@ -490,3 +490,24 @@ function claudeCodeVersion(): string {
 }
 
 export const claudeUsage = new ClaudeUsageReader();
+
+const accountReaders = new Map<string, ClaudeUsageReader>();
+/** The reader for a per-user Claude login dir (claude-account.ts), or the box default for null. One
+ *  lazily-created reader per dir, so each account keeps its own cache, cooldown and rate-limit marks.
+ *  The dir's own files are the ONLY source: the keychain enumeration picks the first OAuth item it
+ *  finds, which on a shared box may be somebody else's login. The mirror lives inside the dir, which
+ *  data-sync already ignores. */
+export function claudeUsageFor(accountDir: string | null): ClaudeUsageReader {
+  if (!accountDir) return claudeUsage;
+  let reader = accountReaders.get(accountDir);
+  if (!reader) {
+    reader = new ClaudeUsageReader({
+      credentialsPath: path.join(accountDir, '.credentials.json'),
+      accountPath: path.join(accountDir, '.claude.json'),
+      cachePath: path.join(accountDir, 'shraga-usage-last.json'),
+      readKeychain: async () => null,
+    });
+    accountReaders.set(accountDir, reader);
+  }
+  return reader;
+}

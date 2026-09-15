@@ -61,7 +61,8 @@ import { syncVendorRepos } from './vendor-sync.ts';
 import { SelfUpgrade } from './self-upgrade/index.ts';
 import { initEngines, getAvailableEngines, getEngine } from './engine/index.ts';
 import { statsSampler } from './stats.ts';
-import { claudeUsage } from './claude-usage.ts';
+import { claudeUsageFor } from './claude-usage.ts';
+import { claudeAccountDir } from './claude-account.ts';
 import { ClaudeLogin, ClaudeLoginError } from './claude-login.ts';
 import { getAll as getAllContacts } from './contacts.ts';
 import { artifactsRouter } from './artifacts/artifacts.routes.ts';
@@ -245,15 +246,17 @@ app.get('/api/stats', requireAuth, (_req, res) => {
 // `fetchedAt`, so the gauge stays put and states its age instead of blinking out.
 // Deliberately NOT gated on the active engine: the question is whether Claude Code is configured
 // with a subscription on this host, not which runtime happens to be selected right now.
-app.get('/api/claude-usage', requireAuth, async (_req, res) => {
-  const usage = await claudeUsage.get();
+// Per viewer: a caller routed to a personal login (claude-account.ts) sees THAT account's usage.
+app.get('/api/claude-usage', requireAuth, async (req, res) => {
+  const usage = await claudeUsageFor(claudeAccountDir((req as any).user?.email)).get();
+  res.set('Cache-Control', 'private, no-store'); // per-viewer answer on a shared URL
   if (!usage) return void res.status(204).end();
   res.json(usage);
 });
 
 // Claude subscription login from the web UI (claude-login.ts). `me` = the caller's per-user login
 // (workspace/users/<contactId>/.claude); `global` = the box's shared login, owner only.
-const claudeLogin = new ClaudeLogin({ onGlobalChange: () => claudeUsage.invalidate() });
+const claudeLogin = new ClaudeLogin({ onChange: t => claudeUsageFor(t.name === 'global' ? null : t.dir).invalidate() });
 const claudeLoginRoute = (fn: (req: express.Request, res: express.Response, user: any) => Promise<unknown>) =>
   async (req: express.Request, res: express.Response) => {
     try { await fn(req, res, (req as any).user); }

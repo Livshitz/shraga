@@ -16,7 +16,7 @@ import type { AgentEngine, EngineStreamOpts, EngineModel } from './types.ts';
 import { getPromptSuffix } from '../prompt-suffix.ts';
 import { APP_ROOT } from '../paths.ts';
 import { writeMcpConfigFile } from './mcp-config-file.ts';
-import { claudeUsage } from '../claude-usage.ts';
+import { claudeUsageFor } from '../claude-usage.ts';
 import { claudeAccountDir, applyClaudeAccount } from '../claude-account.ts';
 const IMMUTABLE_SYSTEM_PROMPT = readFileSync(path.resolve(import.meta.dirname, '../../../defaults/system-prompt.md'), 'utf-8');
 const DEFAULT_USER_PROMPT = `You are a helpful assistant with access to MCP tools.`;
@@ -469,7 +469,7 @@ export class ClaudeCodeEngine implements AgentEngine {
         if (m.type === 'system') continue;
         // Free, always-current limit status from the agent's own inference calls — the only signal
         // that still works while the usage endpoint is throttling this account.
-        if (m.type === 'rate_limit_event') { if (!accountDir) claudeUsage.observeRateLimit(m.rate_limit_info); continue; }
+        if (m.type === 'rate_limit_event') { claudeUsageFor(accountDir).observeRateLimit(m.rate_limit_info); continue; }
 
         if (m.type === 'result') {
           lastSessionId = m.session_id || lastSessionId;

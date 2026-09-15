@@ -2,10 +2,10 @@
 // REAL credential files on disk, so the assertions are about the module's behaviour end to end and
 // not about a mock's shape. Every test counts actual upstream requests.
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { ClaudeUsageReader } from '../claude-usage.ts';
+import { ClaudeUsageReader, claudeUsage, claudeUsageFor } from '../claude-usage.ts';
 
 // Captured verbatim from a live 200 (api.anthropic.com/api/oauth/usage) on a Max box.
 const BODY = {
@@ -398,5 +398,43 @@ describe('macOS keychain fallback', () => {
     await r.get();
     expect(n).toBe(2);
     expect(hits).toBe(2);
+  });
+});
+
+describe('claudeUsageFor (per-viewer accounts)', () => {
+  it('null → the box default singleton', () => {
+    expect(claudeUsageFor(null)).toBe(claudeUsage);
+  });
+
+  it('a routed dir → its own reader on that dir\'s files, cached per dir, never the keychain', async () => {
+    const a = path.join(dir, 'users', 'c-a', '.claude');
+    const ra = claudeUsageFor(a);
+    expect(ra).not.toBe(claudeUsage);
+    expect(claudeUsageFor(a)).toBe(ra);
+    expect(claudeUsageFor(path.join(dir, 'users', 'c-b', '.claude'))).not.toBe(ra);
+    expect(ra.options).toMatchObject({
+      credentialsPath: path.join(a, '.credentials.json'),
+      accountPath: path.join(a, '.claude.json'),
+      cachePath: path.join(a, 'shraga-usage-last.json'),
+    });
+    expect(await ra.options.readKeychain(ra.options)).toBeNull();
+  });
+
+  it('reads the routed account end to end and keeps its own rate-limit state', async () => {
+    const a = path.join(dir, 'users', 'c-e2e', '.claude');
+    await mkdir(a, { recursive: true });
+    await writeFile(path.join(a, '.credentials.json'), JSON.stringify(OK_CREDS));
+    await writeFile(path.join(a, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'routed@example.com' } }));
+    const ra = claudeUsageFor(a);
+    ra.options.endpoint = endpoint;
+    ra.options.platform = 'darwin'; // the keychain seam would be reachable on a Mac — it must answer null
+    expect((await ra.get())?.account).toBe('routed@example.com');
+    ra.observeRateLimit({ status: 'rejected', rateLimitType: 'five_hour', resetsAt: Math.floor(Date.now() / 1000) + 3600 });
+    expect((await ra.get())?.limits.find(l => l.kind === 'session')?.percent).toBe(100);
+    expect(hits).toBe(1);
+    const other = claudeUsageFor(path.join(dir, 'users', 'c-none', '.claude'));
+    other.options.endpoint = endpoint;
+    expect(await other.get()).toBeNull(); // no files → no gauge, and no borrowing another login
+    expect(hits).toBe(1);
   });
 });

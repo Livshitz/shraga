@@ -49,8 +49,8 @@ export class ClaudeLoginOptions {
   sessionTtlMs = 10 * 60_000;
   urlTimeoutMs = 20_000;
   codeTimeoutMs = 60_000;
-  /** Called after any change to the global login (usage reader cache). */
-  onGlobalChange: () => void = () => {};
+  /** Called after a target's login changed — connect/replace/disconnect (usage reader cache). */
+  onChange: (target: ClaudeTarget) => void = () => {};
 }
 
 interface Pending { target: ClaudeTarget; child: ChildProcess; loginDir: string; output: () => string; exit: Promise<number | null>; timer: ReturnType<typeof setTimeout> }
@@ -142,7 +142,7 @@ export class ClaudeLogin {
     } finally {
       if (this.options.swap) await rm(p.loginDir, { recursive: true, force: true });
     }
-    if (target.name === 'global') this.options.onGlobalChange();
+    this.options.onChange(target);
     return this.status(target);
   }
 
@@ -153,7 +153,7 @@ export class ClaudeLogin {
     try { await this.run(['auth', 'logout'], target.explicitDir ? target.dir : null); }
     catch (err) { console.warn(`${TAG} logout failed for ${target.key}:`, (err as Error).message); }
     if (target.name === 'me') await rm(target.dir, { recursive: true, force: true });
-    else this.options.onGlobalChange();
+    this.options.onChange(target);
   }
 
   cancel(key: string): void {
