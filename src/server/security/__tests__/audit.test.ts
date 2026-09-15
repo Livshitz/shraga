@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, appendFileSync, chmodSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { Audit, GENESIS_HASH, canonical, type AuditRecord } from '../audit.ts';
+import { Audit, GENESIS_HASH, canonical, __resetAuditHeadsForTest, type AuditRecord } from '../audit.ts';
 import { Policy, defaultPolicy, type PolicyOptions } from '../policy.ts';
 
 const errors: string[] = [];
@@ -213,6 +213,24 @@ describe('Audit hardening (regressions)', () => {
     a.append({ type: 'auth.allow' }); b.append({ type: 'auth.deny' }); a.append({ type: 'auth.allow' });
     expect(b.head).toBe(a.head);
     expect(mk().verify()).toEqual({ ok: true, lines: 3 });
+  });
+
+  test('two PROCESSES on one dir (separate head state: blue-green flip) interleave into one valid chain, across rotation', () => {
+    const a = mk();
+    a.append({ type: 'auth.allow', principal: 'old' });
+    __resetAuditHeadsForTest(); // B must not see A's in-process head — as if it were another process
+    const b = mk();
+    a.append({ type: 'turn.end', principal: 'old' }); // old instance's drain line after B booted
+    b.append({ type: 'auth.allow', principal: 'new' });
+    a.append({ type: 'turn.end', principal: 'old' });
+    b.append({ type: 'auth.deny', principal: 'new' });
+    now = Date.parse('2026-02-01T00:00:01Z');
+    b.append({ type: 'auth.allow', principal: 'new' }); // B rotates to February
+    a.append({ type: 'turn.end', principal: 'old' }); // A last wrote January — must follow B's February tail
+    b.append({ type: 'auth.allow', principal: 'new' });
+    expect(readdirSync(path.join(dir, 'audit')).sort()).toEqual(['2026-01.jsonl', '2026-02.jsonl']);
+    expect(mk().verify()).toEqual({ ok: true, lines: 8 });
+    expect(a.failures + b.failures).toBe(0);
   });
 
   test('unreadable dir: appends fail (no genesis fork), verify reports unreadable, heals once readable', () => {

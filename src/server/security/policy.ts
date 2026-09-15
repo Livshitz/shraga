@@ -9,6 +9,8 @@
 // - Missing file ⇒ migration (from whitelist.json + optional hook), ONCE: a `.migrated` marker is
 //   written beside it, and a missing file with the marker present is deletion ⇒ fail closed + onTamper.
 // - Empty/invalid file, or migration/IO failure ⇒ fail closed: only owners resolve above anonymous.
+// - PASSIVE (`isActive` false: a standby sharing DATA_DIR) never writes: no migration, no marker, save() throws;
+//   a missing file fails closed in memory and hot-reload/tamper checks are off. activate() re-loads as at boot.
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
 import path from 'node:path';
@@ -179,6 +181,8 @@ export class PolicyOptions {
   onTamper?: (info: { path: string; reason: TamperReason; expected: string | null; actual: string | null }) => void;
   /** Watch the file for hot reload. */
   watch: boolean = true;
+  /** False on a PASSIVE standby sharing DATA_DIR: no writes (no migration, marker or save) and no tamper checks. */
+  isActive: () => boolean = () => true;
   log: Pick<Console, 'info' | 'warn' | 'error'> = console;
 }
 
@@ -193,7 +197,7 @@ export class Policy {
   public constructor(options?: Partial<PolicyOptions>) {
     this.options = { ...new PolicyOptions(), ...options };
     this.load();
-    if (this.options.watch) this.startWatch();
+    if (this.options.watch && this.active()) this.startWatch(); // passive: events are ignored and the dir may not exist yet
   }
 
   /** True when a valid policy is loaded (false = fail-closed mode). */
@@ -213,6 +217,7 @@ export class Policy {
     const { path: p, log } = this.options;
     try {
       if (!existsSync(p)) {
+        if (!this.active()) return this.failClosedNow(`${p} missing while PASSIVE — not migrating (the active instance owns data/)`);
         if (existsSync(this.markerPath)) {
           this.failClosedNow(`TAMPER: ${p} missing after migration (${this.markerPath} exists) — not re-migrating`);
           try { this.options.onTamper?.({ path: p, reason: 'deleted', expected: null, actual: null }); }
@@ -227,7 +232,7 @@ export class Policy {
       const raw = readFileSync(p, 'utf8');
       this.trustedHash = sha256(raw);
       this.apply(raw);
-      this.ensureMarker(); // heals a marker write that failed on an earlier boot
+      if (this.active()) this.ensureMarker(); // heals a marker write that failed on an earlier boot
     } catch (e: any) {
       if (!existsSync(p)) this.trustedHash = null; // save() recorded a hash it never wrote
       this.failClosedNow(`load/migration failed: ${e.message}`);
@@ -271,6 +276,11 @@ export class Policy {
 
   /** The ONLY trusted writer. Validates, writes atomically, records provenance, applies. */
   public save(next: PolicyFile): void {
+    if (!this.active()) {
+      const msg = `save refused: PASSIVE standby must not write ${this.options.path}`;
+      this.options.log.error(`[policy] ${msg}`);
+      throw new Error(msg);
+    }
     const errs = validatePolicy(next);
     if (errs.length) throw new Error(`invalid policy: ${errs.join('; ')}`);
     const content = serialize(next);
@@ -285,6 +295,8 @@ export class Policy {
 
   /** Re-read disk; load only if it's content we wrote. Returns whether the disk state is trusted. */
   public reload(): boolean {
+    // PASSIVE: the active instance legitimately saves this file; a standby would read that as tamper. Ignore.
+    if (!this.active()) return false;
     const p = this.options.path;
     const raw = existsSync(p) ? readFileSync(p, 'utf8') : null;
     const actual = raw === null ? null : sha256(raw);
@@ -310,6 +322,18 @@ export class Policy {
   }
 
   public close(): void { this.watcher?.close(); this.watcher = undefined; }
+
+  private active(): boolean {
+    try { return this.options.isActive(); }
+    catch (e: any) { this.options.log.error(`[policy] isActive threw — treating as PASSIVE: ${e.message}`); return false; }
+  }
+
+  /** Passive → active promotion: re-load from disk with the same trust as boot (migrating now if still missing). */
+  public activate(): void {
+    this.load();
+    if (this.options.watch && !this.watcher) this.startWatch();
+    this.options.log.info(`[policy] activated — loaded ${this.options.path} (valid=${this._valid})`);
+  }
 
   private resolved(role: string): Resolved {
     const c = this.compiled;

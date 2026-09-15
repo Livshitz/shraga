@@ -4,8 +4,9 @@
 // Uninitialized (tests, embedders that never call initSecurity) ⇒ security() is undefined and every
 // call site no-ops — the audit trail is additive, never a precondition for a turn or a request.
 //
-// Writes are gated on `isActive` (a PASSIVE standby shares DATA_DIR and must not append to data/audit)
-// and noisy events are deduped per key per window, so a busy client isn't one line per request.
+// Writes are gated on `isActive` (a PASSIVE standby shares DATA_DIR and must not append to data/audit, nor let the
+// Policy migrate/save/mark or judge tamper; `activate()` re-loads the policy on promotion), and noisy events are
+// deduped per key per window, so a busy client isn't one line per request.
 import { Policy, type PolicyOptions, type TamperReason } from './policy.ts';
 import { Audit, type AuditEvent, type AuditOptions } from './audit.ts';
 import type { Principal } from './principal.ts';
@@ -47,7 +48,13 @@ export class SecurityRuntime {
     this.options = { ...new SecurityRuntimeOptions(), ...options };
     const { policy, audit, log } = this.options;
     this.audit = new Audit({ log, ...audit });
-    this.policy = new Policy({ log, ...policy, onTamper: (info) => { policy.onTamper?.(info); this.onTamper(info); } });
+    this.policy = new Policy({ log, isActive: () => this.active(), ...policy, onTamper: (info) => { policy.onTamper?.(info); this.onTamper(info); } });
+  }
+
+  /** Passive → active promotion (after `isActive` turns true): re-load the policy from disk with boot trust. */
+  public activate(): void {
+    this.options.log.info('[security] activated — reloading policy from disk');
+    this.policy.activate();
   }
 
   private active(): boolean {

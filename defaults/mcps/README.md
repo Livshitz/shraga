@@ -17,8 +17,8 @@ Global MCPs live in **`data/shraga.config.ts`** (legacy name `data/unclaw.config
     { ...global (shraga.config.ts), ...user (mcps/<uid>.json) }     — the user overlay wins
 
 Only names present in the **global** config register as `/<name>` MCP commands
-(`listMcpCommands()`), and `PUT /api/mcps` strips any global name from a user overlay before
-saving — so a global MCP cannot be "added" by hand-writing a user file.
+(`listMcpCommands()`), and `PUT /api/mcps` — **owner-only** (an entry can carry a stdio `command`
+the server spawns; non-owners get 403) — strips any global name from the overlay before saving — so a global MCP cannot be "added" by hand-writing a user file.
 
 ## Cached vs live
 

@@ -4,6 +4,7 @@ import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Textarea } from './ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from './ui/dialog';
+import { useIsOwner } from '@/hooks/useIsOwner';
 
 type DefaultSkillEntry = string | { name: string; capped?: boolean | number };
 
@@ -43,8 +44,21 @@ export function SkillsManager({ getToken, onSkillsChange, trigger }: Props) {
   const [dirty, setDirty] = useState(false);
   const [action, setAction] = useState<SidebarAction>(null);
   const [actionName, setActionName] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const isOwner = useIsOwner(getToken, open);
+  const canEdit = isOwner === true;
 
   const isSelectedBuiltin = selected ? builtins.includes(selected) : false;
+  const readOnly = isSelectedBuiltin || !canEdit;
+
+  /** True if the mutation succeeded; otherwise surfaces the server's error and returns false. */
+  const ok = async (res: Response, what: string) => {
+    if (res.ok) { setError(null); return true; }
+    const msg = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+    console.warn(`[SkillsManager] ${what} failed`, msg);
+    setError(`${what} failed: ${msg}`);
+    return false;
+  };
 
   const loadList = async () => {
     const token = await getToken();
@@ -72,11 +86,11 @@ export function SkillsManager({ getToken, onSkillsChange, trigger }: Props) {
   };
 
   const save = async () => {
-    if (!selected || isSelectedBuiltin) return;
+    if (!selected || readOnly) return;
     const token = await getToken();
     if (!token) return;
-    await apiFetch(`/api/skills/${selected}`, token, { method: 'PUT', body: JSON.stringify({ content }) });
-    setDirty(false);
+    const res = await apiFetch(`/api/skills/${selected}`, token, { method: 'PUT', body: JSON.stringify({ content }) });
+    if (await ok(res, 'Save')) setDirty(false);
   };
 
   const submitAction = async () => {
@@ -86,17 +100,18 @@ export function SkillsManager({ getToken, onSkillsChange, trigger }: Props) {
     if (!token) return;
 
     if (action === 'create') {
-      await apiFetch(`/api/skills/${name}`, token, { method: 'PUT', body: JSON.stringify({ content: '' }) });
+      const res = await apiFetch(`/api/skills/${name}`, token, { method: 'PUT', body: JSON.stringify({ content: '' }) });
+      if (!await ok(res, 'Create')) return;
       await loadList();
       await loadSkill(name);
     } else if (action === 'duplicate' && selected) {
       const res = await apiFetch(`/api/skills/${selected}/duplicate`, token, { method: 'POST', body: JSON.stringify({ newName: name }) });
-      if (!res.ok) return;
+      if (!await ok(res, 'Duplicate')) return;
       await loadList();
       await loadSkill(name);
     } else if (action === 'rename' && selected) {
       const res = await apiFetch(`/api/skills/${selected}/rename`, token, { method: 'POST', body: JSON.stringify({ newName: name }) });
-      if (!res.ok) return;
+      if (!await ok(res, 'Rename')) return;
       await loadList();
       await loadSkill(name);
     }
@@ -109,7 +124,7 @@ export function SkillsManager({ getToken, onSkillsChange, trigger }: Props) {
     const token = await getToken();
     if (!token) return;
     const res = await apiFetch(`/api/skills/${name}`, token, { method: 'DELETE' });
-    if (!res.ok) return;
+    if (!await ok(res, 'Delete')) return;
     if (selected === name) { setSelected(null); setContent(''); }
     await loadList();
   };
@@ -120,8 +135,8 @@ export function SkillsManager({ getToken, onSkillsChange, trigger }: Props) {
     const next = isDefault(defaults, name)
       ? defaults.filter((d) => entryName(d) !== name)
       : [...defaults, name];
-    await apiFetch('/api/skills-defaults', token, { method: 'PUT', body: JSON.stringify(next) });
-    setDefaults(next);
+    const res = await apiFetch('/api/skills-defaults', token, { method: 'PUT', body: JSON.stringify(next) });
+    if (await ok(res, 'Update defaults')) setDefaults(next);
   };
 
 
@@ -163,9 +178,10 @@ export function SkillsManager({ getToken, onSkillsChange, trigger }: Props) {
                   onClick={() => loadSkill(s)}
                 >
                   <button
-                    className={`shrink-0 transition-colors ${isDefault(defaults, s) ? 'text-amber-500' : 'text-muted-foreground/30 hover:text-amber-400'}`}
-                    onClick={(e) => { e.stopPropagation(); toggleDefault(s); }}
-                    title={isDefault(defaults, s) ? 'Remove from defaults' : 'Set as default (always active)'}
+                    className={`shrink-0 transition-colors ${isDefault(defaults, s) ? 'text-amber-500' : 'text-muted-foreground/30'} ${canEdit && !isDefault(defaults, s) ? 'hover:text-amber-400' : ''}`}
+                    disabled={!canEdit}
+                    onClick={(e) => { e.stopPropagation(); if (canEdit) toggleDefault(s); }}
+                    title={!canEdit ? (isDefault(defaults, s) ? 'Default (only an owner can change)' : 'Only an owner can change defaults') : isDefault(defaults, s) ? 'Remove from defaults' : 'Set as default (always active)'}
                   >
                     <Star className={`w-3 h-3 ${isDefault(defaults, s) ? 'fill-current' : ''}`} />
                   </button>
@@ -173,7 +189,7 @@ export function SkillsManager({ getToken, onSkillsChange, trigger }: Props) {
                   {builtins.includes(s) && (
                     <span title="Built-in (read-only)"><Lock className="w-2.5 h-2.5 text-muted-foreground/40 shrink-0" /></span>
                   )}
-                  {!builtins.includes(s) && (
+                  {!builtins.includes(s) && canEdit && (
                     <button
                       className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive transition-opacity shrink-0"
                       onClick={(e) => { e.stopPropagation(); remove(s); }}
@@ -200,11 +216,14 @@ export function SkillsManager({ getToken, onSkillsChange, trigger }: Props) {
                   <Button size="icon" className="h-7 w-7 shrink-0" onClick={submitAction}><Check className="w-3 h-3" /></Button>
                   <Button size="icon" variant="ghost" className="h-7 w-7 shrink-0" onClick={cancelAction}><X className="w-3 h-3" /></Button>
                 </div>
-              ) : (
+              ) : canEdit ? (
                 <Button variant="outline" size="sm" className="w-full h-7 text-xs" onClick={() => startAction('create')}>
                   <Plus className="w-3 h-3 mr-1" /> New skill
                 </Button>
+              ) : (
+                <p className="text-[11px] text-muted-foreground text-center">{isOwner === false ? 'Read-only — only an owner can change skills' : ''}</p>
               )}
+              {error && <p className="text-[11px] text-destructive mt-1 break-words">{error}</p>}
             </div>
           </div>
 
@@ -219,7 +238,7 @@ export function SkillsManager({ getToken, onSkillsChange, trigger }: Props) {
                     <span>{selected}</span>
                   </div>
                   <div className="flex items-center gap-1.5">
-                    {isSelectedBuiltin && (
+                    {readOnly && (
                       <span className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5">
                         <Lock className="w-2.5 h-2.5" /> read-only
                       </span>
@@ -234,14 +253,16 @@ export function SkillsManager({ getToken, onSkillsChange, trigger }: Props) {
                         </span>
                       </>
                     )}
-                    <Button
-                      variant="ghost" size="sm" className="h-6 text-xs px-1.5"
-                      onClick={() => startAction('duplicate')}
-                      title="Duplicate"
-                    >
-                      <Copy className="w-3 h-3" />
-                    </Button>
-                    {!isSelectedBuiltin && (
+                    {canEdit && (
+                      <Button
+                        variant="ghost" size="sm" className="h-6 text-xs px-1.5"
+                        onClick={() => startAction('duplicate')}
+                        title="Duplicate"
+                      >
+                        <Copy className="w-3 h-3" />
+                      </Button>
+                    )}
+                    {!readOnly && (
                       <Button
                         variant="ghost" size="sm" className="h-6 text-xs px-1.5"
                         onClick={() => startAction('rename')}
@@ -250,7 +271,7 @@ export function SkillsManager({ getToken, onSkillsChange, trigger }: Props) {
                         <Pencil className="w-3 h-3" />
                       </Button>
                     )}
-                    {dirty && !isSelectedBuiltin && (
+                    {dirty && !readOnly && (
                       <Button size="sm" className="h-6 text-xs" onClick={save}>
                         <Check className="w-3 h-3 mr-1" /> Save
                       </Button>
@@ -259,9 +280,9 @@ export function SkillsManager({ getToken, onSkillsChange, trigger }: Props) {
                 </div>
                 <Textarea
                   value={content}
-                  onChange={(e) => { if (!isSelectedBuiltin) { setContent(e.target.value); setDirty(true); } }}
-                  readOnly={isSelectedBuiltin}
-                  className={`flex-1 resize-none rounded-none border-0 font-mono text-xs focus-visible:ring-0 ${isSelectedBuiltin ? 'opacity-70 cursor-default' : ''}`}
+                  onChange={(e) => { if (!readOnly) { setContent(e.target.value); setDirty(true); } }}
+                  readOnly={readOnly}
+                  className={`flex-1 resize-none rounded-none border-0 font-mono text-xs focus-visible:ring-0 ${readOnly ? 'opacity-70 cursor-default' : ''}`}
                   placeholder="Write the skill instructions here…"
                 />
               </>

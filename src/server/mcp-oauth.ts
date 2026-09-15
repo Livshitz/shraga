@@ -6,7 +6,8 @@
  * of a static `uck_` API key.
  *
  * Provider-agnostic by design: the only place a user proves identity is `/oauth/authorize/consent`,
- * which is guarded by `requireAuth` — the same seam that handles Firebase today and email-password
+ * which is guarded by `requireAuth` AND requires an interactive login (principal kind `user` — never an API key or
+ * internal token, which would otherwise mint themselves a login-equivalent MCP token) — the same seam that handles Firebase today and email-password
  * later. Access/refresh tokens are stateless HMAC tokens (see auth.ts:signMcpToken). No DB:
  * clients live in a flat JSON file, auth codes in a short-TTL in-memory map.
  */
@@ -15,6 +16,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { randomBytes, createHash } from 'node:crypto';
 import { requireAuth, signMcpToken, verifyMcpToken, type AuthUser } from './auth.ts';
 import { dataPath } from './paths.ts';
+import { security } from './security/runtime.ts';
 
 const ACCESS_TTL = 3600; // 1h
 const REFRESH_TTL = 60 * 60 * 24 * 30; // 30d
@@ -133,6 +135,14 @@ export function registerMcpOAuthRoutes(app: Express) {
   // ── Consent → issue authorization code (identity via requireAuth seam) ───────
   app.post('/oauth/authorize/consent', oauthCors, requireAuth, (req: Request, res: Response) => {
     const user = (req as any).user as AuthUser;
+    // Consent mints an OAuth grant AS this identity — only an interactive login may give it. An API key or internal
+    // token must not launder itself into a login-equivalent (possibly owner) MCP token.
+    const kind = user.principal?.kind ?? 'unknown';
+    if (kind !== 'user') {
+      console.warn(`[mcp-oauth] consent refused: non-interactive credential (${kind})`);
+      security()?.authDeny('oauth:consent', `non-interactive:${kind}`, req.ip);
+      return void res.status(403).json({ error: 'access_denied', error_description: 'OAuth consent requires an interactive login' });
+    }
     const { client_id, redirect_uri, code_challenge, code_challenge_method, resource } = (req.body ?? {}) as Record<string, string>;
     if (!client_id || !redirect_uri || !code_challenge) {
       return void res.status(400).json({ error: 'invalid_request', error_description: 'client_id, redirect_uri, code_challenge required' });

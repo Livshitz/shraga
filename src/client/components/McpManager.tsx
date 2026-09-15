@@ -3,6 +3,7 @@ import { Plus, Trash2, Settings, Lock } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogBody, DialogFooter } from './ui/dialog';
+import { useIsOwner } from '@/hooks/useIsOwner';
 
 export interface McpServerConfig {
   command: string;
@@ -23,6 +24,9 @@ export function McpManager({ getToken, trigger }: Props) {
   const [config, setConfig] = useState<McpConfig>({});
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const isOwner = useIsOwner(getToken, open);
+  const canEdit = isOwner === true;
   const [editingEnv, setEditingEnv] = useState<Set<string>>(new Set());
   const toggleEditing = (id: string) =>
     setEditingEnv((s) => { const next = new Set(s); next.has(id) ? next.delete(id) : next.add(id); return next; });
@@ -40,14 +44,19 @@ export function McpManager({ getToken, trigger }: Props) {
 
   const save = async () => {
     setSaving(true);
+    setError(null);
     const token = await getToken();
     try {
-      await fetch('/api/mcps', {
+      const res = await fetch('/api/mcps', {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token ?? ''}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(config),
       });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
       setOpen(false);
+    } catch (e: any) {
+      console.error('[McpManager] save failed', e);
+      setError(e.message || 'Save failed');
     } finally {
       setSaving(false);
     }
@@ -119,6 +128,10 @@ export function McpManager({ getToken, trigger }: Props) {
         </DialogHeader>
 
         <DialogBody className="space-y-4">
+          {isOwner === false && (
+            <p className="text-xs text-muted-foreground rounded-md bg-muted/50 px-3 py-2">Read-only — only an owner can change MCP servers.</p>
+          )}
+          <fieldset disabled={!canEdit} className="space-y-4 min-w-0">
           {Object.entries(config).map(([name, server]) => {
             const isReadonly = !!server.readonly;
             return (
@@ -193,16 +206,20 @@ export function McpManager({ getToken, trigger }: Props) {
           {Object.keys(config).length === 0 && (
             <p className="text-sm text-muted-foreground text-center py-4">No MCP servers configured</p>
           )}
+          </fieldset>
+          {error && <p className="text-sm text-destructive">{error}</p>}
         </DialogBody>
 
-        <DialogFooter className="flex gap-2">
-          <Button variant="outline" onClick={addServer} className="gap-2">
-            <Plus className="w-4 h-4" /> Add Server
-          </Button>
-          <Button onClick={save} disabled={saving}>
-            {saving ? 'Saving…' : 'Save'}
-          </Button>
-        </DialogFooter>
+        {canEdit && (
+          <DialogFooter className="flex gap-2">
+            <Button variant="outline" onClick={addServer} className="gap-2">
+              <Plus className="w-4 h-4" /> Add Server
+            </Button>
+            <Button onClick={save} disabled={saving}>
+              {saving ? 'Saving…' : 'Save'}
+            </Button>
+          </DialogFooter>
+        )}
       </DialogContent>
     </Dialog>
   );
