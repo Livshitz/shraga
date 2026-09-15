@@ -90,7 +90,7 @@ exports[`flag OFF: spawn config is today's matches the pre-enforcement snapshot 
   "settingSources": [
     "project",
   ],
-  "systemPromptSha": "187b9dd327b085cc",
+  "systemPromptSha": "0a04dd887ad7ed8d",
   "tools": {
     "preset": "claude_code",
     "type": "preset",

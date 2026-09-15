@@ -1,0 +1,27 @@
+{
+  "roles": {
+    "owner": { "rank": 100, "profile": "full" },
+    "operator": { "rank": 80, "profile": "full" },
+    "member": { "rank": 50, "profile": "standard" },
+    "guest": { "rank": 20, "profile": "reply-only" },
+    "anonymous": { "rank": 0, "profile": "none" }
+  },
+  "profiles": {
+    "full": { "tools": ["*"], "mcps": ["*"], "env": ["*"], "outbound": true, "readScope": "all", "rate": "600/h" },
+    "standard": { "tools": ["Read", "Glob", "LS", "WebSearch"], "mcps": ["mcp-notion"], "env": ["NOTION_*"], "outbound": true, "readScope": "own", "rate": "120/h" },
+    "reply-only": { "tools": ["escalate"], "mcps": [], "env": [], "outbound": true, "readScope": "own", "rate": "10/h" },
+    "none": { "tools": [], "mcps": [], "env": [], "outbound": false, "readScope": "none", "rate": "0" }
+  },
+  "bindings": [
+    { "match": { "kind": "user", "emailIn": ["ops-lead@example.com", "sre@example.com"] }, "role": "operator" },
+    { "match": { "kind": "slack", "id": "slack:U0123ABCD" }, "role": "operator" },
+    { "match": { "kind": "user", "domain": "example.com" }, "role": "member" },
+    { "match": { "kind": "email", "domain": "example.com", "verified": true }, "role": "member" },
+    { "match": { "kind": "email", "verified": true }, "role": "guest" }
+  ],
+  "default": "anonymous",
+  "blocklist": [
+    { "match": { "domain": "spam.example" }, "until": null, "reason": "known spam sender" }
+  ],
+  "tokensValidAfter": {}
+}

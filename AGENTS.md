@@ -139,7 +139,10 @@ Pluggable via `AUTH_PROVIDER` (`src/server/auth.ts`):
 - `firebase`: verifies Firebase ID tokens. Requires the Firebase config; an optional add-on.
 
 Keep new routes gated like their siblings. `requireAuth` is the shared guard; API keys use the
-`uck_` prefix (`src/server/api-keys.ts`).
+`uck_` prefix (`src/server/api-keys.ts`). Authorization (principal → role → profile, owner-only routes,
+`SECURITY_ENFORCE`) lives in `src/server/security/`; see `.claude/skills/shraga/SKILL.md` → Security model.
+Gate policy/config/skills/MCP admin routes with `requireOwner()` (`security/owner-only.ts`), which also
+refuses the agent's internal token.
 
 ## Conventions
 

@@ -116,13 +116,13 @@ Omit `sessionId` to create a fresh conversation. The new session runs with full 
 
 ## Internal API Auth
 
-A random `INTERNAL_API_TOKEN` is generated on startup and set in your environment. Use it to call any authenticated endpoint from within a session:
+When your role's profile allows it, an `INTERNAL_API_TOKEN` scoped to the current session user is set in your environment. Use it to call authenticated endpoints from within a session:
 
 ```bash
 curl -H "x-internal-token: $INTERNAL_API_TOKEN" http://localhost:$PORT/api/...
 ```
 
-The request authenticates as the current session user automatically.
+The request authenticates as the current session user automatically. It is refused (403) by owner-admin routes (`/api/owner/*`, `PUT /api/config`, `PUT /api/mcps`, skill edits) and by API-key creation — those need the human's interactive login. If the variable is missing, your role in this session doesn't get it.
 
 ## MCP Tools
 

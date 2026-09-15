@@ -222,6 +222,9 @@ common ones:
 | `SECURITY_ENFORCE` | *(unset)* | `true` (or `1`) = the ONE switch for both the guard (blocklist, rate limits, auto-block, turn ceiling) and per-role profile enforcement (tools/MCP/env, per-call gate, taint, `escalate`); unset = shadow (audit only, nothing denies) |
 | `TRUSTED_PROXIES` | *(unset)* | IPs/CIDRs whose `X-Forwarded-For` is trusted. Without it, traffic from a same-host proxy (Caddy/cloudflared) arrives from loopback and IP-based limits/blocks don't apply; set `127.0.0.1,::1` when that proxy is the only ingress |
 
+**Security model** (roles and profiles, the policy file, the Owner Console, tamper protection, and the checklist
+before setting `SECURITY_ENFORCE`): [`.claude/skills/shraga/SKILL.md` → Security model](./.claude/skills/shraga/SKILL.md#security-model).
+
 ### The config file (`data/shraga.config.ts`)
 
 Beyond env vars, a typed config module in your data dir declares **global MCP servers**: the tools

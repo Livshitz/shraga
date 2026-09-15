@@ -1,6 +1,6 @@
 ---
 name: shraga
-description: How to consume, extend, embed, and operate a Shraga instance — the seams (features, extensions, event bus + webhooks, engines, client slots), the SHRAGA_OVERLAY contract, and the generic deploy/overlay/pin model. Load when working WITH Shraga: adding a capability, embedding it as a library, or running an instance.
+description: How to consume, extend, embed, and operate a Shraga instance — the seams (features, extensions, event bus + webhooks, engines, client slots), the SHRAGA_OVERLAY contract, the security model (principal → role → profile, Owner Console, SECURITY_ENFORCE), and the generic deploy/overlay/pin model. Load when working WITH Shraga: adding a capability, embedding it as a library, or running an instance.
 triggers:
   - extend shraga
   - add a shraga feature
@@ -10,6 +10,9 @@ triggers:
   - shraga engine
   - manage shraga instance
   - deploy shraga
+  - shraga security
+  - shraga policy
+  - owner console
 ---
 
 # Working with Shraga
@@ -39,25 +42,8 @@ they are load-bearing, read them before you build. Start with [`AGENTS.md`](../.
 
 1. **CLI / `bunx shraga`** — env-configured, zero code. `createShraga(fromEnv()).start()` under the
    hood; configure with `PORT` / `DATA_DIR` / `AUTH_PROVIDER` / `.env`. Seed a local user with
-   `shraga user add <email> <password>`. This is the standard self-host.
-   - `SECURITY_ENFORCE=true` (or `1`) — the ONE switch for both the guard (blocklist, rate limits, auto-block, turn ceiling) and per-role profile enforcement (tools/MCP/env, per-call gate, taint, `escalate`); unset = shadow (audit only, nothing denies).
-   - **Tamper protection (always on, flag or not):** agent file tools (Write/Edit/MultiEdit/NotebookEdit) can't write
-     server-owned data under `DATA_DIR` — `audit/`, `conversations/`, `sessions/`, `sessions.json`, `security/`,
-     `api-keys.json(.bak)`, `oauth-clients.json`, `mcps/`, data-sync's `.git/` and `.gitignore`, server secret files
-     (`PROTECTED_DATA_WRITE` in `security/enforce.ts`, realpath-resolved); the server writes them directly. Bash in
-     `full` profiles is not covered, so the audit log's backstop is OS-level: as root on Linux run
-     `src/scripts/harden-audit.sh <DATA_DIR>` hourly from cron. `chattr +a` protects EXISTING month files against
-     truncation/rewrite and `audit/` entries against deletion/rename; new month files don't inherit `+a` (hence the
-     cron). It does NOT prevent creating entries: a month name planted as a symlink or directory is detected, not
-     prevented — the server refuses to append through it (that month isn't recorded), `verify` reports
-     `not-regular-file`, owners are alerted, and the script exits non-zero naming it; root removes it (`chattr -a`,
-     `rm`, re-run). No app route deletes audit; retention is a root op.
-   - **data-sync and security state:** `audit/` is committed on every sync (offsite copy; commit body carries
-     `audit-head: <hash>` so a local chain rewrite shows against git history), never stashed, and a pull whose remote
-     commits change `audit/` is refused + owners alerted. `security/` (policy.json, .migrated, blocks.json) is NOT synced:
-     the active instance's Owner Console is its single writer (blue-green shares one `DATA_DIR`). Hosting the same data
-     repo on two hosts is unsupported — the untrack commit removes `security/policy.json` from other clones.
-   - `TRUSTED_PROXIES` — IPs/CIDRs whose `X-Forwarded-For` is trusted; without it same-host proxy traffic arrives from loopback and IP-based limits/blocks don't apply — set `127.0.0.1,::1` when that proxy is the only ingress.
+   `shraga user add <email> <password>`. This is the standard self-host. Security env
+   (`OWNERS`, `SECURITY_ENFORCE`, `TRUSTED_PROXIES`) → [Security model](#security-model).
 2. **Library embed** — `import { createShraga } from 'shraga'`, register against the seams, own the
    lifecycle (`start()` → `ServerHandle`, `stop()` to shut down without exiting the process). See
    README → "Use as a library" and the `ShragaOptions` doc-comments in `src/index.ts`.
@@ -111,7 +97,9 @@ Prefer a programmatic `createShraga().registerFeature(...)` embed when you own t
 ## Manage an instance
 
 - **`data/` layout** (flat files, no DB): conversations/sessions, `skills/`, `extensions/`,
-  `whitelist.json`, `shraga.config.ts`, uploads. All via `dataPath()`.
+  `shraga.config.ts`, uploads, `security/` + `audit/` (see Security model), and the legacy
+  `whitelist.json` (Firebase login allowlist + operator contacts seed; read once into the first
+  `policy.json`). All via `dataPath()`.
 - **Deployment config** — `DATA_DIR/shraga.config.ts` (canonical filename; `unclaw.config.ts` is a
   legacy fallback), seeded from `defaults/shraga.config.ts`. Typed `ShragaConfig` in
   [`src/server/shraga-config.ts`](../../../src/server/shraga-config.ts); today it declares global
@@ -127,20 +115,103 @@ Prefer a programmatic `createShraga().registerFeature(...)` embed when you own t
 - **Auth** — `AUTH_PROVIDER` ([`src/server/auth.ts`](../../../src/server/auth.ts)): `local`
   (default, self-hosted username/password; local login/register routes exist only in this mode) or
   `firebase` (verifies Firebase ID tokens; optional add-on). `requireAuth` is the shared guard; API
-  keys use the `uck_` prefix (stored hashed; optional role cap + expiry; minted only by an interactive login; an
-  uncapped key keeps its creator's owner status/role per request, a role-capped key is never owner). Revocation: owners invalidate a
-  principal's tokens via `POST /api/owner/tokens/revoke` (`policy.tokensValidAfter`) and delete keys via
-  `/api/owner/api-keys`.
-- **Owner Console API** ([`src/server/security/owner-routes.ts`](../../../src/server/security/owner-routes.ts)):
-  `GET|PUT /api/owner/policy` (PUT needs `version` from GET, 409 if missing/stale; blocklist + tokensValidAfter are kept
-  from the current policy), `POST /api/owner/policy/test`, `GET /api/owner/principals`, `GET|POST|DELETE /api/owner/blocks`
-  (a block matching an OWNERS principal → 400), `POST /api/owner/tokens/revoke`, `GET|POST /api/owner/api-keys` +
-  `DELETE /api/owner/api-keys/:id`, `DELETE /api/owner/sessions/:id` (409 while a turn runs; audited `session.delete`),
-  `GET /api/owner/audit` + `/audit/verify`. Writes → 409 on a PASSIVE standby. **Who:** `requireOwner` routes
-  (`/api/owner/*`, `PUT /api/config`, `PUT /api/mcps`, skills mutations) never accept the internal token (the agent
-  subprocess carries an owner-signed one) — owner = interactive login or uncapped owner API key; console **writes**
-  (policy PUT, blocks, revoke, key create/delete, session delete) = interactive login only. `passive`/`SHRAGA_PASSIVE` boots HTTP-only (no schedulers/consumers/
-  writers) for standby twins.
+  keys use the `uck_` prefix. Who may do what after authentication → Security model.
+- `passive`/`SHRAGA_PASSIVE` boots HTTP-only (no schedulers/consumers/writers) for standby twins.
+
+## Security model
+
+Code: [`src/server/security/`](../../../src/server/security/). State: `DATA_DIR/security/`
+(`policy.json`, `.migrated`, `blocks.json`) and `DATA_DIR/audit/YYYY-MM.jsonl` (append-only, hash-chained).
+Example policy: [`defaults/security/policy.example.json`](../../../defaults/security/policy.example.json).
+
+### Resolution: principal → role → profile
+- **One path.** `resolvePrincipal` (`runtime.ts`) decides for turn start, the guard, the per-call tool gate,
+  Slack ingestion and taint — never resolve a role any other way.
+- **Principal** = who is calling, per channel: `user` (login), `apikey`, `internal` (agent subprocess or a
+  lane acting for a user), `slack`, `email` (add-on inbound mail, `verified` = DKIM+DMARC), `anonymous`.
+- **Owner** comes only from the `OWNERS` env — never the file (the validator refuses an owner binding or
+  default). Owner applies to an interactive login, a lane acting for that login, or an **uncapped** API key
+  of an owner. A Slack sender or email carrying an owner address is not owner.
+- **Bindings are first-match** in file order, on `kind` / `id` / `emailIn` / `domain` / `verified`; no match ⇒
+  `default`. Slack senders and lanes with an email also match as that email's login would.
+- **API keys** act for their creator, re-resolved per request. A key `role` caps it: never above the creator,
+  never owner. `expiresAt` retires it. Only an interactive login can mint a key.
+- **No-human principals:** built-in/module schedules and the legacy raw `INTERNAL_API_TOKEN` → `operator`.
+  Wake, retries and user schedules re-resolve as their creator NOW (a downgraded creator runs downgraded).
+- **Profile** = `tools` (availability; `Bash`/`Grep` only with `*`), `mcps`, `env` allowlist (server secrets
+  are stripped even for `*`), `outbound`, `readScope`, `rate`.
+- **The file:** missing ⇒ generated once (legacy `whitelist.json` → operator binding, then
+  `ShragaOptions.security.migrate`); invalid, or deleted after generation ⇒ fail closed (owners only). Only
+  content the server wrote is hot-reloaded; any other edit is ignored, audited `policy.tamper`, owners alerted.
+  Change it through the Owner Console.
+
+### Session taint floor
+A session's effective role is the lowest-ranked role that ever contributed to it. The gate re-reads it on
+every tool call, so a lower-rank message mid-turn restricts the running turn. It only lowers; forks inherit
+it. Slack context/thread history only ingests authors ranked ≥ the invoker.
+
+### Escalation
+`escalate` exists only in profiles that list it (`reply-only`). It notifies owners with principal, channel,
+session link and excerpt — per-principal cooldown with digest batching, plus a global cap. The owner opens
+the link and continues as themselves; the escalated session never upgrades.
+
+### Guard
+Before any LLM spend: blocklist (policy + auto-blocks) → rate buckets (per principal from the profile `rate`,
+per IP, per channel) → concurrent-turn ceiling for rank < 50. Repeated hits auto-block (TTL, persisted to
+`blocks.json`); owner/operator ranks are never auto-blocked or denied by IP state. `TRUSTED_PROXIES` =
+IPs/CIDRs whose `X-Forwarded-For` is trusted; without it a same-host proxy's traffic is loopback and IP
+limits/blocks don't apply — set `127.0.0.1,::1` when that proxy is the only ingress.
+
+### Revocation
+- `POST /api/owner/tokens/revoke` (`principalId` `user:<email|uid>` or `internal:<uid>`) invalidates every
+  login, MCP OAuth token/code and scoped internal token issued before now.
+- API keys: delete the key. Legacy shared `INTERNAL_API_TOKEN`: rotate the env var.
+- Removing a binding or an `OWNERS` entry applies on the next request (roles are never baked into tokens).
+
+### Owner Console
+Owner-only UI (sidebar) over [`owner-routes.ts`](../../../src/server/security/owner-routes.ts):
+- `GET|PUT /api/owner/policy` (PUT needs `version` from GET; 409 if missing/stale), `POST /api/owner/policy/test`
+- `GET /api/owner/principals`, `GET|POST|DELETE /api/owner/blocks` (blocking an owner → 400)
+- `POST /api/owner/tokens/revoke`, `GET|POST /api/owner/api-keys`, `DELETE /api/owner/api-keys/:id`
+- `DELETE /api/owner/sessions/:id` (409 while a turn runs), `GET /api/owner/audit`, `/audit/verify`
+
+**Who:** reads = interactive login or uncapped owner API key. **Writes** (policy, blocks, revoke, keys,
+session delete) = interactive login only. The agent's internal token is always refused here and on
+`PUT /api/config`, `PUT /api/mcps` and skill mutations. Any write on a passive standby → 409.
+
+### Tamper protection
+- **Guaranteed, every profile, flag on or off:** agent file tools (Write/Edit/MultiEdit/NotebookEdit) can't
+  write server-owned data — `audit/`, `conversations/`, `sessions/`, `sessions.json`, `security/`,
+  `api-keys.json(.bak)`, `oauth-clients.json`, `mcps/`, server secret files, data-sync's `.git/` and
+  `.gitignore` (`PROTECTED_DATA_WRITE`, realpath-resolved).
+- **Guaranteed for restricted profiles:** no secret-file reads (no Bash/Grep, path-checked file tools, no
+  `/proc`/`/sys`, Glob inside the workspace).
+- **Best-effort for full profiles (owner/operator):** they have Bash, which can read secrets and write data.
+  The audit log's backstop is the OS: as root on Linux run `src/scripts/harden-audit.sh <DATA_DIR>` hourly
+  from cron (`chattr +a`; new month files need the next run). A planted month entry (symlink/dir) is
+  detected, not prevented: appends to it are refused, `verify` reports it, owners are alerted, the script
+  exits non-zero. No app route deletes audit; retention is a root op.
+- **data-sync:** `audit/` is committed on every sync (commit body carries `audit-head`); a pull whose remote
+  commits change `audit/` is refused. `security/` is NOT synced — the active instance's Console is its single
+  writer. One data repo on two hosts is unsupported.
+
+### `SECURITY_ENFORCE`
+- **Unset = shadow:** everything resolves and is audited (`turn.start` carries `wouldDeny`; guard events
+  carry `enforced:false`); nothing is denied.
+- **`true`/`1` = enforce:** the guard denies, the engine applies the profile, taint and `escalate` are live,
+  and a turn is refused when resolution fails or the effective profile has `outbound:false`. Unset to roll back.
+
+**Pre-flip checklist:**
+1. Shadow audit (Console → Audit) shows no unexpected `wouldDeny` for internal lanes (wake, retries), schedules,
+   owners/operators on Slack, and API keys (incl. the webhook lane).
+2. Bindings exist for every API-key creator, Slack sender and Gmail/email sender that must keep working — the
+   default `anonymous` (profile `none`, rate `0`) refuses them. Check each with the Bindings test box.
+3. `role.resolve` events show `policyValid: true` on every instance (false = owners only).
+4. Legacy sessions have no floor: sessions touched by lower-rank input before the flip start at their next
+   caller's rank.
+5. Engines other than claude-code don't enforce profiles and refuse restricted turns — only unrestricted roles
+   can use them.
+6. `TRUSTED_PROXIES` is set if a same-host proxy fronts the server.
 
 ## Deploy model (generic pattern)
 
