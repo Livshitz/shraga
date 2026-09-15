@@ -30,6 +30,8 @@ const _origGetKey = (JwtHelper as any)['getGooglePublicKey'].bind(JwtHelper);
 import { dataPath } from './paths.ts';
 import { validateApiKey } from './api-keys.ts';
 import { isOwnerEmail } from './owners.ts';
+import { fromApiKey, fromAuthUser, fromInternal, type Principal } from './security/principal.ts';
+import { security } from './security/runtime.ts';
 
 /** Server secret for signing scoped internal tokens — stable per startup. */
 const INTERNAL_SECRET = process.env.INTERNAL_API_TOKEN || randomBytes(32).toString('hex');
@@ -132,7 +134,13 @@ export interface AuthUser {
   email: string;
   /** Owners can see all sessions/schedules across users (view-only bypass — mutations still restricted to owner of record). */
   isOwner: boolean;
+  /** Who is calling, per auth branch (login → user, api key → apikey, internal token → internal). */
+  principal: Principal;
 }
+
+const authUser = (uid: string, email: string, principal: Principal): AuthUser => ({ uid, email, isOwner: isOwnerEmail(email), principal });
+const internalUser = (t: { uid: string; email: string }) => authUser(t.uid, t.email, fromInternal(t));
+const apiKeyUser = (k: { id: string; uid: string; email: string }) => authUser(k.uid, k.email, fromApiKey(k));
 
 export async function verifyToken(token: string): Promise<AuthUser> {
   const projectId = JSON.parse(process.env.FIREBASE_CONFIG_PROD ?? process.env.VITE_FIREBASE_CONFIG_PROD ?? '{}').projectId;
@@ -149,7 +157,8 @@ export async function verifyToken(token: string): Promise<AuthUser> {
   if (whitelist.length > 0 && !whitelist.includes(payload.email)) {
     throw new Error('User not in whitelist');
   }
-  return { uid: payload.user_id || payload.sub, email: payload.email, isOwner: isOwnerEmail(payload.email) };
+  const uid = payload.user_id || payload.sub;
+  return authUser(uid, payload.email, fromAuthUser({ uid, email: payload.email }));
 }
 
 // ── Pluggable auth provider ──────────────────────────────────────────────────
@@ -212,7 +221,7 @@ function verifyLocalToken(token: string): AuthUser {
   const sep = payload.lastIndexOf(':');
   const email = payload.slice(0, sep);
   if (Math.floor(Date.now() / 1000) > Number(payload.slice(sep + 1))) throw new Error('Token expired — sign in again');
-  return { uid: email, email, isOwner: isOwnerEmail(email) };
+  return authUser(email, email, fromAuthUser({ uid: email, email }));
 }
 
 /** Dispatch bearer verification to the active provider. */
@@ -227,10 +236,10 @@ export async function authenticateToken(token: string | undefined | null): Promi
   if (!token) return null;
   if (token.startsWith('uck_')) {
     const identity = validateApiKey(token);
-    return identity ? { uid: identity.uid, email: identity.email, isOwner: isOwnerEmail(identity.email) } : null;
+    return identity ? apiKeyUser(identity) : null;
   }
   const internal = verifyInternalToken(token);
-  if (internal) return { uid: internal.uid, email: internal.email, isOwner: isOwnerEmail(internal.email) };
+  if (internal) return internalUser(internal);
   try { return await verifyBearer(token); } catch { return null; }
 }
 
@@ -239,26 +248,41 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   if (internalToken) {
     const identity = verifyInternalToken(internalToken);
     if (identity) {
-      (req as any).user = { uid: identity.uid, email: identity.email, isOwner: isOwnerEmail(identity.email) } as AuthUser;
+      const user = internalUser(identity);
+      (req as any).user = user;
+      security()?.authAllow(user.principal, 'http:internal');
       return next();
     }
   }
 
   const token = req.headers.authorization?.replace('Bearer ', '') || (req.query.token as string);
-  if (!token) return void res.status(401).json({ error: 'Missing token' });
+  if (!token) {
+    security()?.authDeny('http', 'missing-token', req.ip);
+    return void res.status(401).json({ error: 'Missing token' });
+  }
 
   // API key auth (uck_…)
   if (token.startsWith('uck_')) {
     const identity = validateApiKey(token);
-    if (!identity) return void res.status(401).json({ error: 'Invalid API key' });
-    (req as any).user = { uid: identity.uid, email: identity.email, isOwner: isOwnerEmail(identity.email) } as AuthUser;
+    if (!identity) {
+      security()?.authDeny('http:apikey', 'invalid-api-key', req.ip);
+      return void res.status(401).json({ error: 'Invalid API key' });
+    }
+    const user = apiKeyUser(identity);
+    (req as any).user = user;
+    security()?.authAllow(user.principal, 'http:apikey');
     return next();
   }
 
+  let user: AuthUser;
   try {
-    (req as any).user = await verifyBearer(token);
-    next();
+    user = await verifyBearer(token);
   } catch (err: any) {
-    return void res.status(err?.message?.includes('whitelist') ? 403 : 401).json({ error: err.message });
+    const whitelisted = err?.message?.includes('whitelist');
+    security()?.authDeny('http:bearer', whitelisted ? 'not-whitelisted' : 'invalid-bearer', req.ip);
+    return void res.status(whitelisted ? 403 : 401).json({ error: err.message });
   }
+  (req as any).user = user;
+  security()?.authAllow(user.principal, 'http:bearer');
+  next();
 }

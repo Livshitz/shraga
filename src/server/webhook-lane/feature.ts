@@ -46,6 +46,7 @@ import {
   type ConvBlock,
 } from '../sessions.ts';
 import { validateApiKey } from '../api-keys.ts';
+import { fromApiKey, type Principal } from '../security/principal.ts';
 import { WebhookStreamer, type WebhookTarget } from './streamer.ts';
 
 /** One receiver connection, as learned from a turn. Handed to `onTurnAccepted` so an add-on can
@@ -107,9 +108,11 @@ export async function runWebhookTurn(args: {
   callback: WebhookTarget; convId: string; msgId: string; sessionId: string; prompt: string;
   uid: string; userEmail: string; sendSegments: boolean;
   channel: string; source: string;
+  /** Who the turn runs for — the API key holder for the built-in ingress. */
+  principal: Principal;
   streamer?: WebhookLaneOptions['streamer'];
 }): Promise<void> {
-  const { callback, convId, msgId, sessionId, prompt, uid, userEmail, sendSegments, channel, source } = args;
+  const { callback, convId, msgId, sessionId, prompt, uid, userEmail, sendSegments, channel, source, principal } = args;
   const streamer = new WebhookStreamer({ callback, convId, msgId, sendSegments, ...(args.streamer ?? {}) });
   const abortController = new AbortController();
 
@@ -130,7 +133,7 @@ export async function runWebhookTurn(args: {
   let text = '';
   try {
     for await (const ev of streamChat({
-      prompt, sessionId, uid, userEmail,
+      principal, prompt, sessionId, uid, userEmail,
       mcpServers: getMcpConfig(uid),
       abortController,
       context: { source, user: userEmail },
@@ -215,7 +218,7 @@ export function createWebhookLaneFeature(opts: WebhookLaneOptions): ServerFeatur
         res.json({ status: 'accepted', sessionId: sessionId || convId });
         void runWebhookTurn({
           callback: cb, convId, msgId, sessionId: sessionId || convId, prompt,
-          uid: caller.uid, userEmail: caller.email,
+          uid: caller.uid, userEmail: caller.email, principal: fromApiKey(caller),
           sendSegments: Array.isArray(accepts) && accepts.includes('segments'),
           channel, source, streamer: opts.streamer,
         });

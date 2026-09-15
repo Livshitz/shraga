@@ -21,6 +21,7 @@ import {
 import { pipeAgentReply, type AgentEvent, type IngressMessage } from 'mcp-slack-use/src/ingress.ts';
 import { makeSlackQuestionHandler } from './questions.ts';
 import * as contacts from '../contacts.ts';
+import { fromInternal, fromSlack } from '../security/principal.ts';
 import { getChannelContext, invalidateChannelContext } from './context-cache.ts';
 import { noteSlackSeen } from '../downtime.ts';
 import { getOrCreateSession, registerThreadAlias, setLastMessageTs, setUseUserToken, findSlackSessionBySessionId, getProactiveOrigin, hasSessionForThread, isSlackBotPlaceholderEmail } from './sessions.ts';
@@ -300,6 +301,8 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
   try {
     yield* pumpStream(
       streamChat({
+        // The real human sender; a message with no Slack user falls back to the bot identity, marked internal.
+        principal: msg.user ? fromSlack(msg.user, { email: contact?.emails[0] }) : fromInternal({ uid: SLACK_UID, lane: 'slack' }),
         prompt: resolvedText,
         attachments: attachments.length ? attachments : undefined,
         sessionId,
@@ -360,6 +363,8 @@ export async function retrySlackSession(session: SessionMeta, prompt: string): P
       { channel, threadTs, useUserToken, transform: undefined, finalTransform: resolveUserMentions },
       pumpStream(
         streamChat({
+          // Recovery has no live human (the Slack sender id isn't persisted): the session's owner, marked internal.
+          principal: fromInternal({ uid: session.uid || SLACK_UID, email: isSlackBotPlaceholderEmail(session.userEmail) ? undefined : session.userEmail, lane: 'slack-retry' }),
           prompt,
           sessionId: session.sessionId,
           uid: SLACK_UID,

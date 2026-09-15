@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { dirname, resolve, isAbsolute } from 'node:path';
 import { DATA_DIR } from '../paths.ts';
 import { streamChat, type PermissionHandler } from '../claude.ts';
+import { fromInternal } from '../security/principal.ts';
 import { getMcpConfig } from '../mcp.ts';
 import { appendMessage, createScheduledSession, updateScheduledSessionStatus, setRunStatus, registerLivePartial, unregisterLivePartial, writePartial, clearPartial, acquireSessionLock, releaseSessionLock, type ConvBlock } from '../sessions.ts';
 import type { Schedule, ScheduleRunSummary } from './types.ts';
@@ -303,6 +304,8 @@ export async function runSchedule(
       toolUses.clear();
       try {
         for await (const ev of streamChat({
+          // No human at run time: the creator's identity, marked internal (re-resolved per run).
+          principal: fromInternal({ uid: schedule.createdBy.uid, email: schedule.createdBy.email, lane: 'scheduler' }),
           prompt,
           sessionId,
           uid: schedule.createdBy.uid,

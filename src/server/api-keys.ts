@@ -48,15 +48,18 @@ export function deleteApiKey(id: string, callerUid: string, isOwner: boolean): '
   return 'ok';
 }
 
-export function listApiKeys() {
-  return load().map(({ key, ...rest }) => ({ ...rest, keyPreview: `${key.slice(0, 8)}…` }));
+/** Keys visible to the caller: an owner sees every key, anyone else only their own. */
+export function listApiKeys(caller: { uid: string; isOwner: boolean }) {
+  return load()
+    .filter(k => caller.isOwner || k.uid === caller.uid)
+    .map(({ key, ...rest }) => ({ ...rest, keyPreview: `${key.slice(0, 8)}…` }));
 }
 
-export function validateApiKey(key: string): { uid: string; email: string } | null {
+export function validateApiKey(key: string): { id: string; uid: string; email: string } | null {
   const keys = load();
   for (const k of keys) {
     if (k.key.length === key.length && timingSafeEqual(Buffer.from(k.key), Buffer.from(key))) {
-      return { uid: k.uid, email: k.email };
+      return { id: k.id, uid: k.uid, email: k.email };
     }
   }
   return null;
