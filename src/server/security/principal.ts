@@ -59,3 +59,22 @@ export function fromInternal(t: { uid: string; email?: string | null; lane?: str
 export function anonymous(attrs: Record<string, unknown> = {}): Principal {
   return { id: 'anonymous', kind: 'anonymous', verified: false, attrs };
 }
+
+// ── No-human lanes ─────────────────────────────────────────────────────────────
+// A system lane runs for the deployment itself, not for a person: built-in schedules (scheduler/builtins.ts),
+// module schedules (modules/service.ts) and the legacy raw INTERNAL_API_TOKEN caller. They resolve to `operator`
+// (policy.ts). BOTH the uid shape AND the lane's fixed identity email must match: a uid alone is not enough, since
+// a login/signup could pick an id that looks like `module:x` — but it can't also carry the lane's email as its uid
+// (local uid = the email itself; Firebase uids are opaque).
+export const SYSTEM_UID = '__system__';
+const SYSTEM_LANES: { uid: (uid: string) => boolean; email: string }[] = [
+  { uid: (u) => u === SYSTEM_UID, email: 'system@shraga.local' },
+  { uid: (u) => u.startsWith('module:') && u.length > 'module:'.length, email: 'module@shraga.local' },
+  { uid: (u) => u === 'agent-internal', email: 'agent@internal' },
+];
+
+export function isSystemPrincipal(p: Principal): boolean {
+  if (p.kind !== 'internal') return false;
+  const uid = String(p.attrs.uid ?? '');
+  return SYSTEM_LANES.some((l) => l.uid(uid) && p.email === l.email);
+}

@@ -62,10 +62,11 @@ describe('API-key principal role = creator role capped by the key role', () => {
 });
 
 describe('SecurityRuntime.decide', () => {
-  test('owner resolves to owner/full (no wouldDeny); an internal principal falls to the default role (wouldDeny)', () => {
+  test('owner resolves to owner/full (no wouldDeny); an internal run for the owner re-resolves as the owner; a no-email internal falls to default', () => {
     const rt = tmpRuntime();
     expect(rt.decide(fromAuthUser({ uid: 'o', email: OWNER }))).toEqual({ role: 'owner', rank: 100, profile: 'full', wouldDeny: false });
-    expect(rt.decide(fromInternal({ uid: 'o', email: OWNER, lane: 'wake' }))).toEqual({ role: 'anonymous', rank: 0, profile: 'none', wouldDeny: true });
+    expect(rt.decide(fromInternal({ uid: 'o', email: OWNER, lane: 'wake' }))).toEqual({ role: 'owner', rank: 100, profile: 'full', wouldDeny: false });
+    expect(rt.decide(fromInternal({ uid: 'slack-bot', lane: 'slack' }))).toEqual({ role: 'anonymous', rank: 0, profile: 'none', wouldDeny: true });
   });
 
   test('role.resolve is deduped per principal+role per window, and re-audited after it', () => {
@@ -156,8 +157,9 @@ describe('streamChat shadow audit (real consumer surface)', () => {
     const end = (sid: string) => recs.find(r => r.type === 'turn.end' && r.sessionId === sid)!;
     expect(start(sidOwner)).toMatchObject({ principal: `user:${OWNER}`, role: 'owner', meta: { profile: 'full', wouldDeny: false } });
     expect(end(sidOwner)).toMatchObject({ role: 'owner', reason: 'done' });
-    expect(start(sidSched)).toMatchObject({ principal: 'internal:u', role: 'anonymous', meta: { lane: 'scheduler', profile: 'none', wouldDeny: true } });
-    expect(end(sidSched)).toMatchObject({ role: 'anonymous', reason: 'done' });
+    expect(start(sidSched)).toMatchObject({ principal: 'internal:u', role: 'owner', meta: { lane: 'scheduler', profile: 'full', wouldDeny: false } });
+    expect(start(sidSched).meta).not.toHaveProperty('enforced'); // shadow: nothing enforcement-specific
+    expect(end(sidSched)).toMatchObject({ role: 'owner', reason: 'done' });
     expect(rt.audit.verify().ok).toBe(true);
   });
 });

@@ -8,7 +8,9 @@ import type { Schedule } from './types.ts';
 // which it is NOT for an npm-consumer app.
 const SUMMARIZER_CMD = `bun run ${fileURLToPath(new URL('../../scripts/summarize-conversations.ts', import.meta.url))}`;
 
-export const SYSTEM_UID = '__system__';
+// Single definition lives with the security principal (a system lane resolves to operator there).
+import { SYSTEM_UID } from '../security/principal.ts';
+export { SYSTEM_UID };
 export const NIGHTLY_RECONCILE_SCHEDULE_ID = 'builtin-nightly-reconcile';
 export const DAILY_GARDEN_SCHEDULE_ID = 'builtin-daily-garden';
 export const HOURLY_SUMMARIZER_SCHEDULE_ID = 'builtin-conversation-summarizer';
