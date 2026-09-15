@@ -52,6 +52,10 @@ exports[`flag OFF: spawn config is today's matches the pre-enforcement snapshot 
         "hooks": 1,
         "matcher": "mcp__mcp-firebase-(?:prod|lab)__get_db.*",
       },
+      {
+        "hooks": 1,
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+      },
     ],
   },
   "includePartialMessages": true,

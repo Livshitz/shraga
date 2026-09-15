@@ -41,6 +41,18 @@ they are load-bearing, read them before you build. Start with [`AGENTS.md`](../.
    hood; configure with `PORT` / `DATA_DIR` / `AUTH_PROVIDER` / `.env`. Seed a local user with
    `shraga user add <email> <password>`. This is the standard self-host.
    - `SECURITY_ENFORCE=true` (or `1`) — the ONE switch for both the guard (blocklist, rate limits, auto-block, turn ceiling) and per-role profile enforcement (tools/MCP/env, per-call gate, taint, `escalate`); unset = shadow (audit only, nothing denies).
+   - **Tamper protection (always on, flag or not):** agent file tools (Write/Edit/MultiEdit/NotebookEdit) can't write
+     server-owned data under `DATA_DIR` — `audit/`, `conversations/`, `sessions/`, `sessions.json`, `security/`,
+     `api-keys.json(.bak)`, `oauth-clients.json`, `mcps/`, server secret files (`PROTECTED_DATA_WRITE` in
+     `security/enforce.ts`, realpath-resolved); the server writes them directly. Bash in `full` profiles is not covered,
+     so the audit log's guarantee is OS-level: as root on Linux run `src/scripts/harden-audit.sh <DATA_DIR>` hourly from
+     cron (`chattr +a` on `audit/` and its month files — append yes, truncate/delete/rename no; new month files don't
+     inherit `+a`, hence the cron). No app route deletes audit; retention is a root op.
+   - **data-sync and security state:** `audit/` is committed on every sync (offsite copy; commit body carries
+     `audit-head: <hash>` so a local chain rewrite shows against git history), never stashed, and a pull whose remote
+     commits change `audit/` is refused + owners alerted. `security/` (policy.json, .migrated, blocks.json) is NOT synced:
+     the active instance's Owner Console is its single writer (blue-green shares one `DATA_DIR`). Hosting the same data
+     repo on two hosts is unsupported — the untrack commit removes `security/policy.json` from other clones.
    - `TRUSTED_PROXIES` — IPs/CIDRs whose `X-Forwarded-For` is trusted; without it same-host proxy traffic arrives from loopback and IP-based limits/blocks don't apply — set `127.0.0.1,::1` when that proxy is the only ingress.
 2. **Library embed** — `import { createShraga } from 'shraga'`, register against the seams, own the
    lifecycle (`start()` → `ServerHandle`, `stop()` to shut down without exiting the process). See

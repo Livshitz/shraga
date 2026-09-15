@@ -7,6 +7,7 @@
  */
 import type { HookCallback, HookCallbackMatcher, HookEvent, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { rewriteSlackMentions } from './slack/mention-rewrite.ts';
+import { PROTECTED_DATA_MESSAGE, writesProtectedData } from './security/enforce.ts';
 
 /** Patterns that indicate a long-running script the model should background. */
 const LONG_RUNNING_PATTERNS = [
@@ -134,6 +135,23 @@ const guardFirebaseReads: HookCallback = async (input) => {
   };
 };
 
+/** Tamper protection: no agent file tool writes server-owned data (audit, conversations, sessions, security, keys,
+ *  MCP config) — any profile, SECURITY_ENFORCE on or off. A hook, not canUseTool: the SDK auto-approves allowed/
+ *  accept-edits tools without calling canUseTool. See security/enforce.ts PROTECTED_DATA_WRITE. */
+const denyProtectedDataWrites: HookCallback = async (input) => {
+  if (input.hook_event_name !== 'PreToolUse') return {};
+  const { tool_name, tool_input, cwd } = input as PreToolUseHookInput;
+  if (!writesProtectedData(tool_name, (tool_input ?? {}) as Record<string, unknown>, cwd || undefined)) return {};
+  console.log(`[hooks] Denied ${tool_name} on protected data path`);
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse' as const,
+      permissionDecision: 'deny' as const,
+      permissionDecisionReason: PROTECTED_DATA_MESSAGE,
+    },
+  };
+};
+
 /** Build the hooks map to pass into SDK query() options.
  *  `exemptBashCommand` is the one command the turn was explicitly told to run in the foreground
  *  (a `bash` schedule's command) — see forceBackgroundForScripts. */
@@ -143,6 +161,7 @@ export function buildHooks(opts?: { exemptBashCommand?: string }): Partial<Recor
       { matcher: 'Bash', hooks: [forceBackgroundForScripts(opts?.exemptBashCommand)] },
       { matcher: 'mcp__mcp-slack-use__post_slack_.*', hooks: [resolveSlackMentions] },
       { matcher: 'mcp__mcp-firebase-(?:prod|lab)__get_db.*', hooks: [guardFirebaseReads] },
+      { matcher: 'Write|Edit|MultiEdit|NotebookEdit', hooks: [denyProtectedDataWrites] },
     ],
   };
 }

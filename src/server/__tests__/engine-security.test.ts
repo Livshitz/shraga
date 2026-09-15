@@ -1,6 +1,8 @@
 // The spawn config the REAL ClaudeCodeEngine hands the SDK, with only `query` stubbed (snapshot + delegate:
 // mock.module is process-global). Flag OFF must be byte-for-byte today's config — the snapshot below was recorded
 // against the engine BEFORE enforcement existed (07182f7) and must never need updating for an enforcement change.
+// One deliberate, flag-INDEPENDENT baseline change since: the tamper-protection PreToolUse hook
+// (`Write|Edit|MultiEdit|NotebookEdit` → deny writes to server-owned data; normal workspace writes unchanged).
 import { afterAll, beforeAll, describe, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -132,7 +134,7 @@ describe('flag ON: the engine applies the effective profile', () => {
     expect(o.env.INTERNAL_API_TOKEN).not.toBe(process.env.INTERNAL_API_TOKEN);
     expect(o.env.INTERNAL_API_TOKEN).toMatch(/^[0-9a-f]{64}\.\d+:u-sec:sec@x\.test$/); // scoped to the turn's uid/email (+ issued-at, for tokensValidAfter), never the raw secret
     expect(o.hooks.PreToolUse[0].matcher).toBeUndefined();
-    expect(o.hooks.PreToolUse.slice(1).map((m: any) => m.matcher)).toEqual(['Bash', 'mcp__mcp-slack-use__post_slack_.*', 'mcp__mcp-firebase-(?:prod|lab)__get_db.*']);
+    expect(o.hooks.PreToolUse.slice(1).map((m: any) => m.matcher)).toEqual(['Bash', 'mcp__mcp-slack-use__post_slack_.*', 'mcp__mcp-firebase-(?:prod|lab)__get_db.*', 'Write|Edit|MultiEdit|NotebookEdit']);
     expect(await deny(o, 'Bash', { command: 'ls' })).toBe('allow');
   });
 
