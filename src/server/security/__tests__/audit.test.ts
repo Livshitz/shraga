@@ -1,8 +1,8 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, appendFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { Audit, GENESIS_HASH, type AuditRecord } from '../audit.ts';
+import { Audit, GENESIS_HASH, canonical, type AuditRecord } from '../audit.ts';
 import { Policy, defaultPolicy, type PolicyOptions } from '../policy.ts';
 
 const errors: string[] = [];
@@ -11,7 +11,7 @@ let dir: string;
 let now: number;
 
 beforeEach(() => { dir = mkdtempSync(path.join(tmpdir(), 'audit-test-')); now = Date.parse('2026-01-31T23:59:00Z'); errors.length = 0; });
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
+afterEach(() => { try { chmodSync(path.join(dir, 'audit'), 0o700); } catch {} rmSync(dir, { recursive: true, force: true }); });
 
 const mk = () => new Audit({ dir: path.join(dir, 'audit'), clock: () => now, log: quiet });
 const lines = (f: string) => readFileSync(path.join(dir, 'audit', f), 'utf8').trim().split('\n').map(l => JSON.parse(l) as AuditRecord);
@@ -35,10 +35,10 @@ describe('Audit chain', () => {
   test('continues across a restart (new instance), incl. tails longer than one read chunk', () => {
     const a = mk();
     for (let i = 0; i < 400; i++) a.append({ type: 'tool.allow', target: `Read-${i}`, meta: { pad: 'x'.repeat(200) } });
-    const b = mk();
-    expect(b.head).toBe(a.head);
+    const head = a.head, b = mk();
+    expect(b.head).toBe(head);
     const rec = b.append({ type: 'tool.deny', target: 'Bash' })!;
-    expect(rec.prevHash).toBe(a.head);
+    expect(rec.prevHash).toBe(head);
     expect(b.verify()).toEqual({ ok: true, lines: 401 });
   });
 
@@ -126,6 +126,79 @@ describe('Audit query', () => {
     expect(seen).toEqual(['t8', 't7', 't5', 't4', 't2', 't1']);
     expect(pages).toBe(2);
     expect(() => a.query({ limit: 1, cursor: 'garbage' })).toThrow('invalid audit cursor');
+  });
+});
+
+describe('Audit hardening (regressions)', () => {
+  const F = () => path.join(dir, 'audit', '2026-01.jsonl');
+
+  test('crash-partial last line is sealed; new records link to the last GOOD hash', () => {
+    const a = mk(); a.append({ type: 'auth.allow' }); const good = a.append({ type: 'auth.allow' })!;
+    appendFileSync(F(), '{"ts":"2026-01-10T00:00:00.000Z","type":"au'); // crash mid-write
+    const b = mk();
+    expect(b.head).toBe(good.hash);
+    const r = b.append({ type: 'turn.start', target: 'after-crash' })!;
+    const raw = readFileSync(F(), 'utf8').trim().split('\n');
+    expect(raw.length).toBe(4);
+    expect(JSON.parse(raw[3]).prevHash).toBe(good.hash);
+    const c = mk();
+    expect(c.head).toBe(r.hash);
+    expect(c.verify()).toEqual({ ok: false, lines: 3, brokenAt: { file: '2026-01.jsonl', line: 3, reason: 'unparseable' } }); // break stays reported
+    expect(c.append({ type: 'turn.end' })!.prevHash).toBe(r.hash);
+    now = Date.parse('2026-02-01T00:00:01Z'); c.append({ type: 'turn.end' });
+    expect(c.verify('2026-02.jsonl')).toEqual({ ok: true, lines: 1 }); // chain after the break verifies
+  });
+
+  test('redacts credential values in every string and secret-named keys/tuples', () => {
+    const rec = mk().append({ type: 'tool.allow', reason: 'Bearer abcdefSECRET1', target: 'https://x.io/cb?token=SECRET2&page=2', principal: 'xoxp-SECRET9',
+      meta: { keyId: 'k1', headers: [['Authorization', 'SECRET3raw'], ['Content-Type', 'json']], apiKeys: ['SECRET4'], private_key_pem: 'SECRET5',
+        text: 'user prompt body SECRET6', jwt: 'eyJhbGciOi.SECRET7', list: ['ok', 'sk-SECRET10abcdef', '-----BEGIN RSA PRIVATE KEY-----SECRET11'],
+        Credentials: 'SECRET12', message: 'SECRET13', input: 'SECRET14', output: 'SECRET15', session_key: 'SECRET16' } })!;
+    const line = readFileSync(F(), 'utf8');
+    for (let i = 1; i <= 16; i++) if (i !== 8) expect(line).not.toContain(`SECRET${i}`);
+    expect(rec.target).toBe('https://x.io/cb?token=[redacted]&page=2');
+    expect(rec.meta).toEqual({ keyId: 'k1', headers: [['Authorization', '[redacted]'], ['Content-Type', 'json']], jwt: '[redacted]', list: ['ok', '[redacted]', '[redacted]'] });
+    expect(mk().verify().ok).toBe(true);
+  });
+
+  test('two instances on one dir append to one chain', () => {
+    const a = mk(), b = mk();
+    a.append({ type: 'auth.allow' }); b.append({ type: 'auth.deny' }); a.append({ type: 'auth.allow' });
+    expect(b.head).toBe(a.head);
+    expect(mk().verify()).toEqual({ ok: true, lines: 3 });
+  });
+
+  test('unreadable dir: appends fail (no genesis fork), verify reports unreadable, heals once readable', () => {
+    const d = path.join(dir, 'audit');
+    mk().append({ type: 'auth.allow' });
+    for (const mode of [0o000, 0o300]) { // no access; write-only
+      chmodSync(d, mode); errors.length = 0;
+      const b = mk();
+      expect(b.healthy).toBe(false);
+      expect(b.append({ type: 'auth.deny' })).toBeNull();
+      expect(b.failures).toBe(1);
+      expect(errors.some(e => e.includes('cannot read'))).toBe(true);
+      expect(b.verify()).toEqual({ ok: false, lines: 0, brokenAt: { file: '', line: 0, reason: 'unreadable' } });
+      expect(() => b.query({ limit: 1 })).toThrow('EACCES'); // not a silent empty page
+      chmodSync(d, 0o700);
+    }
+    const c = mk(); expect(c.append({ type: 'auth.deny' })).not.toBeNull();
+    expect(c.verify()).toEqual({ ok: true, lines: 2 });
+  });
+
+  test('array holes hash as written (null)', () => {
+    const ids: unknown[] = []; ids[2] = 'x';
+    expect(canonical(ids)).toBe(JSON.stringify(ids));
+    const a = mk(); a.append({ type: 'tool.allow', meta: { ids } });
+    expect(a.verify().ok).toBe(true);
+  });
+
+  test('query finds clock-skewed records in a neighbouring month file', () => {
+    const a = mk();
+    now = Date.parse('2026-03-01T00:00:00Z'); a.append({ type: 'escalate', target: 'mar' });
+    now = Date.parse('2026-02-15T00:00:00Z'); a.append({ type: 'escalate', target: 'skewed' }); // lands in 2026-03.jsonl
+    expect(a.query({ limit: 10, to: '2026-02-28T00:00:00Z' }).items.map(r => r.target)).toEqual(['skewed']);
+    expect(a.query({ limit: 10, from: '2026-02-01T00:00:00Z', to: '2026-02-20T00:00:00Z' }).items.map(r => r.target)).toEqual(['skewed']);
   });
 });
 
