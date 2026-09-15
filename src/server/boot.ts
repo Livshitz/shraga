@@ -53,6 +53,7 @@ import { dataSync } from './data-sync.ts';
 import { mountMcpServer } from './mcp-server.ts';
 import { fromInternal, type Principal } from './security/principal.ts';
 import { initSecurity, security, admitTurn, requestIp } from './security/runtime.ts';
+import type { PolicyOptions } from './security/policy.ts';
 import { writeDenial } from './security/guard.ts';
 import { requireOwner } from './security/owner-only.ts';
 import { flushEscalations } from './security/escalate.ts';
@@ -89,6 +90,8 @@ export interface BootRegistrations {
   engines?: AgentEngine[];
   extensions?: ExtRegisterFn[];
   eventSubs?: Array<{ source: string; handler: (payload: any, evt: any) => void }>;
+  /** ShragaOptions.security — threaded into the process-wide Policy. */
+  security?: { migrate?: PolicyOptions['migrate'] };
 }
 
 export interface ServerHandle {
@@ -135,7 +138,7 @@ function bootDataSync(): void {
 await loadShragaConfig();
 // Process-wide policy + audit (shadow mode: decide + audit, never deny). Audit writes only on the
 // active instance — a PASSIVE standby shares DATA_DIR. `activated` is declared above.
-initSecurity({ isActive: () => !PASSIVE || activated });
+initSecurity({ isActive: () => !PASSIVE || activated, policy: { migrate: __reg.security?.migrate } });
 // Programmatic engines register through the same seam an overlay uses — BEFORE initEngines() so
 // getAvailableEngines() includes them and a directive can resolve to one immediately.
 for (const e of __reg.engines ?? []) registerEngine(e);

@@ -27,6 +27,7 @@ describe('createShraga — public library surface', () => {
   let app: ShragaInstance;
   let port: number;
   let events: unknown[] = [];
+  const seedHook = (d: any) => d;
 
   beforeAll(async () => {
     // Hermetic: the extensions router + event bus are process-globals shared across test files. Reset
@@ -38,7 +39,7 @@ describe('createShraga — public library surface', () => {
     __resetEventBusForTest();
     const { createShraga } = await import('../../index.ts');
     port = await freePort();
-    app = createShraga({ port, authProvider: 'local', passive: true, installSignalHandlers: false });
+    app = createShraga({ port, authProvider: 'local', passive: true, installSignalHandlers: false, security: { migrate: seedHook } });
 
     app.registerFeature({
       name: 'test-lib-feature',
@@ -84,6 +85,11 @@ describe('createShraga — public library surface', () => {
   test('the handle exposes app + emitEvent after start()', () => {
     expect(app.app).toBeDefined();
     expect(typeof app.emitEvent).toBe('function');
+  });
+
+  test('security.migrate reaches the process-wide Policy (passive ⇒ not run; behavior covered in runtime.test.ts)', async () => {
+    const { security } = await import('../security/runtime.ts');
+    expect(security()?.policy.options.migrate).toBe(seedHook);
   });
 
   test('registering after start() throws (registrations must precede boot)', () => {

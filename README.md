@@ -127,6 +127,8 @@ env-driven), applied before boot:
 createShraga({ env: { ANTHROPIC_API_KEY: '…', SHRAGA_FEAT_WORKSPACE: '1' } });
 ```
 
+**Seeding the security policy:** `createShraga({ security: { migrate: (draft) => { draft.bindings.push(…); return draft; } } })` runs once, when `data/security/policy.json` is first generated; the result is validated (invalid ⇒ owners only).
+
 **`ServerHandle`** (returned by `start()`): `{ app, server, port, url, emitEvent, on,
 registerExtension, registerWebhook, stop }`.
 
