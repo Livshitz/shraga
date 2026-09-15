@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, chmodSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Policy, defaultPolicy, validatePolicy, type PolicyFile } from '../policy.ts';
@@ -183,6 +183,33 @@ describe('migration', () => {
     expect(pol.resolve(fromAuthUser({ uid: 'a', email: 'a@x.com' })).role).toBe('anonymous');
     expect(pol.resolve(fromAuthUser({ uid: 'b', email: 'boss@owner.com' })).role).toBe('owner');
     expect(pol.reload()).toBe(true); // no repeated tamper for a state we already failed closed on
+  });
+
+  test('marker write fails ⇒ migrated policy stays active; next boot heals marker; later deletion fails closed', () => {
+    writeFileSync(path.join(dir, 'whitelist.json'), JSON.stringify(['a@x.com']));
+    const sec = path.join(dir, 'security'), marker = path.join(sec, '.migrated');
+    mkdirSync(sec);
+    symlinkSync(path.join(dir, 'no-such-dir', 'target'), marker); // dangling: existsSync false, write ENOENT
+    const errors: string[] = [];
+    const boot1 = mk({ log: { ...quiet, error: (m: string) => errors.push(m) } });
+    expect(errors.join()).toMatch(/marker write failed/);
+    expect(boot1.valid).toBe(true);
+    expect(boot1.resolve(fromAuthUser({ uid: 'a', email: 'a@x.com' })).role).toBe('operator');
+    expect(existsSync(boot1.options.path)).toBe(true);
+    expect(existsSync(marker)).toBe(false);
+
+    unlinkSync(marker); // repairable: the blocker is gone
+    const boot2 = mk();
+    expect(boot2.valid).toBe(true);
+    expect(existsSync(marker)).toBe(true);
+
+    unlinkSync(boot2.options.path);
+    const tampers: any[] = [];
+    const boot3 = mk({ onTamper: (t) => tampers.push(t) });
+    expect(boot3.valid).toBe(false);
+    expect(existsSync(boot3.options.path)).toBe(false);
+    expect(tampers.map(t => t.reason)).toEqual(['deleted']);
+    expect(boot3.resolve(fromAuthUser({ uid: 'a', email: 'a@x.com' })).role).toBe('anonymous');
   });
 
   const onlyOwners = (pol: Policy) => {
