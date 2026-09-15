@@ -17,6 +17,59 @@ afterEach(() => { try { chmodSync(path.join(dir, 'audit'), 0o700); } catch {} rm
 const mk = () => new Audit({ dir: path.join(dir, 'audit'), clock: () => now, log: quiet });
 const lines = (f: string) => readFileSync(path.join(dir, 'audit', f), 'utf8').trim().split('\n').map(l => JSON.parse(l) as AuditRecord);
 
+// chattr +a on audit/ can't stop the server user creating next month's entry as a symlink (appends diverted outside,
+// truncatable, verify said ok) or a directory (auditing off forever). Only regular files are month files.
+describe('planted month entries', () => {
+  for (const kind of ['symlink', 'directory'] as const) {
+    test(`${kind}: append to that month refused + alerted once, current month unaffected, verify reports it, restart recovers the real head`, () => {
+      const alerts: unknown[] = [];
+      const auditDir = path.join(dir, 'audit');
+      const make = () => new Audit({ dir: auditDir, clock: () => now, log: quiet, onAnomaly: (i) => { alerts.push(i); } });
+      const a = make();
+      a.append({ type: 'turn.start', principal: 'u1' });
+      const outside = path.join(dir, 'attacker.jsonl');
+      writeFileSync(outside, '');
+      const planted = path.join(auditDir, '2026-02.jsonl');
+      if (kind === 'symlink') symlinkSync(outside, planted); else mkdirSync(planted);
+
+      expect(a.append({ type: 'turn.end', principal: 'u1' })).not.toBeNull(); // still January: its file keeps working
+      const janHead = a.head, failures = a.failures;
+      now = Date.parse('2026-02-02T00:00:00Z');
+      expect(a.append({ type: 'tool.deny', principal: 'u1', target: 'Bash' })).toBeNull();
+      expect(a.append({ type: 'turn.end', principal: 'u1' })).toBeNull();
+      expect(readFileSync(outside, 'utf8')).toBe(''); // nothing diverted
+      expect(a.head).toBe(janHead); // chain not advanced, not forked
+      expect(a.failures).toBeGreaterThan(failures);
+      expect(alerts).toEqual([{ dir: auditDir, file: '2026-02.jsonl', kind }]);
+      expect(errors.some(e => e.includes('2026-02.jsonl') && e.includes('not a regular file'))).toBe(true);
+      expect(a.verify()).toEqual({ ok: false, lines: 2, brokenAt: { file: '2026-02.jsonl', line: 0, reason: 'not-regular-file' } });
+      expect(a.verify('2026-02.jsonl')).toEqual({ ok: false, lines: 0, brokenAt: { file: '2026-02.jsonl', line: 0, reason: 'not-regular-file' } });
+      expect(a.query({ limit: 10 }).items.map(r => r.hash)[0]).toBe(janHead); // viewer not blinded
+      expect(readAuditHead(auditDir)).toBe(janHead);
+
+      __resetAuditHeadsForTest(); // restart
+      const b = make();
+      expect([b.healthy, b.head]).toEqual([true, janHead]);
+      expect(b.append({ type: 'turn.start' })).toBeNull();
+      expect(alerts.length).toBe(2); // once per process
+    });
+  }
+
+  test('onAnomaly returning false (standby) is asked again; accepted once, never again', () => {
+    const auditDir = path.join(dir, 'audit');
+    let answer = false, calls = 0;
+    const a = new Audit({ dir: auditDir, clock: () => now, log: quiet, onAnomaly: () => { calls++; return answer; } });
+    a.append({ type: 'turn.start' });
+    mkdirSync(path.join(auditDir, '2026-01.jsonl.d'));
+    mkdirSync(path.join(auditDir, '2026-03.jsonl'));
+    a.verify(); a.verify();
+    expect(calls).toBe(2);
+    answer = true; a.verify(); a.verify(); a.append({ type: 'turn.end' });
+    expect(calls).toBe(3);
+    expect(errors.filter(e => e.includes('2026-03.jsonl')).length).toBe(1); // logged once
+  });
+});
+
 describe('Audit chain', () => {
   test('continues across monthly rotation', () => {
     const a = mk();

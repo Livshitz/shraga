@@ -43,11 +43,15 @@ they are load-bearing, read them before you build. Start with [`AGENTS.md`](../.
    - `SECURITY_ENFORCE=true` (or `1`) — the ONE switch for both the guard (blocklist, rate limits, auto-block, turn ceiling) and per-role profile enforcement (tools/MCP/env, per-call gate, taint, `escalate`); unset = shadow (audit only, nothing denies).
    - **Tamper protection (always on, flag or not):** agent file tools (Write/Edit/MultiEdit/NotebookEdit) can't write
      server-owned data under `DATA_DIR` — `audit/`, `conversations/`, `sessions/`, `sessions.json`, `security/`,
-     `api-keys.json(.bak)`, `oauth-clients.json`, `mcps/`, server secret files (`PROTECTED_DATA_WRITE` in
-     `security/enforce.ts`, realpath-resolved); the server writes them directly. Bash in `full` profiles is not covered,
-     so the audit log's guarantee is OS-level: as root on Linux run `src/scripts/harden-audit.sh <DATA_DIR>` hourly from
-     cron (`chattr +a` on `audit/` and its month files — append yes, truncate/delete/rename no; new month files don't
-     inherit `+a`, hence the cron). No app route deletes audit; retention is a root op.
+     `api-keys.json(.bak)`, `oauth-clients.json`, `mcps/`, data-sync's `.git/` and `.gitignore`, server secret files
+     (`PROTECTED_DATA_WRITE` in `security/enforce.ts`, realpath-resolved); the server writes them directly. Bash in
+     `full` profiles is not covered, so the audit log's backstop is OS-level: as root on Linux run
+     `src/scripts/harden-audit.sh <DATA_DIR>` hourly from cron. `chattr +a` protects EXISTING month files against
+     truncation/rewrite and `audit/` entries against deletion/rename; new month files don't inherit `+a` (hence the
+     cron). It does NOT prevent creating entries: a month name planted as a symlink or directory is detected, not
+     prevented — the server refuses to append through it (that month isn't recorded), `verify` reports
+     `not-regular-file`, owners are alerted, and the script exits non-zero naming it; root removes it (`chattr -a`,
+     `rm`, re-run). No app route deletes audit; retention is a root op.
    - **data-sync and security state:** `audit/` is committed on every sync (offsite copy; commit body carries
      `audit-head: <hash>` so a local chain rewrite shows against git history), never stashed, and a pull whose remote
      commits change `audit/` is refused + owners alerted. `security/` (policy.json, .migrated, blocks.json) is NOT synced:

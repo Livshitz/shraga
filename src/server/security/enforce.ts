@@ -202,6 +202,8 @@ export function touchesSecretPath(tool: string, input: Record<string, unknown>, 
 export const PROTECTED_DATA_WRITE: readonly string[] = [
   'audit/', 'conversations/', 'sessions/', 'sessions.json', 'security/', 'api-keys.json', 'api-keys.json.bak',
   'oauth-clients.json', 'mcps/', '.internal-token', '.mcp-oauth-secret', '.local-auth-secret', 'users.json',
+  // data-sync's own repo: .git/config (core.fsmonitor, hooks) runs code on its next git call; .gitignore untracks state.
+  '.git/', '.gitignore',
 ];
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 export const PROTECTED_DATA_MESSAGE = 'Audit logs, conversations, sessions, security policy, keys and MCP config are server-owned and cannot be modified by agent tools.';
