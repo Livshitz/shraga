@@ -2,7 +2,7 @@
 // the Claude Code CLI maintains on this box. Fails CLOSED: every error path returns null, and the
 // caller renders nothing — a broken or zeroed gauge is worse than no gauge.
 import { execFile } from 'node:child_process';
-import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -216,6 +216,16 @@ export class ClaudeUsageReader {
       else limits.push(hit);
     }
     return { ...usage, limits };
+  }
+
+  /** The login changed (connect/replace/disconnect): every cached or persisted reading describes the
+   *  OLD account, so drop them all and let the next poll read the new one. */
+  invalidate(): void {
+    this.cache = null;
+    this.lastGood = null;
+    this.cooldownUntil = 0;
+    this.restored = Promise.resolve();
+    rm(this.options.cachePath, { force: true }).catch((err: Error) => console.warn(`${TAG} could not drop cached reading:`, err.message));
   }
 
   private async read(): Promise<ClaudeUsage | null> {
