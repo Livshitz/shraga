@@ -64,12 +64,28 @@ export function deriveRuntimeBadges(input: {
   return { provenance, engine, engineIsNative, engineMismatch, rawModel, billingProvider };
 }
 
+/** Claude login a turn ran on (session meta `lastAccount`). `personal` = the requester's own routed login. */
+export interface RunAccount {
+  email: string;
+  plan?: string;
+  personal: boolean;
+}
+
+/** Label parts + tooltip for the `sub` pill. Pure, so the wording is testable without a DOM. */
+export function describeRunAccount(account: RunAccount) {
+  const localPart = account.email.split('@')[0] || account.email;
+  const kind = account.personal ? 'personal login' : 'shared login';
+  const title = `Claude.ai subscription (OAuth login) — no API key in use\nAccount: ${account.email}${account.plan ? `\nPlan: ${account.plan}` : ''}\n${kind === 'personal login' ? 'Personal login (routed to this user)' : 'Shared login (the agent box account)'}`;
+  return { localPart, plan: account.plan, kind, title };
+}
+
 function InfoBadges({
   sessionId,
   config,
   sessionDirectives,
   actualModel,
   actualEngine,
+  actualAccount,
   scheduleId,
   onScheduleClick,
 }: {
@@ -81,6 +97,8 @@ function InfoBadges({
   /** Engine that actually ran the last turn (session meta `lastEngine`). Ground truth, arriving in the
    *  same `model_resolved` event as `actualModel` — so the pair never has to be inferred from a shape. */
   actualEngine?: string;
+  /** Claude login the last turn ran on (session meta `lastAccount`) — recorded only for turns that ran. */
+  actualAccount?: RunAccount;
   scheduleId?: string;
   onScheduleClick?: () => void;
 }) {
@@ -111,7 +129,12 @@ function InfoBadges({
   // engine / provider-prefixed model runs on that provider's key (ai.libx.js adapters throw without
   // one). What that key COSTS is plan-dependent and NOT knowable here (Anthropic API is metered;
   // a Cursor key may draw on a Cursor subscription) — so we label the mechanism, not the billing.
-  const onSubscription = engine === 'claude-code' && config.claudeAuthSource === 'subscription';
+  // An account is a fact about a turn that RAN on claude-code — never claimed for a pending selection.
+  // Its presence is itself proof that turn ran on a login (the engine records it only then), which
+  // the box-level `claudeAuthSource` cannot say for a user routed to their own login.
+  const account = !pending && engine === 'claude-code' ? actualAccount : undefined;
+  const onSubscription = engine === 'claude-code' && (!!account || config.claudeAuthSource === 'subscription');
+  const accountInfo = account ? describeRunAccount(account) : undefined;
   // Tone: green = claude.ai login (no key); amber = provider key whose usage may be subscription-
   // covered (Cursor); rose = provider key that is genuinely metered (Anthropic/OpenAI/etc.).
   const billingTone = !billingProvider ? 'unknown' : onSubscription ? 'sub' : billingProvider === 'cursor' ? 'plan' : 'metered';
@@ -127,7 +150,7 @@ function InfoBadges({
     billingTone === 'unknown'
       ? 'The engine that ran this turn was not recorded and the model id carries no provider prefix — the billed provider cannot be named from what was stored.'
       : billingTone === 'sub'
-      ? 'Claude.ai subscription (OAuth login) — no API key in use'
+      ? accountInfo?.title ?? 'Claude.ai subscription (OAuth login) — no API key in use'
       : billingTone === 'plan'
         ? `Runs on your ${billingProvider} API key — usage may draw on your ${billingProvider} plan/subscription`
         : `Runs on your ${billingProvider} API key — metered per-token billing`;
@@ -153,9 +176,18 @@ function InfoBadges({
       </span>
       <span
         title={pending ? `${runtimeTitle} ${billingTitle}` : billingTitle}
-        className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset ${billingClass}${pendingRing}`}
+        data-account={accountInfo ? account!.email : undefined}
+        className={`inline-flex min-w-0 items-center whitespace-nowrap rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset ${billingClass}${pendingRing}`}
       >
         {billingTone === 'unknown' ? 'API·?' : onSubscription ? 'sub' : `API·${billingProvider}`}
+        {billingTone === 'sub' && accountInfo && (
+          <>
+            {/* Narrow: `sub · lior…` (local-part capped + ellipsis). sm+: wider cap and the plan. */}
+            <span aria-hidden="true">&nbsp;·&nbsp;</span>
+            <span className="max-w-[4.5rem] truncate sm:max-w-[10rem]">{accountInfo.localPart}</span>
+            {accountInfo.plan && <span className="hidden sm:inline">&nbsp;·&nbsp;{accountInfo.plan}</span>}
+          </>
+        )}
       </span>
       {engineMismatch && (
         <span
@@ -206,6 +238,7 @@ export interface ConversationHeaderProps {
   sessionDirectives?: SessionDirectives;
   sessionLastModel?: string;
   sessionLastEngine?: string;
+  sessionLastAccount?: RunAccount;
   sessionScheduleId?: string;
   artifactCount: number;
   getToken: () => Promise<string | null>;
@@ -223,6 +256,7 @@ export function ConversationHeader({
   sessionDirectives,
   sessionLastModel,
   sessionLastEngine,
+  sessionLastAccount,
   sessionScheduleId,
   artifactCount,
   getToken,
@@ -240,6 +274,7 @@ export function ConversationHeader({
         sessionDirectives={sessionDirectives}
         actualModel={sessionLastModel}
         actualEngine={sessionLastEngine}
+        actualAccount={sessionLastAccount}
         scheduleId={sessionScheduleId}
         onScheduleClick={onScheduleClick}
       />

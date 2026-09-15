@@ -17,7 +17,7 @@ import { getPromptSuffix } from '../prompt-suffix.ts';
 import { APP_ROOT } from '../paths.ts';
 import { writeMcpConfigFile } from './mcp-config-file.ts';
 import { claudeUsageFor } from '../claude-usage.ts';
-import { claudeAccountDir, applyClaudeAccount } from '../claude-account.ts';
+import { claudeAccountDir, applyClaudeAccount, claudeAccountRef, type ClaudeAccountRef } from '../claude-account.ts';
 const IMMUTABLE_SYSTEM_PROMPT = readFileSync(path.resolve(import.meta.dirname, '../../../defaults/system-prompt.md'), 'utf-8');
 const DEFAULT_USER_PROMPT = `You are a helpful assistant with access to MCP tools.`;
 const DEFAULT_ALLOWED_TOOLS = ['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch'];
@@ -247,9 +247,15 @@ export class ClaudeCodeEngine implements AgentEngine {
     const setIfBlank = (key: string, value: string) => { if (!sdkEnv[key]?.trim()) sdkEnv[key] = value; };
     setIfBlank('BASH_DEFAULT_TIMEOUT_MS', process.env.AGENT_SHELL_TIMEOUT_MS?.trim() || '60000');
     setIfBlank('BASH_MAX_TIMEOUT_MS', process.env.AGENT_SHELL_MAX_TIMEOUT_MS?.trim() || '600000');
-    // Per-user subscription (CLAUDE_ACCOUNTS_DIR/<email>): run on that login, never the box's credentials.
+    // Per-user subscription (workspace/users/<contactId>/.claude): run on that login, never the box's credentials.
     const accountDir = claudeAccountDir(opts.userEmail);
     if (accountDir) applyClaudeAccount(sdkEnv, accountDir);
+    // Which login this run is on (email/plan, never a token) — read lazily from the login's local
+    // files, only once init proves the run is on a subscription login (see init below).
+    let accountRefP: Promise<ClaudeAccountRef | undefined> | undefined;
+    const accountRef = () => (accountRefP ??= claudeAccountRef(accountDir));
+    let runAccount: ClaudeAccountRef | undefined;
+    let sawInit = false;
     sdkEnv.INTERNAL_API_TOKEN = signInternalToken(opts.uid, opts.userEmail || 'unknown');
 
     const baseAllowed = config.allowedTools ?? DEFAULT_ALLOWED_TOOLS;
@@ -431,6 +437,10 @@ export class ClaudeCodeEngine implements AgentEngine {
           const authSource: 'subscription' | 'api-key' | undefined =
             src == null ? undefined : src === 'none' || src === 'oauth' ? 'subscription' : 'api-key';
           if (authSource) console.log(`[claude] Auth: ${authSource} (apiKeySource=${src}) account=${accountDir ? opts.userEmail!.trim().toLowerCase() : 'default'}`);
+          sawInit = true;
+          // A routed dir is a login by construction (applyClaudeAccount strips every key); the box
+          // default only counts when the SDK says it resolved a login, not an API key.
+          if ((authSource ?? (accountDir ? 'subscription' : undefined)) === 'subscription') runAccount = await accountRef();
           if (m.model) {
             console.log(`[claude] Init model=${m.model}${m.model !== options['model'] ? ` (requested ${options['model']})` : ''}`);
             // If the user explicitly asked to switch models via a [directive], announce the change
@@ -441,11 +451,11 @@ export class ClaudeCodeEngine implements AgentEngine {
               prior: opts.sessionId ? getSessionModel(opts.sessionId) : undefined,
             });
             if (sw.notice) yield { type: 'text_delta', text: sw.notice };
-            if (opts.sessionId) setSessionModel(opts.sessionId, m.model, this.name);
+            if (opts.sessionId) setSessionModel(opts.sessionId, m.model, this.name, runAccount);
             // Live ground-truth so the header pill confirms the actually-resolved model mid-turn
             // (catches inline overrides like [opus] and silent rate-limit fallbacks) instead of
             // only updating on session reload.
-            yield { type: 'model_resolved', sessionId: opts.sessionId ?? '', model: m.model, engine: this.name };
+            yield { type: 'model_resolved', sessionId: opts.sessionId ?? '', model: m.model, engine: this.name, ...(runAccount ? { account: runAccount } : {}) };
           }
           const servers = m.mcp_servers;
           if (Array.isArray(servers) && servers.length > 0) {
@@ -497,8 +507,12 @@ export class ClaudeCodeEngine implements AgentEngine {
           // `error_max_turns` also sets is_error but is a benign stop reason we already model.
           if ((m.is_error || m.api_error_status) && sub !== 'max_turns_reached') {
             const detail = typeof m.result === 'string' && m.result ? m.result : `api_error_status=${m.api_error_status ?? '?'}`;
+            // A usage/rate-limit failure is about ONE login's quota — name it, or a routed user's own
+            // exhausted Pro plan reads as the shared agent subscription being out.
+            const limitHit = m.api_error_status === 429 || /\b(usage|rate.?limit(ed)?|hit your limit)\b/i.test(detail);
+            const account = limitHit ? runAccount ?? (!sawInit && accountDir ? await accountRef() : undefined) : undefined;
             console.error(`[claude] API error result — ${detail}`);
-            yield { type: 'error', message: `Claude API error: ${detail}` };
+            yield { type: 'error', message: `Claude API error${account ? ` (${account.email})` : ''}: ${detail}` };
             return;
           }
           if (textDeltaCount === 0) {

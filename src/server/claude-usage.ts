@@ -30,6 +30,13 @@ export interface ClaudeUsageLimit {
   scopeLabel?: string;
 }
 
+/** A Claude login's identity — safe to persist and show (no secrets). */
+export interface ClaudeLoginIdentity {
+  email: string;
+  /** `subscriptionType` from the login's credentials (e.g. `pro`, `max`); omitted when unknown. */
+  plan?: string;
+}
+
 export interface ClaudeUsage {
   subscriptionType: string | null;
   /** Which Claude account these numbers belong to (email, else display name). A box can be signed in
@@ -222,6 +229,7 @@ export class ClaudeUsageReader {
    *  OLD account, so drop them all and let the next poll read the new one. */
   invalidate(): void {
     this.cache = null;
+    this.identityCache = null;
     this.lastGood = null;
     this.cooldownUntil = 0;
     this.restored = Promise.resolve();
@@ -389,13 +397,37 @@ export class ClaudeUsageReader {
   /** Whose account this box is signed in as. Identity only — never a token, and never fatal: an
    *  unreadable config just means the card omits the line. */
   private async readAccount(): Promise<string | null> {
+    const account = await this.readOauthAccount();
+    return account?.emailAddress ?? account?.displayName ?? null;
+  }
+
+  private async readOauthAccount(): Promise<{ emailAddress?: string; displayName?: string } | null> {
     try {
-      const account = JSON.parse(await readFile(this.options.accountPath, 'utf8'))?.oauthAccount;
-      return account?.emailAddress ?? account?.displayName ?? null;
+      return JSON.parse(await readFile(this.options.accountPath, 'utf8'))?.oauthAccount ?? null;
     } catch (err) {
       console.debug(`${TAG} could not read the signed-in account: ${(err as Error).message}`);
       return null;
     }
+  }
+
+  private identityCache: { at: number; value: Promise<ClaudeLoginIdentity | null> } | null = null;
+
+  /** Which login this reader's dir is signed in as: email + plan, never a token. Local files only
+   *  (no upstream call); cached for `ttlMs` because on darwin the plan lookup may shell out to the
+   *  keychain, and it is asked once per agent turn. null when no email is recorded. */
+  identity(): Promise<ClaudeLoginIdentity | null> {
+    const now = Date.now();
+    if (this.identityCache && now - this.identityCache.at < this.options.ttlMs) return this.identityCache.value;
+    const value = Promise.all([this.readOauthAccount(), this.readCredentials()]).then(([account, creds]) => {
+      const email = account?.emailAddress?.trim();
+      if (!email) return null;
+      return creds?.subscriptionType ? { email, plan: creds.subscriptionType } : { email };
+    }).catch((err: Error) => {
+      console.warn(`${TAG} could not resolve the signed-in identity:`, err.message);
+      return null;
+    });
+    this.identityCache = { at: now, value };
+    return value;
   }
 
   /** The configured path first, then any sibling `.credentials*.json` the CLI may have written. */
