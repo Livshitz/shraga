@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Policy, defaultPolicy, validatePolicy, type PolicyFile } from '../policy.ts';
@@ -59,6 +59,31 @@ describe('Policy.resolve', () => {
     expect(pol.resolve(fromEmailSender('boss@owner.com', false)).role).toBe('anonymous');
     const bad = seeded(); bad.bindings.push({ match: { kind: 'user' }, role: 'owner' });
     expect(() => pol.save(bad)).toThrow(/cannot grant owner/);
+  });
+
+  test('verified email-kind principal with an owner address is NOT owner — goes through bindings', () => {
+    const pol = mk(); pol.save(seeded());
+    expect(pol.resolve(fromEmailSender('boss@owner.com', true)).role).toBe('guest'); // generic verified-email binding
+    const bare = mk({ path: path.join(dir, 'bare', 'policy.json') });
+    expect(bare.resolve(fromEmailSender('boss@owner.com', true)).role).toBe('anonymous');
+  });
+});
+
+describe('role rank validation', () => {
+  test('non-numeric owner rank rejected', () => {
+    const p: any = defaultPolicy(); p.roles.owner.rank = 'x';
+    expect(validatePolicy(p).join()).toMatch(/roles\.owner\.rank must be a finite number/);
+    const pol = mk();
+    expect(() => pol.save(p)).toThrow(/roles\.owner\.rank/);
+  });
+  test('NaN/Infinity ranks rejected; owner must be strictly highest', () => {
+    const a: any = defaultPolicy(); a.roles.member.rank = NaN;
+    expect(validatePolicy(a).join()).toMatch(/roles\.member\.rank must be a finite number/);
+    const b: any = defaultPolicy(); b.roles.owner.rank = Infinity;
+    expect(validatePolicy(b).join()).toMatch(/roles\.owner\.rank must be a finite number/);
+    const c: any = defaultPolicy(); c.roles.operator.rank = 100;
+    expect(validatePolicy(c).join()).toMatch(/roles\.operator\.rank must be below owner/);
+    expect(validatePolicy(defaultPolicy())).toEqual([]);
   });
 });
 
@@ -140,6 +165,61 @@ describe('migration', () => {
     expect(pol.resolve(fromAuthUser({ uid: 'c', email: 'c@x.com' })).role).toBe('anonymous');
     expect(pol.resolve(fromSlack('U9')).role).toBe('operator');
     expect(pol.reload()).toBe(true); // migrated file is trusted provenance
+  });
+
+  test('runs once: delete policy.json + edit whitelist + restart ⇒ no re-migration, fail closed, onTamper deleted', () => {
+    const wl = path.join(dir, 'whitelist.json');
+    writeFileSync(wl, JSON.stringify(['a@x.com']));
+    const first = mk();
+    expect(existsSync(path.join(dir, 'security', '.migrated'))).toBe(true);
+    unlinkSync(first.options.path);
+    writeFileSync(wl, JSON.stringify(['a@x.com', 'attacker@evil.com']));
+    const tampers: any[] = [];
+    const pol = mk({ onTamper: (t) => tampers.push(t) });
+    expect(pol.valid).toBe(false);
+    expect(existsSync(pol.options.path)).toBe(false);
+    expect(tampers.map(t => t.reason)).toEqual(['deleted']);
+    expect(pol.resolve(fromAuthUser({ uid: 'e', email: 'attacker@evil.com' })).role).toBe('anonymous');
+    expect(pol.resolve(fromAuthUser({ uid: 'a', email: 'a@x.com' })).role).toBe('anonymous');
+    expect(pol.resolve(fromAuthUser({ uid: 'b', email: 'boss@owner.com' })).role).toBe('owner');
+    expect(pol.reload()).toBe(true); // no repeated tamper for a state we already failed closed on
+  });
+
+  const onlyOwners = (pol: Policy) => {
+    expect(pol.valid).toBe(false);
+    expect(pol.resolve(fromAuthUser({ uid: 'a', email: 'a@x.com' })).role).toBe('anonymous');
+    expect(pol.resolve(fromAuthUser({ uid: 'b', email: 'boss@owner.com' })).role).toBe('owner');
+  };
+
+  test('invalid migrate draft ⇒ constructor does not throw, owners only, no marker', () => {
+    writeFileSync(path.join(dir, 'whitelist.json'), JSON.stringify(['a@x.com']));
+    const errors: string[] = [];
+    let pol!: Policy;
+    expect(() => { pol = mk({ log: { ...quiet, error: (m: string) => errors.push(m) }, migrate: (d) => { d.bindings.push({ match: {}, role: 'operator' }); } }); }).not.toThrow();
+    onlyOwners(pol);
+    expect(errors.join()).toMatch(/match is empty/);
+    expect(existsSync(pol.options.path)).toBe(false);
+    expect(existsSync(path.join(dir, 'security', '.migrated'))).toBe(false);
+  });
+
+  test('throwing migrate hook ⇒ constructor does not throw, owners only', () => {
+    let pol!: Policy;
+    expect(() => { pol = mk({ migrate: () => { throw new Error('contacts store down'); } }); }).not.toThrow();
+    onlyOwners(pol);
+  });
+
+  test('read-only data dir ⇒ constructor does not throw, owners only', () => {
+    writeFileSync(path.join(dir, 'whitelist.json'), JSON.stringify(['a@x.com']));
+    const sec = path.join(dir, 'security');
+    mkdirSync(sec); chmodSync(sec, 0o500);
+    try {
+      const errors: string[] = [];
+      let pol!: Policy;
+      expect(() => { pol = mk({ log: { ...quiet, error: (m: string) => errors.push(m) } }); }).not.toThrow();
+      onlyOwners(pol);
+      expect(errors.join()).toMatch(/EACCES|permission/i);
+      expect(pol.reload()).toBe(true); // no phantom trusted hash for a write that never landed
+    } finally { chmodSync(sec, 0o700); }
   });
 
   test('no whitelist ⇒ defaults with no bindings', () => {

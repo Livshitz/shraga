@@ -6,8 +6,9 @@
 // - Hot reload is PROVENANCE-CHECKED: only content whose sha256 matches what this process wrote via
 //   save() is loaded at runtime. Any other change keeps the last-good policy and fires onTamper.
 //   (The file present at boot is trusted — protecting it at rest is the protected-paths step.)
-// - Missing file ⇒ migration (from whitelist.json + optional hook). Empty/invalid ⇒ fail closed:
-//   only owners resolve above anonymous.
+// - Missing file ⇒ migration (from whitelist.json + optional hook), ONCE: a `.migrated` marker is
+//   written beside it, and a missing file with the marker present is deletion ⇒ fail closed + onTamper.
+// - Empty/invalid file, or migration/IO failure ⇒ fail closed: only owners resolve above anonymous.
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
 import path from 'node:path';
@@ -90,14 +91,15 @@ export function validatePolicy(p: any): string[] {
     if (!['all', 'own', 'none'].includes(pr?.readScope)) errs.push(`profiles.${name}.readScope invalid`);
     if (typeof pr?.rate !== 'string' || !RATE_RE.test(pr.rate)) errs.push(`profiles.${name}.rate invalid (e.g. "120/h")`);
   }
+  // owner is env-rooted; its entry only picks rank/profile — but both are validated like any role
   for (const [name, r] of Object.entries<any>(roles)) {
-    if (name === OWNER_ROLE) continue; // owner is env-rooted; its entry only picks rank/profile
-    if (typeof r?.rank !== 'number' || !Number.isFinite(r.rank)) errs.push(`roles.${name}.rank must be a number`);
+    if (typeof r?.rank !== 'number' || !Number.isFinite(r.rank)) errs.push(`roles.${name}.rank must be a finite number`);
     if (!profiles[r?.profile]) errs.push(`roles.${name}.profile "${r?.profile}" not defined`);
   }
-  if (roles[OWNER_ROLE] && !profiles[roles[OWNER_ROLE].profile]) errs.push(`roles.owner.profile not defined`);
   const ownerRank = roles[OWNER_ROLE]?.rank ?? 100;
-  for (const [name, r] of Object.entries<any>(roles)) if (name !== OWNER_ROLE && r?.rank >= ownerRank) errs.push(`roles.${name}.rank must be below owner (${ownerRank})`);
+  if (Number.isFinite(ownerRank)) {
+    for (const [name, r] of Object.entries<any>(roles)) if (name !== OWNER_ROLE && r?.rank >= ownerRank) errs.push(`roles.${name}.rank must be below owner (${ownerRank})`);
+  }
   if (!Array.isArray(p.bindings)) errs.push('bindings must be an array');
   else p.bindings.forEach((b: any, i: number) => {
     validateMatch(b?.match, `bindings[${i}]`, errs);
@@ -198,13 +200,37 @@ export class Policy {
   public get valid(): boolean { return this._valid; }
   public get current(): PolicyFile { return structuredClone(this.compiled.file); }
 
-  /** Initial load: migrate if missing; trust what's on disk; fail closed if invalid. */
+  /** Marker proving migration already ran once — a later missing policy.json is deletion, not first boot. */
+  private get markerPath(): string { return path.join(path.dirname(this.options.path), '.migrated'); }
+
+  private failClosedNow(msg: string): void {
+    this.options.log.error(`[policy] ${msg} — failing closed (owners only)`);
+    this.compiled = failClosed(); this._valid = false;
+  }
+
+  /** Initial load: migrate once if missing; trust what's on disk; fail closed if invalid. Never throws. */
   private load(): void {
     const { path: p, log } = this.options;
-    if (!existsSync(p)) { this.save(this.migrate()); log.info(`[policy] migrated → ${p}`); return; }
-    const raw = readFileSync(p, 'utf8');
-    this.trustedHash = sha256(raw);
-    this.apply(raw);
+    try {
+      if (!existsSync(p)) {
+        if (existsSync(this.markerPath)) {
+          this.failClosedNow(`TAMPER: ${p} missing after migration (${this.markerPath} exists) — not re-migrating`);
+          try { this.options.onTamper?.({ path: p, reason: 'deleted', expected: null, actual: null }); }
+          catch (e: any) { log.error(`[policy] onTamper threw: ${e.message}`); }
+          return;
+        }
+        this.save(this.migrate());
+        writeFileSync(this.markerPath, `${new Date().toISOString()}\n`, { mode: 0o600 });
+        log.info(`[policy] migrated → ${p}`);
+        return;
+      }
+      const raw = readFileSync(p, 'utf8');
+      this.trustedHash = sha256(raw);
+      this.apply(raw);
+    } catch (e: any) {
+      if (!existsSync(p)) this.trustedHash = null; // save() recorded a hash it never wrote
+      this.failClosedNow(`load/migration failed: ${e.message}`);
+    }
   }
 
   private apply(raw: string): boolean {
@@ -284,9 +310,10 @@ export class Policy {
     return { role: name, rank: def.rank, profileName: def.profile, profile: c.profiles.get(def.profile) ?? NONE_PROFILE };
   }
 
-  /** principal → role/profile. Owner (env, verified email) first, then first matching binding, else default. */
+  /** principal → role/profile. Owner (env, authenticated login only) first, then first matching binding, else default.
+   *  A DKIM-verified email or other channel carrying an owner address is NOT owner — it goes through bindings. */
   public resolve(p: Principal): Resolved {
-    if (p.verified && p.email && isOwnerEmail(p.email)) return this.resolved(OWNER_ROLE);
+    if (p.kind === 'user' && p.verified && p.email && isOwnerEmail(p.email)) return this.resolved(OWNER_ROLE);
     const c = this.compiled, b = c.file.bindings;
     let best = Infinity;
     const scan = (idx?: number[]) => { if (idx) for (const i of idx) { if (i >= best) break; if (matches(b[i].match, p)) { best = i; break; } } };
