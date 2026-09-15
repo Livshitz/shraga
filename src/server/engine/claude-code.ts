@@ -8,7 +8,12 @@ import { listSkills } from '../skills.ts';
 import { loadAgents } from '../agents.ts';
 import { registerProactiveMessage } from '../slack/sessions.ts';
 import { registerPoll } from '../polls.ts';
-import { getSession, setSessionModel, getSessionModel, type ConvMessage } from '../sessions.ts';
+import { getSession, setSessionModel, getSessionModel, setClaudeResume, type ConvMessage } from '../sessions.ts';
+import {
+  isResumeEnabled, decideClaudeTurn, claudeConfigDir, findClaudeTranscript, shortHash, sectionHashes, speakerKey,
+  sectionsAfterSubmit, isResumeFailure, conversationSummaryKey, buildContextDelta, buildResumePrompt, renderConvMessage,
+  type TurnPath, type ClaudeResumeState,
+} from './claude-resume.ts';
 import { DEFAULT_MODEL } from '../directives.ts';
 import { resolveModelSwitch, MODEL_ALIASES } from '../model-aliases.ts';
 import type { WsEvent, AskQuestion, QuestionAnswers, QuestionHandler } from '../claude.ts';
@@ -95,15 +100,8 @@ function buildHistoryPrompt(conv: ConvMessage[], contextBlock: string, userPromp
   const parts: string[] = [];
   if (summary) parts.push(`<conversation_summary>\n${summary}\n</conversation_summary>`);
   for (const m of recent) {
-    const role = m.role === 'user' ? 'User' : 'Assistant';
-    const texts = m.blocks
-      .filter((b) => b.type === 'text' || b.type === 'context')
-      .map((b) => {
-        if (b.type === 'context') return `[${(b as any).label}]: ${(b as any).text}`;
-        return (b as { type: 'text'; text: string }).text;
-      })
-      .filter(Boolean);
-    if (texts.length) parts.push(`${role}: ${texts.join('\n')}`);
+    const line = renderConvMessage(m);
+    if (line) parts.push(line);
   }
 
   if (parts.length) {
@@ -117,10 +115,11 @@ function buildHistoryPrompt(conv: ConvMessage[], contextBlock: string, userPromp
  * Log prompt-cache effectiveness from the SDK result `usage`. The hit rate is
  * cache_read / (cache_read + cache_creation + uncached input) — a low rate over
  * many turns points to a silent prefix invalidator or sessions spread past the
- * 5-min cache TTL. Note: cross-turn history is re-sent uncached (single-shot
- * prompt per query, no SDK resume) — so hit rate tracks tool density per turn.
+ * 5-min cache TTL. `path` says how the prompt was built — `fresh` (history re-sent in one message),
+ * `resume` (SDK session resumed, only the new message sent) or `fallback:<reason>` (resume enabled but a
+ * fresh query ran) — so journal lines can be A/B-compared per path.
  */
-function logCacheUsage(usage: any, model: string): void {
+function logCacheUsage(usage: any, model: string, path: TurnPath): void {
   if (!usage) return;
   const read = usage.cache_read_input_tokens ?? 0;
   const created = usage.cache_creation_input_tokens ?? 0;
@@ -128,8 +127,46 @@ function logCacheUsage(usage: any, model: string): void {
   const totalIn = read + created + fresh;
   if (totalIn === 0) return;
   const hitRate = ((read / totalIn) * 100).toFixed(1);
-  console.log(`[claude] Cache: hit=${hitRate}% read=${read} write=${created} uncached=${fresh} out=${usage.output_tokens ?? 0} model=${model}`);
+  console.log(`[claude] Cache: hit=${hitRate}% read=${read} write=${created} uncached=${fresh} out=${usage.output_tokens ?? 0} model=${model} path=${path}`);
 }
+
+/** How one query attempt is built. `persist` is set when resume is enabled: after a query that produced
+ *  output, the CC session id + these facts are saved so the next turn can resume. */
+interface RunPlan {
+  path: TurnPath;
+  prompt: string;
+  accountDir: string | null;
+  resumeId?: string;
+  persist?: Omit<ClaudeResumeState, 'claudeSessionId' | 'model' | 'interruptedBy'>;
+  /** Resume only: section hashes to store once the prompt is submitted (see sectionsAfterSubmit). */
+  submitSections?: Record<string, string>;
+}
+
+/** Exit promises of CLI processes still running, per shraga session. A turn that took over a session (external
+ *  steer) can start while the aborted run's CLI is still exiting; resuming then would put two writers on one
+ *  transcript. */
+const liveCli = new Map<string, Set<Promise<void>>>();
+
+function trackCliExit(sessionId: string | undefined, child: { once: (event: string, fn: () => void) => unknown }): void {
+  if (!sessionId) return;
+  const set = liveCli.get(sessionId) ?? new Set();
+  liveCli.set(sessionId, set);
+  const exited = new Promise<void>((resolve) => { child.once('exit', resolve); child.once('error', resolve); });
+  set.add(exited);
+  void exited.then(() => { set.delete(exited); if (!set.size && liveCli.get(sessionId) === set) liveCli.delete(sessionId); });
+}
+
+/** true once every CLI process of the session has exited, false if one is still alive after `ms`. */
+async function cliExited(sessionId: string, ms: number): Promise<boolean> {
+  const set = liveCli.get(sessionId);
+  if (!set?.size) return true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<false>((r) => { timer = setTimeout(() => r(false), ms); });
+  try { return await Promise.race([Promise.all(set).then(() => true), timeout]); } finally { clearTimeout(timer); }
+}
+
+/** Events that prove a resumed query actually runs; until one arrives the attempt can still be retried fresh unseen. */
+const LIVE_EVENTS = new Set<WsEvent['type']>(['text_delta', 'thinking_delta', 'tool_use', 'tool_use_input', 'tool_result', 'tool_result_image', 'done']);
 
 /** SDK spawn hook: same call the SDK would make, plus `detached` (own process group). See the
  *  call site for why. Shape mirrors the SDK's own spawnLocalProcess return. */
@@ -221,11 +258,75 @@ export class ClaudeCodeEngine implements AgentEngine {
     ];
   }
 
+  /** How long a resume-enabled turn waits for an earlier CLI process on the session to exit before going fresh. */
+  static cliExitWaitMs = 5_000;
+
   async *stream(opts: EngineStreamOpts): AsyncGenerator<WsEvent> {
+    let cliAlive = false;
+    if (opts.sessionId && isResumeEnabled(opts.directives, opts.config) && !(await cliExited(opts.sessionId, ClaudeCodeEngine.cliExitWaitMs))) {
+      cliAlive = true;
+      console.warn(`[claude] An earlier CLI process on session=${opts.sessionId} is still running after ${ClaudeCodeEngine.cliExitWaitMs}ms — not resuming its transcript`);
+    }
+    const plan = this.plan(opts, cliAlive);
+    if (plan.path !== 'resume') { yield* this.run(opts, plan); return; }
+    // Hold non-output events (init's model_resolved / switch notice) until the resumed query proves it
+    // runs, so a failed resume can be retried fresh with nothing duplicated on the user's side.
+    const attempt = this.run(opts, plan);
+    const held: WsEvent[] = [];
+    let live = false;
+    let r: IteratorResult<WsEvent, 'resume-failed' | void>;
+    try {
+      while (!(r = await attempt.next()).done) {
+        if (!live && !LIVE_EVENTS.has(r.value.type)) { held.push(r.value); continue; }
+        if (!live) { live = true; yield* held; }
+        yield r.value;
+      }
+    } finally {
+      await attempt.return(undefined);
+    }
+    if (r.value !== 'resume-failed') { if (!live) yield* held; return; }
+    console.warn(`[claude] Resume of ${plan.resumeId} failed before any output — retrying fresh in the same turn (session=${opts.sessionId})`);
+    setClaudeResume(opts.sessionId, undefined);
+    yield* this.run(opts, this.freshPlan(opts, plan.accountDir, 'fallback:resume-failed', plan.persist));
+  }
+
+  private freshPlan(opts: EngineStreamOpts, accountDir: string | null, path: TurnPath, persist?: RunPlan['persist']): RunPlan {
+    return {
+      path, accountDir,
+      prompt: buildHistoryPrompt(opts.conversation, opts.contextBlock, opts.prompt),
+      ...(persist ? { persist: { ...persist, sections: sectionHashes(opts.contextSections ?? { context: opts.contextBlock }), startedAt: Date.now() } } : {}),
+    };
+  }
+
+  /** Resume vs fresh, and why — see claude-resume.ts. */
+  private plan(opts: EngineStreamOpts, cliAlive: boolean): RunPlan {
+    const accountDir = claudeAccountDir(opts.userEmail);
+    if (!isResumeEnabled(opts.directives, opts.config)) return this.freshPlan(opts, accountDir, 'fresh');
+    const configDir = claudeConfigDir(accountDir);
+    const configDirHash = shortHash(configDir);
+    const state = opts.sessionId ? getSession(opts.sessionId)?.claudeResume : undefined;
+    const speaker = speakerKey(opts.uid, opts.userEmail);
+    const persist = { configDirHash, speaker, markId: opts.conversation.at(-1)?.id, summaryKey: conversationSummaryKey(opts.conversation), sections: {}, startedAt: Date.now() };
+    const decision = decideClaudeTurn({
+      enabled: true, state, conversation: opts.conversation, configDirHash, speaker, cliAlive, conversationReset: opts.conversationReset,
+      hasTranscript: (id) => !!findClaudeTranscript(id, configDir),
+    });
+    if (decision.path !== 'resume' || !state) return this.freshPlan(opts, accountDir, decision.path, persist);
+    const sections = opts.contextSections ?? { context: opts.contextBlock };
+    const hashes = sectionHashes(sections);
+    return {
+      path: 'resume', accountDir, resumeId: state.claudeSessionId,
+      prompt: buildResumePrompt(opts.prompt, decision.unseen, buildContextDelta(state.sections, sections)),
+      persist: { ...persist, sections: hashes, startedAt: state.startedAt },
+      submitSections: sectionsAfterSubmit(state.sections, hashes),
+    };
+  }
+
+  private async *run(opts: EngineStreamOpts, plan: RunPlan): AsyncGenerator<WsEvent, 'resume-failed' | void> {
     const { config, directives } = opts;
     const cwd = APP_ROOT;
 
-    const fullPrompt = buildHistoryPrompt(opts.conversation, opts.contextBlock, opts.prompt);
+    const fullPrompt = plan.prompt;
     const permMode = opts.onPermissionRequest ? 'default' : (config.permissionMode ?? 'acceptEdits');
 
     const sdkEnv: Record<string, string> = {};
@@ -251,7 +352,7 @@ export class ClaudeCodeEngine implements AgentEngine {
     // regardless of settingSources; headless they are auth stubs or self-recursion. Our MCPs come from mcp-config.
     setIfBlank('ENABLE_CLAUDEAI_MCP_SERVERS', 'false');
     // Per-user subscription (workspace/users/<contactId>/.claude): run on that login, never the box's credentials.
-    const accountDir = claudeAccountDir(opts.userEmail);
+    const accountDir = plan.accountDir;
     if (accountDir) applyClaudeAccount(sdkEnv, accountDir);
     // Which login this run is on (email/plan, never a token) — read lazily from the login's local
     // files, only once init proves the run is on a subscription login (see init below).
@@ -259,6 +360,10 @@ export class ClaudeCodeEngine implements AgentEngine {
     const accountRef = () => (accountRefP ??= claudeAccountRef(accountDir));
     let runAccount: ClaudeAccountRef | undefined;
     let sawInit = false;
+    // Did THIS attempt produce model output? Gates both the resume-failure retry and saving the session id
+    // (a resume that died on "No conversation found" can report a session id it never wrote a turn to).
+    let sawOutput = false;
+    let initModel: string | undefined;
     sdkEnv.INTERNAL_API_TOKEN = signInternalToken(opts.uid, opts.userEmail || 'unknown');
 
     const baseAllowed = config.allowedTools ?? DEFAULT_ALLOWED_TOOLS;
@@ -357,13 +462,18 @@ export class ClaudeCodeEngine implements AgentEngine {
     const addonSuffix = getPromptSuffix(opts.turnHints);
     options['systemPrompt'] = `${IMMUTABLE_SYSTEM_PROMPT}\n\n${userPrompt}${addonSuffix ? `\n\n${addonSuffix}` : ''}`;
     if (opts.abortController) options['abortController'] = opts.abortController;
+    if (plan.resumeId) options['resume'] = plan.resumeId;
     // Spawn the CLI in its OWN process group. The service manager signals the whole JOB on restart
     // (`launchctl kickstart -k`, `systemctl restart`), so an inherited process group means the child
     // dies instantly with SIGTERM — surfacing mid-reply as `exited with code 143` and making the
     // server's 90s drain (gracefulShutdown) protect nothing: it only ever waited for a turn that was
     // already dead. Detached, the signal reaches the server alone and the drain can finish the turn.
     // Teardown is unaffected: the SDK still kills the child on abort/close and on process exit.
-    options['spawnClaudeCodeProcess'] = spawnDetached;
+    options['spawnClaudeCodeProcess'] = (cfg: Parameters<typeof spawnDetached>[0]) => {
+      const child = spawnDetached(cfg);
+      trackCliExit(opts.sessionId, child);
+      return child;
+    };
 
     // Passed as a FILE, never as `options.mcpServers` — the SDK would put the whole config (every MCP
     // server's credentials) on the CLI's argv, where `ps` / `/proc` / journald expose it. See
@@ -391,6 +501,8 @@ export class ClaudeCodeEngine implements AgentEngine {
         : fullPrompt;
 
     const q = query({ prompt, options: options as any });
+    // The CLI writes this prompt to the transcript before any output: from here a cancel can't un-deliver it.
+    if (plan.submitSections && opts.sessionId) setClaudeResume(opts.sessionId, undefined, { sections: plan.submitSections });
 
     let lastSessionId = '';
     let messageCount = 0;
@@ -449,6 +561,7 @@ export class ClaudeCodeEngine implements AgentEngine {
           // default only counts when the SDK says it resolved a login, not an API key.
           if ((authSource ?? (accountDir ? 'subscription' : undefined)) === 'subscription') runAccount = await accountRef();
           if (m.model) {
+            initModel = m.model;
             console.log(`[claude] Init model=${m.model}${m.model !== options['model'] ? ` (requested ${options['model']})` : ''}`);
             // If the user explicitly asked to switch models via a [directive], announce the change
             // inline so the response confirms the switch took effect.
@@ -494,7 +607,7 @@ export class ClaudeCodeEngine implements AgentEngine {
           const raw = m.subtype ?? 'unknown';
           const sub = raw === 'error_max_turns' || (raw === 'end_turn' && sdkTurns >= maxTurns) ? 'max_turns_reached' : raw;
           console.log(`[claude] Result: subtype=${m.subtype}→${sub} session=${lastSessionId} turns=${sdkTurns}/${maxTurns} cost=$${m.total_cost_usd?.toFixed(4) ?? '?'} msgs=${messageCount} deltas=${textDeltaCount} (${elapsed()})`);
-          logCacheUsage(m.usage, activeModel);
+          logCacheUsage(m.usage, activeModel, plan.path);
           if (outstandingTasks.size > 0) {
             if (!waitingForBg) {
               waitingForBg = true; clearBgTimer();
@@ -514,6 +627,12 @@ export class ClaudeCodeEngine implements AgentEngine {
           // `error_max_turns` also sets is_error but is a benign stop reason we already model.
           if ((m.is_error || m.api_error_status) && sub !== 'max_turns_reached') {
             const detail = typeof m.result === 'string' && m.result ? m.result : `api_error_status=${m.api_error_status ?? '?'}`;
+            // The CLI's reason ("No conversation found with session ID …") rides in `errors`, not `result`.
+            const reasons = Array.isArray(m.errors) && m.errors.length ? m.errors.join('; ') : detail;
+            if (plan.resumeId && !sawOutput && isResumeFailure(reasons)) {
+              console.error(`[claude] Resume error result (subtype=${raw}) — ${reasons}`);
+              return 'resume-failed';
+            }
             // A usage/rate-limit failure is about ONE login's quota — name it, or a routed user's own
             // exhausted Pro plan reads as the shared agent subscription being out.
             const limitHit = m.api_error_status === 429 || /\b(usage|rate.?limit(ed)?|hit your limit)\b/i.test(detail);
@@ -532,10 +651,12 @@ export class ClaudeCodeEngine implements AgentEngine {
         if (m.type === 'stream_event') {
           const event = m.event;
           if (event?.type === 'content_block_delta' && event.delta?.type === 'thinking_delta') {
+            sawOutput = true;
             yield { type: 'thinking_delta', text: event.delta.thinking };
           }
           if (event?.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
             textDeltaCount++;
+            sawOutput = true;
             yield { type: 'text_delta', text: event.delta.text };
           }
           if (event?.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
@@ -557,6 +678,7 @@ export class ClaudeCodeEngine implements AgentEngine {
 
         if (m.type === 'assistant' && Array.isArray(m.message?.content)) {
           turnCount++;
+          sawOutput = true;
           for (const block of m.message.content) {
             if (block.type === 'tool_use') {
               pendingToolUses.set(block.id, { tool: block.name, input: block.input });
@@ -645,6 +767,7 @@ export class ClaudeCodeEngine implements AgentEngine {
         return;
       }
       console.error(`[claude] Error after ${messageCount} msgs (${elapsed()}):`, err.message || err);
+      if (plan.resumeId && !sawOutput && isResumeFailure(err.message || String(err))) return 'resume-failed';
       yield { type: 'error', message: err.message || String(err) };
       return;
     } finally {
@@ -652,6 +775,11 @@ export class ClaudeCodeEngine implements AgentEngine {
       // The CLI has read the file by now (it loads MCP config at startup); holding it any longer just
       // widens the window in which the credentials sit on disk.
       mcpConfigFile?.cleanup();
+      // Save the mapping once this attempt really ran a turn (incl. an aborted one — the transcript holds it).
+      if (plan.persist && opts.sessionId && lastSessionId && sawOutput) {
+        setClaudeResume(opts.sessionId, { ...plan.persist, claudeSessionId: lastSessionId, ...(initModel ? { model: initModel } : {}) });
+        if (plan.resumeId && plan.resumeId !== lastSessionId) console.warn(`[claude] Resume returned a new session id ${lastSessionId} (was ${plan.resumeId})`);
+      }
     }
 
     const inferredReason = turnCount >= maxTurns ? 'max_turns_reached' : 'end_turn';

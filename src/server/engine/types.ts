@@ -11,6 +11,9 @@ export interface EngineStreamOpts {
   conversation: ConvMessage[];
   /** Contextual blocks to prepend (user block, skills, workspace tree, etc.) */
   contextBlock: string;
+  /** The same context split into named sections (in contextBlock order), so an engine that keeps
+   *  state across turns can send only what changed. Joined with '\n' they equal contextBlock. */
+  contextSections?: Record<string, string>;
 
   attachments?: AttachmentMeta[];
   images?: string[];

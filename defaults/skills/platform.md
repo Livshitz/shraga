@@ -43,6 +43,7 @@ Users can prefix any message with `[directives]` to override settings. Parsed se
 | `effort:VALUE` | `low`, `medium`, `high`, `max` | Set reasoning effort level |
 | `model:VALUE` | Any alias | Override model |
 | `turns:VALUE` | Integer | Override max turns |
+| `resume:VALUE` | `on`, `off` | claude-code engine: resume the SDK session across turns instead of re-sending the history (prompt-cache savings). Overrides agent-config `sdkResume` for this conversation |
 
 ### Examples
 
@@ -67,6 +68,8 @@ Persistent settings that apply to all messages until changed:
 | Allowed Tools | Comma-separated list | All |
 | Skill Discovery | On/Off | On |
 | System Prompt | Free text appended to system prompt | Empty |
+
+**SDK session resume (`sdkResume`, default off).** Not in the panel: set `"sdkResume": true` in `agent-config.json` (re-read every turn, no restart) or per conversation with `[resume:on]` / `PUT /api/sessions/:id/directives {"resume": true}`. When on, the claude-code engine sends the full context + history once (fresh query), then resumes that Claude Code session and sends only the new message, appending the current speaker's `user` section (every resume turn), changed context sections and messages other channels added AFTER the user text. It falls back to a fresh query — logged as `[claude] Cache: … path=fallback:<reason>` — on: `no-session`, `concurrent-run` (an earlier CLI process on the conversation, e.g. the run a steer took over, was still alive after 5s), `speaker-change` (a different person than the one whose turns the Claude Code session holds — keeps one user's private context out of another's turns; single-speaker conversations keep resuming), `engine-switch`, `account-change`, `reset`, `summary`, `history-diverged`, `drift`, `transcript-missing` (CLI cleanup removed it), `resume-failed` (the CLI couldn't load the session, e.g. "No conversation found" — retried fresh in the same turn; any other error, like a usage limit, surfaces as-is and keeps the mapping). Flag off logs `path=fresh`, a resumed turn `path=resume`.
 
 Directives override config and persist for the session. On a session's first turn, the resolved engine/model/turns/thinking are pinned to the session — reopening it from history resumes the exact same shape even if config defaults change later.
 

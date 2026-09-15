@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { DATA_DIR, dataPath } from './paths.ts';
 import type { Directives } from './directives.ts';
 import type { ClaudeAccountRef } from './claude-account.ts';
+import { findClaudeTranscript, type ClaudeResumeState } from './engine/claude-resume.ts';
 
 const SESSIONS_PATH = dataPath('sessions.json');
 
@@ -45,6 +46,8 @@ export interface SessionMeta {
   /** Claude login the last turn ran on (claude-code engine, subscription auth only). `personal` = the
    *  requester's own routed login (claude-account.ts), false = the box's shared login. Never a token. */
   lastAccount?: ClaudeAccountRef;
+  /** claude-code engine SDK-resume mapping (opt-in flag) — see engine/claude-resume.ts. */
+  claudeResume?: ClaudeResumeState;
   forkedFrom?: string;
 }
 
@@ -383,6 +386,18 @@ export function setSessionModel(sessionId: string, model: string, engine?: strin
   }
 }
 
+/** Store (or clear, with undefined) the claude-code resume mapping. `patch` merges into the existing one. */
+export function setClaudeResume(sessionId: string, state: ClaudeResumeState | undefined, patch?: Partial<ClaudeResumeState>): void {
+  const sessions = loadIndex();
+  const s = sessions.find((x) => x.sessionId === sessionId);
+  if (!s) return;
+  if (patch) { if (!s.claudeResume) return; s.claudeResume = { ...s.claudeResume, ...patch }; }
+  else if (state) s.claudeResume = state;
+  else if (s.claudeResume) delete s.claudeResume;
+  else return;
+  saveIndex(sessions);
+}
+
 export function getSessionsByScheduleId(scheduleId: string): SessionMeta[] {
   return loadIndex()
     .filter((s) => s.scheduleId === scheduleId)
@@ -528,16 +543,8 @@ export function getSessionAbortController(sessionId: string): AbortController | 
   return globalSessionLocks.get(sessionId)?.abortController;
 }
 
-const CLAUDE_PROJECTS_DIR = path.join(homedir(), '.claude', 'projects');
-
 function findSessionFile(sessionId: string): string | null {
-  if (!existsSync(CLAUDE_PROJECTS_DIR)) return null;
-  for (const dir of readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true })) {
-    if (!dir.isDirectory()) continue;
-    const file = path.join(CLAUDE_PROJECTS_DIR, dir.name, `${sessionId}.jsonl`);
-    if (existsSync(file)) return file;
-  }
-  return null;
+  return findClaudeTranscript(sessionId, path.join(homedir(), '.claude'));
 }
 
 // ── Our own conversation store ───────────────────────────────────────────────

@@ -222,7 +222,8 @@ common ones:
 
 Beyond env vars, a typed config module in your data dir declares **global MCP servers**: the tools
 every user gets. (Per-user MCPs are added in the UI, and agent settings like model and engine live
-in `agent-config.json`, editable from the UI.) Shraga seeds it from a template on first run and
+in `agent-config.json`, editable from the UI; `"sdkResume": true` there opts the claude-code engine into
+SDK session resume — see `defaults/skills/platform.md`.) Shraga seeds it from a template on first run and
 gitignores it, so you just edit the seeded file:
 
 ```ts
