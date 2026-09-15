@@ -31,6 +31,7 @@ exit 2
 let root: string;
 let login: ClaudeLogin;
 let globalChanges = 0;
+let changed: string[] = [];
 const owner = { email: 'owner@example.com', isOwner: true };
 const member = { email: 'Member@Example.com', isOwner: false };
 const book: Record<string, { id: string }> = { 'owner@example.com': { id: 'c-owner' }, 'member@example.com': { id: 'c-member' } };
@@ -41,7 +42,8 @@ beforeEach(() => {
   writeFileSync(cli, FAKE_CLI);
   chmodSync(cli, 0o755);
   globalChanges = 0;
-  login = new ClaudeLogin({
+  changed = [];
+  login =new ClaudeLogin({
     cliPath: cli,
     workspaceDir: path.join(root, 'ws'),
     findContact: email => book[email] ?? null,
@@ -50,7 +52,7 @@ beforeEach(() => {
     swap: true,
     urlTimeoutMs: 5_000,
     codeTimeoutMs: 5_000,
-    onGlobalChange: () => { globalChanges++; },
+    onChange: t => { if (t.name === 'global') globalChanges++; else changed.push(t.dir); },
   });
 });
 
@@ -128,5 +130,7 @@ describe('login flow (fake CLI)', () => {
     await login.disconnect(t);
     expect(existsSync(t.dir)).toBe(false);
     expect((await login.status(t)).connected).toBe(false);
+    expect(changed).toEqual([t.dir, t.dir]); // connect + disconnect each invalidate THAT account's usage
+    expect(globalChanges).toBe(0);
   });
 });

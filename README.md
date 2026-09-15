@@ -201,7 +201,8 @@ with:
   also manages the shared login there, no SSH), or by hand:
   `CLAUDE_CONFIG_DIR=<DATA_DIR>/workspace/users/<contactId>/.claude claude auth login`.
   A folder without a login fails the run with the CLI's 401 — it never falls back to the default account.
-  Routed runs don't feed the usage gauge. Same trust model as the default login: the agent's Bash can
+  The **Claude usage** gauge is per viewer: a routed viewer sees their own account's limits (read from
+  that folder only, never the keychain), everyone else the default login's. Same trust model as the default login: the agent's Bash can
   read a routed login just as it can read the default one.
 
 ## Configuration
