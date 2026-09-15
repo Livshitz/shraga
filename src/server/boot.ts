@@ -62,6 +62,7 @@ import { SelfUpgrade } from './self-upgrade/index.ts';
 import { initEngines, getAvailableEngines, getEngine } from './engine/index.ts';
 import { statsSampler } from './stats.ts';
 import { claudeUsage } from './claude-usage.ts';
+import { ClaudeLogin, ClaudeLoginError } from './claude-login.ts';
 import { getAll as getAllContacts } from './contacts.ts';
 import { artifactsRouter } from './artifacts/artifacts.routes.ts';
 import { handleArtifactToolUse } from './artifacts/artifacts.handler.ts';
@@ -249,6 +250,37 @@ app.get('/api/claude-usage', requireAuth, async (_req, res) => {
   if (!usage) return void res.status(204).end();
   res.json(usage);
 });
+
+// Claude subscription login from the web UI (claude-login.ts). `me` = the caller's per-user login
+// (workspace/users/<contactId>/.claude); `global` = the box's shared login, owner only.
+const claudeLogin = new ClaudeLogin({ onGlobalChange: () => claudeUsage.invalidate() });
+const claudeLoginRoute = (fn: (req: express.Request, res: express.Response, user: any) => Promise<unknown>) =>
+  async (req: express.Request, res: express.Response) => {
+    try { await fn(req, res, (req as any).user); }
+    catch (err) {
+      const status = err instanceof ClaudeLoginError ? err.status : 500;
+      if (status === 500) console.error('[claude-login]', err);
+      res.status(status).json({ error: (err as Error).message });
+    }
+  };
+app.get('/api/claude-account', requireAuth, claudeLoginRoute(async (_req, res, user) => {
+  const me = await claudeLogin.status(claudeLogin.resolve('me', user)).catch((err: Error) => {
+    console.debug('[claude-login] no personal target:', err.message);
+    return null;
+  });
+  const global = user?.isOwner ? await claudeLogin.status(claudeLogin.resolve('global', user)) : undefined;
+  res.json({ me, global });
+}));
+app.post('/api/claude-account/:target/login', requireAuth, claudeLoginRoute(async (req, res, user) => {
+  res.json({ url: await claudeLogin.start(claudeLogin.resolve(String(req.params.target), user)) });
+}));
+app.post('/api/claude-account/:target/login/code', requireAuth, claudeLoginRoute(async (req, res, user) => {
+  res.json(await claudeLogin.submitCode(claudeLogin.resolve(String(req.params.target), user), String(req.body?.code ?? '')));
+}));
+app.delete('/api/claude-account/:target', requireAuth, claudeLoginRoute(async (req, res, user) => {
+  await claudeLogin.disconnect(claudeLogin.resolve(String(req.params.target), user));
+  res.json({ ok: true });
+}));
 
 /**
  * Conversation list — PAGED and TRIMMED.

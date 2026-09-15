@@ -197,6 +197,8 @@ with:
 - **Per-user subscriptions (optional).** A requester whose email resolves to a contact with a
   `workspace/users/<contactId>/.claude` folder runs on that folder's login; everyone else keeps the default.
   The folder is data-sync ignored and hidden from the workspace UI. Log each user in once:
+  **Agent Configuration → Claude subscription** in the web UI (Connect / Replace / Use shared; the owner
+  also manages the shared login there, no SSH), or by hand:
   `CLAUDE_CONFIG_DIR=<DATA_DIR>/workspace/users/<contactId>/.claude claude auth login`.
   A folder without a login fails the run with the CLI's 401 — it never falls back to the default account.
   Routed runs don't feed the usage gauge. Same trust model as the default login: the agent's Bash can

@@ -6,6 +6,7 @@ import { Textarea } from './ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogBody, DialogFooter } from './ui/dialog';
 import { useSlots } from '@/lib/slots';
 import { useEngines, type EngineModel } from '@/hooks/useEngines';
+import { ClaudeAccountSection } from './ClaudeAccountSection';
 
 interface AgentConfig {
   model?: string;
@@ -220,6 +221,8 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
           </div>
 
           {slots.settingsSections?.({ getToken, sessionId })}
+
+          <ClaudeAccountSection getToken={getToken} />
 
           <div>
             <label className="text-sm font-medium mb-1.5 block">Permission Mode</label>
