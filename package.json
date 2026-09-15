@@ -55,7 +55,7 @@
     "prepublishOnly": "bun run guard:publish && bun run build"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.141",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.272",
     "@livx.cc/mcp-firebase": "^0.1.14",
     "@radix-ui/react-accordion": "^1.2.2",
     "@radix-ui/react-dialog": "^1.1.4",
