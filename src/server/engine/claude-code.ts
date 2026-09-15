@@ -23,7 +23,7 @@ import { APP_ROOT } from '../paths.ts';
 import { writeMcpConfigFile } from './mcp-config-file.ts';
 import { claudeUsageFor } from '../claude-usage.ts';
 import { claudeAccountDir, applyClaudeAccount, claudeAccountRef, type ClaudeAccountRef } from '../claude-account.ts';
-import { buildAgentEnv, builtinTools, filterMcpServers, allowsEscalate, allowsInternalToken } from '../security/enforce.ts';
+import { buildAgentEnv, builtinTools, filterMcpServers, allowsEscalate, allowsInternalToken, SENSITIVE_PATH_PATTERNS } from '../security/enforce.ts';
 import { escalateMcpServer } from '../security/escalate.ts';
 const IMMUTABLE_SYSTEM_PROMPT = readFileSync(path.resolve(import.meta.dirname, '../../../defaults/system-prompt.md'), 'utf-8');
 const DEFAULT_USER_PROMPT = `You are a helpful assistant with access to MCP tools.`;
@@ -34,10 +34,6 @@ const HISTORY_LIMIT = 50;
 
 const NO_INTERACTIVE_ANSWER = 'No interactive channel is available to answer right now. Use your best judgement to proceed, and surface these options to the user in your reply so they can redirect if needed.';
 
-const SENSITIVE_PATTERNS = [
-  /\.env($|\.)/i, /secrets?\//i, /credentials/i, /\.pem$/i, /\.key$/i,
-  /service.account.*\.json/i, /\/\.claude\/credentials/i,
-];
 const SENSITIVE_BASH_PATTERNS = [
   /\.env\b/i, /\bprintenv\b/i, /\b(env|set)\s*\|/i, /\bsecrets?\//i,
   /credentials/i, /service.account/i, /\.(pem|key)\b/i,
@@ -65,7 +61,7 @@ type DenyResult = { behavior: 'deny'; message: string };
 function checkSensitiveAccess(toolName: string, input: Record<string, unknown>): DenyResult | null {
   const filePath = (input.file_path ?? input.path ?? '') as string;
   if ((toolName === 'Read' || toolName === 'Edit' || toolName === 'Write') && filePath) {
-    if (SENSITIVE_PATTERNS.some(p => p.test(filePath))) {
+    if (SENSITIVE_PATH_PATTERNS.some(p => p.test(filePath))) {
       console.log(`[security] Blocked ${toolName} on sensitive file: ${filePath}`);
       return { behavior: 'deny', message: 'Access to sensitive files (.env, secrets, credentials) is blocked.' };
     }
@@ -417,7 +413,7 @@ export class ClaudeCodeEngine implements AgentEngine {
       // Enforced: the profile gate (re-reads the session floor) runs before ANY handler below, so an
       // `onPermissionRequest: allow` call site can never override a profile deny.
       if (guard) {
-        const gate = guard.check(toolName, input);
+        const gate = guard.check(toolName, input, cwd);
         if (!gate.allow) return { behavior: 'deny' as const, message: gate.message };
       }
       if (toolName === 'AskUserQuestion') {
