@@ -286,12 +286,17 @@ export async function* streamChat(opts: StreamChatOpts): AsyncGenerator<WsEvent>
 
 /** SECURITY_ENFORCE: input from `principal` entered `sessionId` outside a turn it runs (e.g. another human's Slack
  *  thread message) — lower the session floor to that principal's rank. No-op in shadow mode, without a runtime, or
- *  on an invalid (fail-closed) policy. Returns the new floor, or undefined when nothing was done. */
-export async function taintSession(sessionId: string, principal: Principal | (() => Promise<Principal>)): Promise<number | undefined> {
+ *  on an invalid (fail-closed) policy. Several contributors (content from many authors) taint with the LOWEST rank;
+ *  `null` = content whose author could not be resolved — untrusted, rank 0. Returns the new floor, or undefined when
+ *  nothing was done. */
+type Contributor = Principal | null;
+export async function taintSession(sessionId: string, principal: Contributor | Contributor[] | (() => Promise<Contributor | Contributor[]>)): Promise<number | undefined> {
   const sec = security();
   if (!enforcing() || !sec?.policy.valid) return undefined;
-  const p = typeof principal === 'function' ? await principal() : principal;
-  return lowerSessionFloor(sessionId, sec.policy.resolve(p).rank);
+  const got = typeof principal === 'function' ? await principal() : principal;
+  const list = Array.isArray(got) ? got : [got];
+  if (!list.length) return undefined;
+  return lowerSessionFloor(sessionId, Math.min(...list.map((p) => (p ? sec.policy.resolve(p).rank : 0))));
 }
 
 async function* runTurn(opts: StreamChatOpts, guard?: TurnGuard): AsyncGenerator<WsEvent> {

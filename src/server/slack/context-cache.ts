@@ -1,17 +1,29 @@
 import { getChannelHistory, getBotUserId, getAgentUserId, getUserName } from './api.ts';
 import { summarizeText } from '../summarize.ts';
 
-interface CacheEntry {
+/** A channel summary plus who wrote what it summarizes (`undefined` = author unknown), for session taint. */
+export interface ChannelContext {
   summary: string;
+  authors: (string | undefined)[];
+}
+
+interface CacheEntry extends ChannelContext {
   expiresAt: number;
 }
 
 const TTL_MS = 5 * 60 * 1000;
 const cache = new Map<string, CacheEntry>();
 
-export async function getChannelContext(channel: string): Promise<string | null> {
+/** Authors of messages whose content is included, minus our own bot/agent (the agent's own output). A message with no
+ *  `user` (e.g. a webhook/integration post) yields `undefined`: unknown author. Deduped. */
+export function contentAuthors(messages: { user?: string; text?: string }[], ownIds: (string | null | undefined)[]): (string | undefined)[] {
+  const own = new Set(ownIds.filter(Boolean));
+  return [...new Set(messages.filter(m => (m.text || '').trim() && !(m.user && own.has(m.user))).map(m => m.user))];
+}
+
+export async function getChannelContext(channel: string): Promise<ChannelContext | null> {
   const cached = cache.get(channel);
-  if (cached && cached.expiresAt > Date.now()) return cached.summary;
+  if (cached && cached.expiresAt > Date.now()) return cached;
 
   const messages = await getChannelHistory(channel, 20).catch(() => []);
   if (!messages.length) return null;
@@ -33,8 +45,9 @@ export async function getChannelContext(channel: string): Promise<string | null>
   );
   if (!summary) return null;
 
-  cache.set(channel, { summary, expiresAt: Date.now() + TTL_MS });
-  return summary;
+  const entry = { summary, authors: contentAuthors(messages, [botId, agentUid]), expiresAt: Date.now() + TTL_MS };
+  cache.set(channel, entry);
+  return entry;
 }
 
 export function invalidateChannelContext(channel: string): void {

@@ -119,4 +119,18 @@ describe('streamChat with SECURITY_ENFORCE', () => {
     expect(await taintSession(sid, async () => fromSlack('UGUEST'))).toBe(20);
     expect(getSessionFloor(sid)).toBe(20);
   });
+
+  test('taintSession with several authors takes the LOWEST rank; an unresolved author (null) is rank 0; none is a no-op', async () => {
+    init();
+    process.env.SECURITY_ENFORCE = 'true';
+    const owner = fromAuthUser({ uid: 'o', email: OWNER });
+    const sid = `se-${crypto.randomUUID()}`;
+    await turn(owner, sid, 'enf-probe-enforcing');
+    expect(await taintSession(sid, [])).toBeUndefined();
+    expect(await taintSession(sid, async () => [owner, fromSlack('UGUEST'), owner])).toBe(20);
+    const sid2 = `se-${crypto.randomUUID()}`;
+    await turn(owner, sid2, 'enf-probe-enforcing');
+    expect(await taintSession(sid2, async () => [owner, null])).toBe(0);
+    expect(await turn(owner, sid2, 'enf-probe-enforcing')).toEqual([{ type: 'error', message: expect.stringContaining('anonymous') }]);
+  });
 });
