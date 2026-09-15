@@ -5,7 +5,12 @@ import { Input } from '@/components/ui/input';
 import { ErrorBox, fmtTs, iconBtn, inputCls, principalActions, selectCls, tdCls, thCls, useAction, type OwnerCall } from './shared';
 
 interface Rec { ts: string; type: string; principal?: string; role?: string; sessionId?: string; target?: string; reason?: string; hash: string }
-interface Verify { ok: boolean; lines: number; brokenAt?: { file: string; line: number; reason: string } }
+interface Verify { ok: boolean; lines: number; brokenAt?: { file: string; line: number; reason: string }; planted?: string[] }
+/** A failed verify: the real break (file:line, or just the file for a whole-file reason) plus any planted month entries. */
+const verifyText = ({ brokenAt: b, planted }: Verify) => [
+  b && !(b.reason === 'not-regular-file' && planted?.length) ? `chain broken at ${b.file || 'audit dir'}${b.line ? `:${b.line}` : ''} (${b.reason})` : '',
+  planted?.length ? `planted entries (not regular files): ${planted.join(', ')}` : '',
+].filter(Boolean).join(' · ') || 'chain verify failed';
 const TYPES = ['auth.allow', 'auth.deny', 'role.resolve', 'turn.start', 'turn.end', 'tool.allow', 'tool.deny', 'guard.limit', 'guard.block',
   'escalate', 'policy.change', 'policy.tamper', 'key.create', 'key.revoke', 'token.revoke', 'session.delete'];
 const PAGE = 100;
@@ -70,7 +75,7 @@ export function AuditTab({ call, onOpenSession, onPolicyChange, ownerIds }: { ca
           <button onClick={check} title="Re-verify the hash chain"
             className={`flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border ${verify.ok ? 'border-green-500/50 text-green-600 dark:text-green-400' : 'border-destructive text-destructive'}`}>
             {verify.ok ? <ShieldCheck className="w-3.5 h-3.5" /> : <ShieldAlert className="w-3.5 h-3.5" />}
-            {verify.ok ? `chain verified · ${verify.lines} lines` : `chain BROKEN at ${verify.brokenAt?.file}:${verify.brokenAt?.line} (${verify.brokenAt?.reason})`}
+            {verify.ok ? `chain verified · ${verify.lines} lines` : verifyText(verify)}
           </button>
         )}
       </div>
