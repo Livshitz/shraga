@@ -130,7 +130,16 @@ Prefer a programmatic `createShraga().registerFeature(...)` embed when you own t
   keys use the `uck_` prefix (stored hashed; optional role cap + expiry; minted only by an interactive login; an
   uncapped key keeps its creator's owner status/role per request, a role-capped key is never owner). Revocation: owners invalidate a
   principal's tokens via `POST /api/owner/tokens/revoke` (`policy.tokensValidAfter`) and delete keys via
-  `/api/owner/api-keys`. `passive`/`SHRAGA_PASSIVE` boots HTTP-only (no schedulers/consumers/
+  `/api/owner/api-keys`.
+- **Owner Console API** ([`src/server/security/owner-routes.ts`](../../../src/server/security/owner-routes.ts)):
+  `GET|PUT /api/owner/policy` (PUT needs `version` from GET, 409 if missing/stale; blocklist + tokensValidAfter are kept
+  from the current policy), `POST /api/owner/policy/test`, `GET /api/owner/principals`, `GET|POST|DELETE /api/owner/blocks`
+  (a block matching an OWNERS principal → 400), `POST /api/owner/tokens/revoke`, `GET|POST /api/owner/api-keys` +
+  `DELETE /api/owner/api-keys/:id`, `DELETE /api/owner/sessions/:id` (409 while a turn runs; audited `session.delete`),
+  `GET /api/owner/audit` + `/audit/verify`. Writes → 409 on a PASSIVE standby. **Who:** `requireOwner` routes
+  (`/api/owner/*`, `PUT /api/config`, `PUT /api/mcps`, skills mutations) never accept the internal token (the agent
+  subprocess carries an owner-signed one) — owner = interactive login or uncapped owner API key; console **writes**
+  (policy PUT, blocks, revoke, key create/delete, session delete) = interactive login only. `passive`/`SHRAGA_PASSIVE` boots HTTP-only (no schedulers/consumers/
   writers) for standby twins.
 
 ## Deploy model (generic pattern)

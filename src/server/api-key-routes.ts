@@ -9,6 +9,8 @@ import { security } from './security/runtime.ts';
 export class ApiKeyRoutesOptions {
   base: string = '/api/api-keys';
   gate: RequestHandler[] = [];
+  /** Extra gates for create/delete (after `gate`). */
+  writeGate: RequestHandler[] = [];
   /** Owner console: sees/deletes every key and may set `role`/`expiresAt`. Self: own keys (all when the caller is an
    *  owner, as before) and label only. */
   asOwner: boolean = false;
@@ -23,7 +25,7 @@ function fail(res: Response, e: any): void {
 }
 
 export function apiKeyRouter(options?: Partial<ApiKeyRoutesOptions>): Router {
-  const { base, gate, asOwner } = { ...new ApiKeyRoutesOptions(), ...options };
+  const { base, gate, writeGate, asOwner } = { ...new ApiKeyRoutesOptions(), ...options };
   const router = Router();
   const isOwner = (u: AuthUser) => asOwner || u.isOwner;
 
@@ -33,7 +35,7 @@ export function apiKeyRouter(options?: Partial<ApiKeyRoutesOptions>): Router {
   });
 
   /** Body: { label?, role?, expiresAt? (epoch ms) } — role/expiresAt honored on the owner mount only. Plaintext returned once. */
-  router.post(base, ...gate, (req, res) => {
+  router.post(base, ...gate, ...writeGate, (req, res) => {
     const user = userOf(req);
     // Minting a key is minting a credential AS this identity — only an interactive login may (same rule as OAuth
     // consent). Otherwise a role-capped or expiring key could mint itself an uncapped, non-expiring one.
@@ -50,7 +52,7 @@ export function apiKeyRouter(options?: Partial<ApiKeyRoutesOptions>): Router {
     } catch (e: any) { fail(res, e); }
   });
 
-  router.delete(`${base}/:id`, ...gate, (req: Request<{ id: string }>, res) => {
+  router.delete(`${base}/:id`, ...gate, ...writeGate, (req: Request<{ id: string }>, res) => {
     const user = userOf(req);
     try {
       const r = apiKeyStore().delete(req.params.id, user.uid, isOwner(user), user.principal.id);

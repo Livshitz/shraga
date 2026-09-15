@@ -4,11 +4,11 @@ import { ErrorBox, fmtTs, iconBtn, principalActions, selectCls, tdCls, thCls, us
 
 interface Row { id: string; kind: string; lastRole?: string; lastSeen: string; turns: number; denies: number }
 
-export function PrincipalsTab({ call }: { call: OwnerCall }) {
+export function PrincipalsTab({ call, onPolicyChange, ownerIds }: { call: OwnerCall; onPolicyChange: () => Promise<void>; ownerIds: string[] }) {
   const [days, setDays] = useState(7);
   const [data, setData] = useState<{ principals: Row[]; truncated: boolean } | null>(null);
   const { busy, error, run } = useAction();
-  const actions = principalActions(call);
+  const actions = principalActions(call, onPolicyChange, ownerIds);
   const load = useCallback(() => run('load', async () => setData(await call(`/principals?days=${days}`))), [call, days]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
 
@@ -42,7 +42,7 @@ export function PrincipalsTab({ call }: { call: OwnerCall }) {
                   {actions.canRevoke(p.id) && (
                     <button className={`${iconBtn} mr-2`} title="Revoke tokens" disabled={!!busy} onClick={() => run(`rv-${p.id}`, () => actions.revoke(p.id))}><KeyRound className="w-3.5 h-3.5" /></button>
                   )}
-                  <button className={`${iconBtn} hover:text-destructive`} title="Block" disabled={!!busy} onClick={() => run(`bl-${p.id}`, () => actions.block(p.id))}><Ban className="w-3.5 h-3.5" /></button>
+                  {actions.canBlock(p.id) &&<button className={`${iconBtn} hover:text-destructive`} title="Block" disabled={!!busy} onClick={() => run(`bl-${p.id}`, () => actions.block(p.id))}><Ban className="w-3.5 h-3.5" /></button>}
                 </td>
               </tr>
             ))}
