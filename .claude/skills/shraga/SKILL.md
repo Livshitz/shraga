@@ -40,6 +40,8 @@ they are load-bearing, read them before you build. Start with [`AGENTS.md`](../.
 1. **CLI / `bunx shraga`** — env-configured, zero code. `createShraga(fromEnv()).start()` under the
    hood; configure with `PORT` / `DATA_DIR` / `AUTH_PROVIDER` / `.env`. Seed a local user with
    `shraga user add <email> <password>`. This is the standard self-host.
+   - `SECURITY_ENFORCE=true` — the guard (blocklist, rate limits, auto-block, turn ceiling) denies; unset = shadow (audit only).
+   - `TRUSTED_PROXIES` — IPs/CIDRs whose `X-Forwarded-For` is trusted; without it same-host proxy traffic arrives from loopback and IP-based limits/blocks don't apply — set `127.0.0.1,::1` when that proxy is the only ingress.
 2. **Library embed** — `import { createShraga } from 'shraga'`, register against the seams, own the
    lifecycle (`start()` → `ServerHandle`, `stop()` to shut down without exiting the process). See
    README → "Use as a library" and the `ShragaOptions` doc-comments in `src/index.ts`.
