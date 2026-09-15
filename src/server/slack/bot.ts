@@ -6,7 +6,7 @@
 import crypto from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { streamChat, taintSession, type AttachmentMeta, type WsEvent } from '../claude.ts';
+import { streamChat, taintSession, enforcedRank, type AttachmentMeta, type WsEvent } from '../claude.ts';
 import { handleArtifactToolUse } from '../artifacts/artifacts.handler.ts';
 import { getMcpConfig } from '../mcp.ts';
 import { dataPath } from '../paths.ts';
@@ -21,9 +21,9 @@ import {
 import { pipeAgentReply, type AgentEvent, type IngressMessage } from 'mcp-slack-use/src/ingress.ts';
 import { makeSlackQuestionHandler } from './questions.ts';
 import * as contacts from '../contacts.ts';
-import { fromInternal, fromSlack } from '../security/principal.ts';
+import { fromInternal, fromSlack, type Principal } from '../security/principal.ts';
 import { admitTurn } from '../security/runtime.ts';
-import { getChannelContext, invalidateChannelContext, contentAuthors } from './context-cache.ts';
+import { getChannelContext, invalidateChannelContext, trustedMessages, type AuthorTrust } from './context-cache.ts';
 import { noteSlackSeen } from '../downtime.ts';
 import { getOrCreateSession, registerThreadAlias, setLastMessageTs, setUseUserToken, findSlackSessionBySessionId, getProactiveOrigin, hasSessionForThread, isSlackBotPlaceholderEmail } from './sessions.ts';
 
@@ -44,13 +44,13 @@ export function setBroadcast(fn: Broadcast): void { broadcastFn = fn; }
 
 const mdText = (b: ConvBlock): b is { type: 'text'; text: string } => b.type === 'text';
 
-/** Content by these Slack authors entered the session: taint it with the LOWEST of their ranks (SECURITY_ENFORCE only;
- *  lazy, so shadow mode makes no Slack call). `undefined` = unknown author → rank 0; an unresolvable profile resolves
- *  without email — fail closed. Authors come from contentAuthors (our own bot/agent excluded). */
-const taintWithAuthors = (sessionId: string, authors: (string | undefined)[]) =>
-  taintSession(sessionId, () => Promise.all(authors.map(async (u) => (u ? fromSlack(u, {
-    email: await getUserProfile(u).then((p) => p.email, (err: any) => { console.error(`[slack-bot] getUserProfile failed (taint ${u}):`, err?.message); return null; }),
-  }) : null))));
+/** SECURITY_ENFORCE: channel context / thread history the invoker may see — only authors ranked ≥ the invoker's rank.
+ *  Undefined in shadow mode (everything is ingested, as before). A failed profile lookup rejects → message excluded. */
+function authorTrust(invoker: Principal): AuthorTrust | undefined {
+  const minRank = enforcedRank(invoker);
+  if (minRank === undefined) return undefined;
+  return { minRank, rankOf: async (u) => enforcedRank(fromSlack(u, { email: (await getUserProfile(u)).email })) };
+}
 
 // ── Semantic gate ─────────────────────────────────────────────────────────────
 // Protocol-level routing (bot echoes, DM identity, dedupe) is the ingress's job. This is the app-side
@@ -173,6 +173,9 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
     contact = contacts.upsert({ slackId: msg.user, email: profile.email || undefined, name: profile.name || undefined });
   }
   const sessionUser = contact?.emails.length ? { uid: contact.id, email: contact.emails[0], name: contact.name } : undefined;
+  // The real human sender; a message with no Slack user falls back to the bot identity, marked internal.
+  const principal = msg.user ? fromSlack(msg.user, { email: contact?.emails[0] }) : fromInternal({ uid: SLACK_UID, lane: 'slack' });
+  const trust = authorTrust(principal);
 
   let isNew: boolean;
   let sessionId: string;
@@ -185,7 +188,7 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
     const ctxType = isDM ? 'dm' as const : isMention ? 'mention' as const : 'channel' as const;
     const [channelName, channelCtx] = await Promise.all([
       isDM ? null : getChannelName(channel).catch(err => { console.error('[slack-bot] getChannelName failed:', err.message); return null; }),
-      isDM ? null : getChannelContext(channel).catch(err => { console.error('[slack-bot] getChannelContext failed:', err.message); return null; }),
+      isDM ? null : getChannelContext(channel, trust).catch(err => { console.error('[slack-bot] getChannelContext failed:', err.message); return null; }),
     ]);
     const userName = contact?.name || null;
     const resolvedChannel = isDM ? undefined : (channelName || undefined);
@@ -196,9 +199,8 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
         : `#${channelName || 'channel'} context`;
       appendMessage(sessionId, {
         id: crypto.randomUUID(), role: 'user',
-        blocks: [{ type: 'context', label, text: `${channelCtx.summary}\n\n[Use mcp-slack-use tools (get_slack_history_by_channel, post_slack_message) for further context or replies. Always read channel history before posting.]` }],
+        blocks: [{ type: 'context', label, text: `${channelCtx}\n\n[Use mcp-slack-use tools (get_slack_history_by_channel, post_slack_message) for further context or replies. Always read channel history before posting.]` }],
       });
-      await taintWithAuthors(sessionId, channelCtx.authors);
     }
   }
 
@@ -213,9 +215,11 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
       const seen = new Set(getSession(sessionId)?.seenSlackTs ?? []);
       const seedOnly = !isNew && seen.size === 0;
       const processedTs: string[] = [];
+      const fresh = seedOnly ? [] : threadMsgs.filter((m) => m.ts !== msg.ts && !(m.ts && seen.has(m.ts)));
+      const ingest = new Set(trust ? await trustedMessages(fresh, [botId, agentUserId], trust) : fresh);
       for (const m of threadMsgs) {
         if (m.ts) processedTs.push(m.ts);
-        if (m.ts === msg.ts || (m.ts && seen.has(m.ts)) || seedOnly) continue;
+        if (!ingest.has(m)) continue;
         const isBot = m.bot_id || m.user === botId || (agentUserId && m.user === agentUserId);
         const role = isBot ? 'assistant' : 'user';
         let msgText = (m.text || '').replace(new RegExp(`<@${botId}>\\s*`, 'g'), '').trim();
@@ -225,8 +229,6 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
         const speakerName = !isBot && m.user ? await getUserName(m.user).catch(() => null) : null;
         const prefixed = speakerName ? `[${speakerName}]: ${resolved}` : resolved;
         appendMessage(sessionId, { id: crypto.randomUUID(), role, blocks: [{ type: 'text', text: prefixed }], channel: 'slack' });
-        // Another author's message is input to this session: taint it with their rank.
-        await taintWithAuthors(sessionId, contentAuthors([m], [botId, agentUserId]));
       }
       recordSeenSlackTs(sessionId, [...processedTs, msg.ts]);
     } else if (isNew) {
@@ -235,14 +237,11 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
         console.error(`[slack] Failed to fetch root message for ${channel}:${msg.rawThreadTs}:`, err?.message || err);
         return null;
       });
-      if (root?.text) {
+      if (root?.text && (!trust || (await trustedMessages([root], [botId, agentUserId], trust)).length)) {
         let cleanRoot = root.text.replace(new RegExp(`<@${botId}>\\s*`, 'g'), '').trim();
         if (agentUserId) cleanRoot = cleanRoot.replace(new RegExp(`<@${agentUserId}>\\s*`, 'g'), '').trim();
         const resolved = await resolveUserMentions(cleanRoot);
-        if (resolved) {
-          appendMessage(sessionId, { id: crypto.randomUUID(), role: 'user', blocks: [{ type: 'context', label: 'Thread root message', text: resolved }], channel: 'slack' });
-          await taintWithAuthors(sessionId, contentAuthors([root], [botId, agentUserId]));
-        }
+        if (resolved) appendMessage(sessionId, { id: crypto.randomUUID(), role: 'user', blocks: [{ type: 'context', label: 'Thread root message', text: resolved }], channel: 'slack' });
       }
     }
   }
@@ -291,8 +290,6 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
     { type: 'text' as const, text: resolvedText },
   ];
   const senderName = contact?.name || contact?.emails[0]?.split('@')[0] || undefined;
-  // The real human sender; a message with no Slack user falls back to the bot identity, marked internal.
-  const principal = msg.user ? fromSlack(msg.user, { email: contact?.emails[0] }) : fromInternal({ uid: SLACK_UID, lane: 'slack' });
   appendMessage(sessionId, { id: crypto.randomUUID(), role: 'user', blocks: userBlocks, channel: 'slack', senderName });
   // Taint at the append, not only at turn start: if the session is busy below, no turn runs for this message but the
   // next turn still reads it (SECURITY_ENFORCE only).
