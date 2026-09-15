@@ -23,6 +23,8 @@ import { APP_ROOT } from '../paths.ts';
 import { writeMcpConfigFile } from './mcp-config-file.ts';
 import { claudeUsageFor } from '../claude-usage.ts';
 import { claudeAccountDir, applyClaudeAccount, claudeAccountRef, type ClaudeAccountRef } from '../claude-account.ts';
+import { buildAgentEnv, builtinTools, filterMcpServers, allowsEscalate, allowsInternalToken } from '../security/enforce.ts';
+import { escalateMcpServer } from '../security/escalate.ts';
 const IMMUTABLE_SYSTEM_PROMPT = readFileSync(path.resolve(import.meta.dirname, '../../../defaults/system-prompt.md'), 'utf-8');
 const DEFAULT_USER_PROMPT = `You are a helpful assistant with access to MCP tools.`;
 const DEFAULT_ALLOWED_TOOLS = ['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch'];
@@ -242,6 +244,7 @@ async function* buildLegacyImagePrompt(text: string, images: string[], sessionId
 
 export class ClaudeCodeEngine implements AgentEngine {
   readonly name = 'claude-code';
+  readonly enforcesProfile = true;
 
   getModels(): EngineModel[] {
     return [
@@ -329,8 +332,11 @@ export class ClaudeCodeEngine implements AgentEngine {
     const fullPrompt = plan.prompt;
     const permMode = opts.onPermissionRequest ? 'default' : (config.permissionMode ?? 'acceptEdits');
 
-    const sdkEnv: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
+    // SECURITY_ENFORCE: the effective profile at spawn decides env/tools/MCPs; the per-call gate re-reads it (enforce.ts).
+    const guard = opts.security;
+    const eff = guard?.current();
+    const sdkEnv: Record<string, string> = eff ? buildAgentEnv(process.env, eff.profile) : {};
+    if (!eff) for (const [k, v] of Object.entries(process.env)) {
       if (v !== undefined) sdkEnv[k] = v;
     }
     // Injected for the agent's own tools/scripts. Each is written under both the canonical
@@ -366,12 +372,18 @@ export class ClaudeCodeEngine implements AgentEngine {
     let initModel: string | undefined;
     sdkEnv.INTERNAL_API_TOKEN = signInternalToken(opts.uid, opts.userEmail || 'unknown');
 
+    if (eff && !allowsInternalToken(eff.profile)) delete sdkEnv.INTERNAL_API_TOKEN;
+
     const baseAllowed = config.allowedTools ?? DEFAULT_ALLOWED_TOOLS;
-    const allowedTools = baseAllowed.includes('ToolSearch') ? baseAllowed : [...baseAllowed, 'ToolSearch'];
+    const withToolSearch = baseAllowed.includes('ToolSearch') ? baseAllowed : [...baseAllowed, 'ToolSearch'];
+    // Enforced: built-in tool AVAILABILITY is the profile's (tools outside it are not in the model's context), and
+    // auto-approval never widens it.
+    const available = eff ? builtinTools(eff.profile) : 'all';
+    const allowedTools = available === 'all' ? withToolSearch : withToolSearch.filter((t) => available.includes(t));
     const maxTurns = directives.turns ?? config.maxTurns ?? 50;
 
     const options: Record<string, unknown> = {
-      tools: { type: 'preset', preset: 'claude_code' },
+      tools: available === 'all' ? { type: 'preset', preset: 'claude_code' } : available,
       env: sdkEnv,
       allowedTools,
       cwd,
@@ -391,7 +403,9 @@ export class ClaudeCodeEngine implements AgentEngine {
       skills: listSkills(),
       disallowedTools: ['Skill'],
       agents: loadAgents(),
-      hooks: buildHooks({ exemptBashCommand: opts.foregroundBashCommand }),
+      // Enforced: the profile gate runs FIRST on every tool call — hooks fire even for auto-approved `allowedTools`,
+      // which never reach canUseTool.
+      hooks: ((h) => (guard ? { ...h, PreToolUse: [{ hooks: [guard.hook()] }, ...(h.PreToolUse ?? [])] } : h))(buildHooks({ exemptBashCommand: opts.foregroundBashCommand })),
     };
 
     const userHandler = opts.onPermissionRequest;
@@ -400,6 +414,12 @@ export class ClaudeCodeEngine implements AgentEngine {
     options['canUseTool'] = async (toolName: string, input: Record<string, unknown>) => {
       const denied = checkSensitiveAccess(toolName, input);
       if (denied) return denied;
+      // Enforced: the profile gate (re-reads the session floor) runs before ANY handler below, so an
+      // `onPermissionRequest: allow` call site can never override a profile deny.
+      if (guard) {
+        const gate = guard.check(toolName, input);
+        if (!gate.allow) return { behavior: 'deny' as const, message: gate.message };
+      }
       if (toolName === 'AskUserQuestion') {
         const questions = (input.questions ?? []) as AskQuestion[];
         const answers = questionHandler
@@ -479,12 +499,25 @@ export class ClaudeCodeEngine implements AgentEngine {
     // server's credentials) on the CLI's argv, where `ps` / `/proc` / journald expose it. See
     // writeMcpConfigFile. Setting both would re-add the argv copy, so it's one or the other.
     let mcpConfigFile: { path: string; cleanup: () => void } | undefined;
-    if (opts.mcpServers && Object.keys(opts.mcpServers).length > 0) {
-      mcpConfigFile = writeMcpConfigFile(opts.mcpServers);
+    // Enforced: servers outside profile.mcps never reach the file, so the CLI never starts them.
+    const mcpServers = eff ? filterMcpServers(opts.mcpServers, eff.profile) : opts.mcpServers;
+    if (mcpServers && Object.keys(mcpServers).length > 0) {
+      mcpConfigFile = writeMcpConfigFile(mcpServers);
       options['extraArgs'] = { ...(options['extraArgs'] as Record<string, string> | undefined), 'mcp-config': mcpConfigFile.path };
     }
+    // `escalate` is an in-process SDK server (no credentials): `options.mcpServers` hands the CLI only its name.
+    if (guard && eff && allowsEscalate(eff.profile)) {
+      const { principal } = guard.options;
+      const lastUser = opts.conversation.findLast((m) => m.role === 'user');
+      const excerpt = lastUser?.blocks.map((b) => (b.type === 'text' ? b.text : '')).filter(Boolean).join('\n') || opts.prompt;
+      const server = escalateMcpServer({
+        principal, role: () => guard.current().role, sessionId: opts.sessionId, excerpt,
+        channel: [principal.kind, principal.attrs.lane, opts.context?.source].filter(Boolean).join(':'),
+      });
+      options['mcpServers'] = { [server.name]: server };
+    }
 
-    const mcpNames = opts.mcpServers ? Object.keys(opts.mcpServers) : [];
+    const mcpNames = mcpServers ? Object.keys(mcpServers) : [];
     const activeModel = (options['model'] as string) || 'default';
     const directivesTag = Object.keys(directives).length ? ` directives=${JSON.stringify(directives)}` : '';
     console.log(`[claude] Starting query user=${opts.uid} session=${opts.sessionId ?? 'new'} model=${activeModel} perms=${config.permissionMode} mcps=[${mcpNames.join(',')}]${directivesTag} cwd=${cwd}`);

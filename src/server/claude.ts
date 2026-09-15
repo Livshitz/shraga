@@ -3,7 +3,8 @@ import { summarizeText } from './summarize.ts';
 import { dataSync } from './data-sync.ts';
 import type { McpConfig } from './mcp.ts';
 import type { ClaudeAccountRef } from './claude-account.ts';
-import { loadConversation, saveConversation, appendMessage, getSession, setSessionDirectives, addTriggeredSkills, upsertSession, setClaudeResume, type ConvMessage, type ConvBlock } from './sessions.ts';
+import { loadConversation, saveConversation, appendMessage, getSession, setSessionDirectives, addTriggeredSkills, upsertSession, setClaudeResume, getSessionFloor, lowerSessionFloor, type ConvMessage, type ConvBlock } from './sessions.ts';
+import { enforcing, TurnGuard } from './security/enforce.ts';
 import { createTurnAccumulator, type TurnStreamHooks } from './turn-stream.ts';
 import {
   resolveDefaultSkillsContent,
@@ -224,22 +225,51 @@ export interface StreamChatOpts {
   context?: Record<string, string>;
 }
 
-/** Run one agent turn. Shadow-mode security wrapper: resolves the principal's role/profile and audits
- *  turn.start / turn.end around the unchanged turn. Auditing can never alter or break the turn. */
+/** Run one agent turn. Security wrapper: resolves the principal's role/profile and audits turn.start / turn.end.
+ *  SHADOW (SECURITY_ENFORCE off): the turn is unchanged; auditing can never alter or break it.
+ *  ENFORCE: the session floor is lowered to the caller's rank (taint), the turn runs under a TurnGuard whose
+ *  effective profile the engine applies, and it FAILS CLOSED — no runtime, a resolution error, or an effective
+ *  profile with `outbound: false` (e.g. `none`) refuses the turn with an `error` event. */
 export async function* streamChat(opts: StreamChatOpts): AsyncGenerator<WsEvent> {
   const sec = security();
-  if (!sec) { yield* runTurn(opts); return; }
+  const enforce = enforcing();
+  if (!sec) {
+    if (!enforce) { yield* runTurn(opts); return; }
+    console.error('[security] SECURITY_ENFORCE is on but the security runtime is not initialized — refusing the turn');
+    yield { type: 'error', message: 'Security enforcement is on but not initialized, so this turn was not run.' };
+    return;
+  }
   const { principal, sessionId } = opts;
   let role: string | undefined;
+  let guard: TurnGuard | undefined;
+  let refusal: string | undefined;
   try {
     const d = sec.decide(principal, sessionId);
     role = d.role;
-    sec.record({ type: 'turn.start', principal: principal.id, role, sessionId, meta: { kind: principal.kind, lane: principal.attrs.lane, source: opts.context?.source, profile: d.profile, rank: d.rank, wouldDeny: d.wouldDeny } });
-  } catch (e: any) { console.error('[security] turn.start audit failed:', e.message); }
+    let enforced: Record<string, unknown> = {};
+    if (enforce) {
+      // A broken policy fails closed at resolve time already; it must not ALSO permanently taint every session it touches.
+      if (sessionId && sec.policy.valid) lowerSessionFloor(sessionId, d.rank);
+      guard = new TurnGuard({ runtime: sec, principal, sessionId, role: d.role, rank: d.rank, floorOf: getSessionFloor });
+      const eff = guard.current();
+      if (!eff.profile.outbound) refusal = `This conversation runs as role "${eff.role}", which is not permitted to run the agent.`;
+      enforced = { enforced: true, effectiveRole: eff.role, effectiveProfile: eff.profileName, floor: sessionId ? getSessionFloor(sessionId) : undefined };
+    }
+    sec.record({ type: 'turn.start', principal: principal.id, role, sessionId, meta: { kind: principal.kind, lane: principal.attrs.lane, source: opts.context?.source, profile: d.profile, rank: d.rank, wouldDeny: d.wouldDeny, ...enforced } });
+  } catch (e: any) {
+    console.error('[security] turn.start audit failed:', e.message);
+    if (enforce) refusal = 'The security check for this turn failed, so it was not run.';
+  }
   const started = Date.now();
   let outcome = 'closed';
   try {
-    for await (const ev of runTurn(opts)) {
+    if (enforce && (refusal || !guard)) {
+      outcome = 'denied';
+      console.warn(`[security] Refused turn for ${principal.id} session=${sessionId ?? 'new'}: ${refusal}`);
+      yield { type: 'error', message: refusal ?? 'The security check for this turn failed, so it was not run.' };
+      return;
+    }
+    for await (const ev of runTurn(opts, guard)) {
       if (ev.type === 'done') outcome = 'done';
       else if (ev.type === 'error') outcome = 'error';
       yield ev;
@@ -254,7 +284,17 @@ export async function* streamChat(opts: StreamChatOpts): AsyncGenerator<WsEvent>
   }
 }
 
-async function* runTurn(opts: StreamChatOpts): AsyncGenerator<WsEvent> {
+/** SECURITY_ENFORCE: input from `principal` entered `sessionId` outside a turn it runs (e.g. another human's Slack
+ *  thread message) — lower the session floor to that principal's rank. No-op in shadow mode, without a runtime, or
+ *  on an invalid (fail-closed) policy. Returns the new floor, or undefined when nothing was done. */
+export async function taintSession(sessionId: string, principal: Principal | (() => Promise<Principal>)): Promise<number | undefined> {
+  const sec = security();
+  if (!enforcing() || !sec?.policy.valid) return undefined;
+  const p = typeof principal === 'function' ? await principal() : principal;
+  return lowerSessionFloor(sessionId, sec.policy.resolve(p).rank);
+}
+
+async function* runTurn(opts: StreamChatOpts, guard?: TurnGuard): AsyncGenerator<WsEvent> {
   const config = getAgentConfig();
   const { prompt: cleanPrompt, directives: parsed, unresolvedModel } = parseDirectives(opts.prompt);
 
@@ -432,6 +472,16 @@ async function* runTurn(opts: StreamChatOpts): AsyncGenerator<WsEvent> {
     yield { type: 'error', message };
     return;
   }
+  // An engine that doesn't apply the profile can only run a turn that needs no restriction.
+  if (guard && !engine.enforcesProfile) {
+    const { profile, role } = guard.current();
+    if (!(profile.tools.includes('*') && profile.mcps.includes('*') && profile.env.includes('*'))) {
+      const message = `Engine "${engine.name}" does not enforce security profiles, so it cannot run this conversation's role "${role}".`;
+      console.error(`[security] ${message} (user=${opts.uid} session=${sessionId})`);
+      yield { type: 'error', message };
+      return;
+    }
+  }
   console.log(`[stream] engine=${engine.name} user=${opts.uid} session=${sessionId}`);
   // Another engine's turn never reaches the claude-code transcript, so a stored SDK-resume mapping is
   // stale from here on — mark it; the claude-code engine then falls back to a fresh query (engine-switch).
@@ -458,6 +508,7 @@ async function* runTurn(opts: StreamChatOpts): AsyncGenerator<WsEvent> {
     turnHints: opts.turnHints,
     conversationReset: opts.conversationReset,
     context: opts.context,
+    ...(guard ? { security: guard } : {}),
     directives,
     config,
   });
