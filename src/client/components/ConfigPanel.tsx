@@ -102,7 +102,7 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
   /** Throws the server's error message on a non-2xx, so save() surfaces it instead of closing. */
   const send = async (url: string, body: unknown, auth: Record<string, string>) => {
     const res = await fetch(url, { method: 'PUT', headers: auth, body: JSON.stringify(body) });
-    const data = await res.json().catch(() => ({}));
+    const data = await res.json().catch((e) => { console.warn('[config] response not JSON', url, res.status, e); return {}; });
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     return data;
   };

@@ -54,7 +54,7 @@ export function SkillsManager({ getToken, onSkillsChange, trigger }: Props) {
   /** True if the mutation succeeded; otherwise surfaces the server's error and returns false. */
   const ok = async (res: Response, what: string) => {
     if (res.ok) { setError(null); return true; }
-    const msg = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+    const msg = (await res.json().catch((e) => { console.warn(`[SkillsManager] ${what} error response not JSON`, res.status, e); return {}; })).error || `HTTP ${res.status}`;
     console.warn(`[SkillsManager] ${what} failed`, msg);
     setError(`${what} failed: ${msg}`);
     return false;

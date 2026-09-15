@@ -52,7 +52,7 @@ export function McpManager({ getToken, trigger }: Props) {
         headers: { Authorization: `Bearer ${token ?? ''}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(config),
       });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error((await res.json().catch((e) => { console.warn('[McpManager] error response not JSON', res.status, e); return {}; })).error || `HTTP ${res.status}`);
       setOpen(false);
     } catch (e: any) {
       console.error('[McpManager] save failed', e);

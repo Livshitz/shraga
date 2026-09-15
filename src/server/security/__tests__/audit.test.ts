@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, appendFileSync, chmodSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, appendFileSync, chmodSync, symlinkSync, mkdirSync, utimesSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Audit, GENESIS_HASH, canonical, __resetAuditHeadsForTest, type AuditRecord } from '../audit.ts';
@@ -231,6 +231,39 @@ describe('Audit hardening (regressions)', () => {
     expect(readdirSync(path.join(dir, 'audit')).sort()).toEqual(['2026-01.jsonl', '2026-02.jsonl']);
     expect(mk().verify()).toEqual({ ok: true, lines: 8 });
     expect(a.failures + b.failures).toBe(0);
+  });
+
+  test('two REAL processes appending flat out concurrently serialize into one valid chain (cross-process lock)', async () => {
+    const d = path.join(dir, 'audit'), N = 400, startAt = Date.now() + 300;
+    const code = `const { Audit } = await import(${JSON.stringify(path.join(import.meta.dir, '../audit.ts'))});
+      const a = new Audit({ dir: process.env.DIR, log: { info() {}, warn() {}, error() {} } });
+      while (Date.now() < ${startAt}) await Bun.sleep(1);
+      for (let i = 0; i < ${N}; i++) a.append({ type: 'auth.allow', principal: process.env.TAG + i });
+      process.stdout.write(String(a.failures));`; // raw write: console.log colorizes numbers under FORCE_COLOR
+    const kids = ['A', 'B'].map(TAG => Bun.spawn(['bun', '-e', code], { env: { ...process.env, DIR: d, TAG }, stdout: 'pipe', stderr: 'inherit' }));
+    const out = await Promise.all(kids.map(async k => { const o = await new Response(k.stdout).text(); expect(await k.exited).toBe(0); return Number(o.trim()); }));
+    expect(out).toEqual([0, 0]);
+    expect(mk().verify()).toEqual({ ok: true, lines: 2 * N });
+  }, 20_000);
+
+  test('lock: a stale lock is broken (warned) and the append proceeds', () => {
+    const d = path.join(dir, 'audit'), lk = path.join(d, '.lock'), warns: string[] = [];
+    mkdirSync(lk, { recursive: true }); utimesSync(lk, new Date(Date.now() - 10_000), new Date(Date.now() - 10_000));
+    const a = new Audit({ dir: d, clock: () => now, log: { ...quiet, warn: (m: string) => warns.push(m) } });
+    expect(a.append({ type: 'auth.allow' })).not.toBeNull();
+    expect(warns.some(w => w.includes('broke stale lock'))).toBe(true);
+    expect(existsSync(lk)).toBe(false); // released
+  });
+
+  test('lock: a held (fresh) lock times out → append returns null, counted, logged, nothing written', () => {
+    const d = path.join(dir, 'audit'), lk = path.join(d, '.lock');
+    mkdirSync(lk, { recursive: true });
+    const a = mk(), t = Date.now();
+    expect(a.append({ type: 'auth.allow' })).toBeNull();
+    expect(Date.now() - t).toBeLessThan(1000); // bounded wait
+    expect(a.failures).toBe(1);
+    expect(errors.some(e => e.includes('not acquired'))).toBe(true);
+    expect(readdirSync(d)).toEqual(['.lock']); // no month file, and the other holder's lock is untouched
   });
 
   test('unreadable dir: appends fail (no genesis fork), verify reports unreadable, heals once readable', () => {
