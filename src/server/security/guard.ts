@@ -105,8 +105,8 @@ export class GuardLimits {
   blockWindowMs: number = 10 * 60_000;
   /** …for this long. */
   blockTtlMs: number = 60 * 60_000;
-  /** Principals at/above this rank are rate-limited but never auto-blocked (an owner can't lock themselves out). */
-  autoBlockExemptRank: number = 100;
+  /** Principals at/above this rank (owner, operator) are rate-limited but never auto-blocked or denied by IP-keyed state. */
+  autoBlockExemptRank: number = 80;
   /** Cap per in-memory map (buckets, hit windows, blocks). */
   maxKeys: number = 10_000;
 }
@@ -217,7 +217,7 @@ export class Guard {
       const retryAfter = manual.until ? Math.max(1, Math.ceil(manual.until - now / 1000)) : undefined;
       return { ok: false, status: 403, reason: 'blocked', ...(retryAfter ? { retryAfter } : {}) };
     }
-    // IP-keyed state never denies an exempt rank: a shared IP (NAT, same-host proxy) blocked by a guest must not lock out the owner.
+    // IP-keyed state never denies an exempt rank: a shared IP (NAT, same-host proxy) blocked by a guest must not lock out an owner/operator.
     const exempt = rank >= this.limits.autoBlockExemptRank;
     for (const key of [pKey, exempt ? undefined : ipKey]) {
       const b = key ? this.activeBlock(key, now) : undefined;

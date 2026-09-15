@@ -82,13 +82,18 @@ describe('shared IP', () => {
   const guest = fromApiKey({ id: 'guest', uid: 'g' });
   const owner = fromAuthUser({ uid: 'o', email: 'o@x.test' });
 
-  test('100 guest denials from one IP never lock the owner out of that IP', () => {
+  test('100 guest denials from one IP never lock the owner or an operator out of that IP', () => {
     const { g } = mk({ limits: { ip: '5/h' } });
     let denials = 0;
     for (let i = 0; denials < 100; i++) if (!g.check({ principal: guest, ip: IP, rank: 20, rate: '100000/h' }).ok) denials++;
     expect(g.list().map(b => b.key)).toContain(`ip:${IP}`); // single principal drove it → the IP IS blocked for guests
     expect(g.check({ principal: guest, ip: IP, rank: 20, rate: '100000/h' })).toMatchObject({ ok: false, reason: 'blocked' });
     expect(g.check({ principal: owner, ip: IP, rank: 100, rate: '600/h' })).toEqual({ ok: true });
+    const operator = fromAuthUser({ uid: 'op', email: 'op@x.test' });
+    expect(g.check({ principal: operator, ip: IP, rank: 80, rate: '600/h' })).toEqual({ ok: true });
+    // Documented trade-off: a different guest behind the same NAT IS denied until the IP block expires.
+    const neighbour = fromApiKey({ id: 'guest2', uid: 'g2' });
+    expect(g.check({ principal: neighbour, ip: IP, rank: 20, rate: '100000/h' })).toMatchObject({ ok: false, status: 403, reason: 'blocked' });
   });
 
   test('hits from more than one authenticated principal never auto-block the IP', () => {
