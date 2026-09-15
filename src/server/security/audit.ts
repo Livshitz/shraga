@@ -77,7 +77,7 @@ export interface AuditEvent {
 export interface AuditRecord extends AuditEvent { ts: string; prevHash: string; hash: string }
 export interface AuditQuery { from?: string | number | Date; to?: string | number | Date; type?: AuditEventType | AuditEventType[]; principal?: string; limit: number; cursor?: string }
 export interface AuditPage { items: AuditRecord[]; nextCursor?: string }
-export interface AuditVerify { ok: boolean; lines: number; brokenAt?: { file: string; line: number; reason: 'unparseable' | 'prev-hash' | 'hash' | 'unreadable' | 'not-regular-file' } }
+export interface AuditVerify { ok: boolean; lines: number; brokenAt?: { file: string; line: number; reason: 'unparseable' | 'prev-hash' | 'hash' | 'unreadable' | 'not-regular-file' }; /** Planted (non-regular) month entries seen, in order. */ planted?: string[] }
 /** A month-named entry that isn't a regular file (see header: planted entries). */
 export interface AuditAnomaly { dir: string; file: string; kind: string }
 
@@ -465,7 +465,7 @@ export class Audit {
     try {
       if (file) {
         const base = path.basename(file), i = all.indexOf(base);
-        if (planted.has(base)) return { ok: false, lines: 0, brokenAt: { file: base, line: 0, reason: 'not-regular-file' } };
+        if (planted.has(base)) return { ok: false, lines: 0, brokenAt: { file: base, line: 0, reason: 'not-regular-file' }, planted: [base] };
         if (i === -1) return { ok: false, lines: 0, brokenAt: { file: base, line: 0, reason: 'unparseable' } };
         targets = [base];
         for (let j = i - 1; j >= 0 && expected === GENESIS_HASH; j--) {
@@ -473,18 +473,22 @@ export class Audit {
           for (const { line } of reverseLines(path.join(this.options.dir, f))) { const r = parse(line); if (r) { expected = r.hash; break; } }
         }
       }
+      // A planted entry (undeletable under +a) must not mask a real break later in the chain: note it, keep verifying
+      // the regular files, and report it only when the chain itself is intact.
+      const seen = targets.filter(t => planted.has(t)), withPlanted = seen.length ? { planted: seen } : {};
       for (f of targets) {
-        if (planted.has(f)) return { ok: false, lines, brokenAt: { file: f, line: 0, reason: 'not-regular-file' } };
+        if (planted.has(f)) continue;
         for (const { line, n } of forwardLines(path.join(this.options.dir, f))) {
           lines++;
           const r = parse(line);
-          if (!r) return { ok: false, lines, brokenAt: { file: f, line: n, reason: 'unparseable' } };
-          if (r.prevHash !== expected) return { ok: false, lines, brokenAt: { file: f, line: n, reason: 'prev-hash' } };
+          if (!r) return { ok: false, lines, brokenAt: { file: f, line: n, reason: 'unparseable' }, ...withPlanted };
+          if (r.prevHash !== expected) return { ok: false, lines, brokenAt: { file: f, line: n, reason: 'prev-hash' }, ...withPlanted };
           const { hash, ...rest } = r;
-          if (hashOf(rest) !== hash) return { ok: false, lines, brokenAt: { file: f, line: n, reason: 'hash' } };
+          if (hashOf(rest) !== hash) return { ok: false, lines, brokenAt: { file: f, line: n, reason: 'hash' }, ...withPlanted };
           expected = hash;
         }
       }
+      if (seen.length) return { ok: false, lines, brokenAt: { file: seen[0], line: 0, reason: 'not-regular-file' }, planted: seen };
       return { ok: true, lines };
     } catch (e: any) {
       this.options.log.error(`[audit] verify cannot read ${f}: ${e.message}`);
