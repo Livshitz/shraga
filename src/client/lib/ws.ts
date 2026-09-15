@@ -1,3 +1,8 @@
+import { reportWsDown, reportWsUp } from '@/lib/backendHealth';
+import { logger } from '@/lib/debug';
+
+const log = logger.forComponent('ws');
+
 /** Subprotocol marker used to carry a bearer token through a WebSocket handshake: open the socket as
  * `new WebSocket(url, [WS_AUTH_PROTOCOL, token])`. Browsers can't set headers on a WS handshake, and the
  * subprotocol list is the one field they can — used by the sidecar WS proxy (see authenticateWsUpgrade
@@ -72,7 +77,7 @@ export class AgentSocket {
     this.intentionalClose = false;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const url = `${proto}://${location.host}/ws`;
-    console.log('[ws] connecting…');
+    log.debug('connecting…');
     this.ws = new WebSocket(url);
 
     this.ws.onopen = async () => {
@@ -81,11 +86,12 @@ export class AgentSocket {
       try {
         token = await this.tokenProvider();
       } catch (err) {
-        console.warn('[ws] token fetch failed', err);
+        log.warn('token fetch failed', err);
       }
       if (this.ws?.readyState !== WebSocket.OPEN) return;
-      console.log('[ws] open, sending auth');
+      log.debug('open, sending auth');
       this.ws.send(JSON.stringify({ type: 'auth', token }));
+      reportWsUp();
       if (this.reconnecting) {
         this.reconnecting = false;
         this.listeners.forEach((l) => l({ type: 'reconnected' }));
@@ -95,7 +101,7 @@ export class AgentSocket {
     this.ws.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data) as ServerEvent;
-        if (data.type !== 'text_delta') console.log('[ws] ←', data.type);
+        if (data.type !== 'text_delta') log.verbose('←', data.type);
         if (data.type === 'auth_ok') {
           this.authRetries = 0;
           this.flushPending();
@@ -113,37 +119,38 @@ export class AgentSocket {
             this.intentionalClose = true;
           } else {
             this.authRetries++;
-            console.log(`[ws] auth failed (attempt ${this.authRetries}), will retry with fresh token`);
+            log.warn(`auth failed (attempt ${this.authRetries}), will retry with fresh token`);
           }
         }
         this.listeners.forEach((l) => l(data));
       } catch (err) {
-        console.warn('[ws] bad frame', err);
+        log.warn('bad frame', err);
       }
     };
 
     this.ws.onclose = (e) => {
-      console.log(`[ws] closed code=${e.code} intentional=${this.intentionalClose}`);
+      log.debug(`closed code=${e.code} intentional=${this.intentionalClose}`);
       if (!this.intentionalClose) {
         this.reconnecting = true;
         this.connectAttempts++;
+        reportWsDown(e.code);
         this.listeners.forEach((l) => l({ type: 'disconnected' }));
         const base = this.authRetries > 0 ? Math.min(2000 * this.authRetries, 10000) : Math.min(1000 * 2 ** this.connectAttempts, 30000);
         const jitter = Math.random() * 1000;
         const delay = base + jitter;
-        console.log(`[ws] reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${this.connectAttempts})`);
+        log.debug(`reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${this.connectAttempts})`);
         setTimeout(() => this.connect(this.tokenProvider), delay);
       }
     };
 
-    this.ws.onerror = (e) => console.warn('[ws] error', e);
+    this.ws.onerror = (e) => log.warn('error', e);
   }
 
   private flushPending() {
     if (this.pendingMessage) {
       const msg = this.pendingMessage;
       this.pendingMessage = null;
-      console.log('[ws] flushing pending message after reconnect');
+      log.debug('flushing pending message after reconnect');
       if (!this.send(msg)) {
         this.pendingMessage = msg;
       }
@@ -152,24 +159,25 @@ export class AgentSocket {
 
   disconnect() {
     this.intentionalClose = true;
+    reportWsUp(); // an intentional close is not a fault — don't leave a stale banner behind
     this.ws?.close();
     this.ws = null;
   }
 
   send(msg: object): boolean {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      console.log('[ws] →', (msg as any).type);
+      log.verbose('→', (msg as any).type);
       this.ws.send(JSON.stringify(msg));
       return true;
     }
-    console.warn('[ws] send failed, readyState=', this.ws?.readyState);
+    log.warn('send failed, readyState=', this.ws?.readyState);
     return false;
   }
 
   sendOrQueue(msg: object): boolean {
     if (this.send(msg)) return true;
     this.pendingMessage = msg;
-    console.log('[ws] message queued for reconnect');
+    log.debug('message queued for reconnect');
     return false;
   }
 

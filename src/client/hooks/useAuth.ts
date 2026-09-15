@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { onAuth, signOutUser, hasFirebase } from '@/lib/firebase';
+import { reportApiFailure, reportApiResponse } from '@/lib/backendHealth';
+import { logger } from '@/lib/debug';
+
+const log = logger.forComponent('useAuth');
 
 export interface AuthUser {
   uid: string;
@@ -47,13 +51,18 @@ export function useAuth(): AuthState {
       let m: 'local' | 'firebase' = hasFirebase ? 'firebase' : 'local';
       try {
         const r = await fetch('/api/auth/mode');
+        // The ONLY unauthenticated request the app makes, so it is the one chance to detect a hijacked
+        // backend BEFORE login. Without this a port-hijack just renders the login page forever with no
+        // explanation — the sign-in never succeeds and nothing on screen says why.
+        reportApiResponse('/api/auth/mode', r);
         if (r.ok) {
           const d = await r.json();
           m = d.provider === 'firebase' ? 'firebase' : 'local';
           setNeedsSetup(!!d.needsSetup);
         }
-      } catch {
-        /* fall back to firebase-presence heuristic */
+      } catch (err) {
+        reportApiFailure('/api/auth/mode', err);
+        log.warn('auth-mode probe failed — falling back to the firebase-presence heuristic', err);
       }
       setMode(m);
 
