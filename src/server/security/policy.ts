@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, watch, writeFileSync, 
 import path from 'node:path';
 import { dataPath } from '../paths.ts';
 import { isOwnerEmail } from '../owners.ts';
-import type { Principal, PrincipalKind } from './principal.ts';
+import { fromAuthUser, isSystemPrincipal, type Principal, type PrincipalKind } from './principal.ts';
 
 export type ReadScope = 'all' | 'own' | 'none';
 export interface Profile { tools: string[]; mcps: string[]; env: string[]; outbound: boolean; readScope: ReadScope; rate: string }
@@ -37,6 +37,8 @@ export interface Resolved { role: string; rank: number; profile: Profile; profil
 export type TamperReason = 'hash-mismatch' | 'deleted';
 
 export const OWNER_ROLE = 'owner';
+/** Role of no-human system lanes (see resolve). */
+export const OPERATOR_ROLE = 'operator';
 const NONE_PROFILE: Profile = { tools: [], mcps: [], env: [], outbound: false, readScope: 'none', rate: '0' };
 const FULL_PROFILE: Profile = { tools: ['*'], mcps: ['*'], env: ['*'], outbound: true, readScope: 'all', rate: '600/h' };
 
@@ -342,17 +344,38 @@ export class Policy {
     return { role: name, rank: def.rank, profileName: def.profile, profile: c.profiles.get(def.profile) ?? NONE_PROFILE };
   }
 
-  /** principal → role/profile. Owner (env, authenticated login only) first, then first matching binding, else default.
-   *  A DKIM-verified email or other channel carrying an owner address is NOT owner — it goes through bindings. */
+  /**
+   * principal → role/profile. First rule that applies:
+   * 1. SYSTEM LANE (`isSystemPrincipal`: built-in/module schedules, legacy raw internal token) → `operator`.
+   *    No human is behind it; the deployment itself runs it. (Fail-closed policy has no operator → default.)
+   * 2. OWNER (OWNERS env) — only for an authenticated login (`user`) or an `internal` principal acting FOR a user
+   *    (wake, web-retry, scheduler with a user `createdBy`, slack-retry, the agent's scoped token). That run was started
+   *    by that authenticated user, so it re-resolves exactly as their login would NOW: a revoked/downgraded creator
+   *    runs with their current role. The session floor (taint) still caps it at turn time.
+   *    A DKIM-verified email, a Slack sender or an api key carrying an owner address is NOT owner.
+   * 3. First matching binding. `internal` and `slack` principals with an email ALSO match bindings as that email's
+   *    verified login would (`kind:"user"` view) — so Slack senders resolve through the same email bindings as the
+   *    web, never to owner. Their own-kind bindings (`kind:"slack"`, id) still apply; the earliest binding wins.
+   * 4. Default role.
+   */
   public resolve(p: Principal): Resolved {
-    if (p.kind === 'user' && p.verified && p.email && isOwnerEmail(p.email)) return this.resolved(OWNER_ROLE);
+    if (isSystemPrincipal(p)) return this.resolved(OPERATOR_ROLE);
+    if ((p.kind === 'user' || p.kind === 'internal') && p.verified && p.email && isOwnerEmail(p.email)) return this.resolved(OWNER_ROLE);
+    const asUser = (p.kind === 'internal' || p.kind === 'slack') && p.verified && p.email
+      ? fromAuthUser({ uid: String(p.attrs.uid ?? p.attrs.slackUserId ?? p.email), email: p.email }) : undefined;
+    const best = Math.min(this.firstBinding(p), asUser ? this.firstBinding(asUser) : Infinity);
+    return this.resolved(best === Infinity ? this.compiled.file.default : this.compiled.file.bindings[best].role);
+  }
+
+  /** Index of the first binding matching `p`, or Infinity. */
+  private firstBinding(p: Principal): number {
     const c = this.compiled, b = c.file.bindings;
     let best = Infinity;
     const scan = (idx?: number[]) => { if (idx) for (const i of idx) { if (i >= best) break; if (matches(b[i].match, p)) { best = i; break; } } };
     if (p.email) scan(c.byEmail.get(p.email));
     if (p.domain) scan(c.byDomain.get(p.domain));
     scan(c.generic);
-    return this.resolved(best === Infinity ? c.file.default : b[best].role);
+    return best;
   }
 
   /** The highest-ranked role strictly below owner (else the default) — the ceiling for a non-interactive principal. */
