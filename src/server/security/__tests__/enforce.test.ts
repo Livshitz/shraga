@@ -222,7 +222,7 @@ describe('taint floor', () => {
       for (const g of [member, owner]) {
         expect(g.check('Read', { file_path: path.join(ws, 'README.md') })).toEqual({ allow: true });
         expect(g.check('Read', { file_path: 'src/app.ts' }, ws)).toEqual({ allow: true });
-        expect(g.check('Glob', { pattern: '**/*.ts', path: ws })).toEqual({ allow: true });
+        expect(g.check('Glob', { pattern: '**/*.ts', path: ws }, ws)).toEqual({ allow: true });
         expect(g.check('Glob', { pattern: '**/*' }, ws)).toEqual({ allow: true }); // listing names only; contents stay gated
         expect(g.check('LS', { path: ws })).toEqual({ allow: true });
         expect(g.check('WebSearch', { query: 'credentials rotation .env' })).toEqual({ allow: true });
@@ -230,6 +230,39 @@ describe('taint floor', () => {
       expect(owner.check('Grep', { pattern: 'credentials', path: ws })).toEqual({ allow: true }); // a content regex is not a path
       expect(owner.check('Bash', { command: 'ls data' })).toEqual({ allow: true });
       expect(denied(owner, 'Bash', { command: 'cat data/.local-auth-secret' })).toBe(true);
+    });
+
+    test('owner (full, best-effort): real secret files denied, legit look-alikes allowed', () => {
+      const { owner } = guards();
+      const { ws } = workspace();
+      for (const p of ['.env', '.env.local', 'certs/tls.pem', 'data/.local-auth-secret', 'home/.claude/.credentials.json']) expect([p, denied(owner, 'Read', { file_path: p }, ws)]).toEqual([p, true]);
+      for (const p of ['.env.example', '.env.sample', '.env.template', 'src/server/claude-credentials.ts', 'docs/secrets/README.md', 'src/config/app.env.ts'])
+        expect([p, owner.check('Edit', { file_path: p }, ws)]).toEqual([p, { allow: true }]);
+      expect(owner.check('Glob', { pattern: 'src/**/*.env.ts' }, ws)).toEqual({ allow: true });
+      expect(denied(owner, 'Glob', { pattern: '**/.env*' }, ws)).toBe(true);
+      expect(owner.check('Glob', { pattern: '*', path: '/etc' }, ws)).toEqual({ allow: true }); // no workspace bound for full profiles
+      expect(denied(owner, 'Read', { file_path: '/proc/1/task/1/environ' })).toBe(true);
+    });
+
+    test('restricted (member): no Grep/Bash even when listed; nothing under /proc or /sys; Glob only inside the workspace', () => {
+      const { rt, member } = guards();
+      const { ws, vault } = workspace();
+      expect(builtinTools({ tools: ['Read', 'Grep', 'Bash', 'Glob'], mcps: [] })).toEqual(['Read', 'Glob']);
+      expect(profileAllowsTool({ tools: ['Grep', 'Bash'], mcps: [] }, 'Grep')).toBe(false);
+      const p = rt.policy.current;
+      p.profiles.standard.tools = [...p.profiles.standard.tools, 'Grep', 'Bash'];
+      rt.policy.save(p);
+      expect(member.check('Grep', { pattern: 'README', path: ws }, ws)).toEqual({ allow: false, message: expect.stringContaining('not available') });
+      expect(denied(member, 'Bash', { command: 'ls' }, ws)).toBe(true);
+      for (const f of ['/proc/1/task/1/environ', '/proc/self/environ', '/proc/self/cmdline', '/proc/1/root/etc/passwd', '/sys/kernel/notes'])
+        expect([f, denied(member, 'Read', { file_path: f }, ws)]).toEqual([f, true]);
+      expect(member.check('Glob', { pattern: 'src/*.ts' }, ws)).toEqual({ allow: true });
+      expect(member.check('Glob', { pattern: '*', path: path.join(ws, 'src') }, ws)).toEqual({ allow: true });
+      expect(member.check('Glob', { pattern: '*', path: vault }, ws)).toEqual({ allow: false, message: expect.stringContaining('workspace') });
+      expect(denied(member, 'Glob', { pattern: '/etc/*' }, ws)).toBe(true);
+      expect(denied(member, 'Glob', { pattern: '../vault/*' }, ws)).toBe(true);
+      expect(denied(member, 'Glob', { pattern: 'src/../../vault/*' }, ws)).toBe(true);
+      expect(rt.audit.query({ limit: 50, type: 'tool.deny' }).items.some(r => r.reason === 'outside-workspace')).toBe(true);
     });
   });
 

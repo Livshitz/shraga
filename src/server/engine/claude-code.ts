@@ -408,7 +408,8 @@ export class ClaudeCodeEngine implements AgentEngine {
     const destructiveHandler = opts.onDestructiveApproval;
     const questionHandler = opts.onUserQuestion;
     options['canUseTool'] = async (toolName: string, input: Record<string, unknown>) => {
-      const denied = checkSensitiveAccess(toolName, input);
+      // Enforced: TurnGuard owns the file-path deny (tightened list); the legacy path list stays flag-OFF behavior only.
+      const denied = guard && toolName !== 'Bash' ? null : checkSensitiveAccess(toolName, input);
       if (denied) return denied;
       // Enforced: the profile gate (re-reads the session floor) runs before ANY handler below, so an
       // `onPermissionRequest: allow` call site can never override a profile deny.
