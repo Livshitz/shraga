@@ -220,17 +220,25 @@ export class Policy {
           return;
         }
         this.save(this.migrate());
-        writeFileSync(this.markerPath, `${new Date().toISOString()}\n`, { mode: 0o600 });
         log.info(`[policy] migrated → ${p}`);
+        this.ensureMarker();
         return;
       }
       const raw = readFileSync(p, 'utf8');
       this.trustedHash = sha256(raw);
       this.apply(raw);
+      this.ensureMarker(); // heals a marker write that failed on an earlier boot
     } catch (e: any) {
       if (!existsSync(p)) this.trustedHash = null; // save() recorded a hash it never wrote
       this.failClosedNow(`load/migration failed: ${e.message}`);
     }
+  }
+
+  /** Write the `.migrated` marker if missing. Failure only logs — it never affects the loaded policy. */
+  private ensureMarker(): void {
+    try {
+      if (!existsSync(this.markerPath)) writeFileSync(this.markerPath, `${new Date().toISOString()}\n`, { mode: 0o600 });
+    } catch (e: any) { this.options.log.error(`[policy] marker write failed (${this.markerPath}): ${e.message}`); }
   }
 
   private apply(raw: string): boolean {
