@@ -255,6 +255,28 @@ describe('as the active instance', () => {
     expect(v.body.lines).toBeGreaterThan(0);
   }));
 
+  // A planted month entry (undeletable under chattr +a) must not blind the console: query + principals skip it,
+  // verify names it. A far-future name sorts FIRST in the newest-first scan, so the query really meets it.
+  test('audit + principals keep working with a planted month entry; verify reports it', () => asActive(async () => {
+    const s = await sec();
+    const { mkdirSync, rmdirSync } = await import('node:fs');
+    const planted = `${s.audit.options.dir}/2099-01.jsonl`;
+    const id = `user:planted-${T}@console.test`;
+    s.record({ type: 'turn.start', principal: id, role: 'guest', sessionId: 'sp' });
+    mkdirSync(planted);
+    try {
+      const q = await json(ownerTok, 'GET', `/api/owner/audit?principal=${encodeURIComponent(id)}&from=${Date.now() - 3_600_000}`);
+      expect(q.status).toBe(200);
+      expect(q.body.items.map((r: any) => r.principal)).toEqual([id]);
+      const p = await json(ownerTok, 'GET', '/api/owner/principals?days=1');
+      expect(p.status).toBe(200);
+      expect(p.body.principals.find((r: any) => r.id === id)).toMatchObject({ turns: 1 });
+      const v = await json(ownerTok, 'GET', '/api/owner/audit/verify');
+      expect(v.body).toMatchObject({ ok: false, brokenAt: { file: '2099-01.jsonl', reason: 'not-regular-file' }, planted: ['2099-01.jsonl'] });
+    } finally { rmdirSync(planted); }
+    expect((await json(ownerTok, 'GET', '/api/owner/audit/verify')).body).toMatchObject({ ok: true });
+  }));
+
   // The agent subprocess env carries an owner-signed internal token (engine/claude-code.ts) — it must not reach policy.
   test("owner-signed internal token → 403 on every owner/config/MCP/skills route; an uncapped owner key reads the console but can't write", () => asActive(async () => {
     const { signInternalToken } = await import('../../auth.ts');
