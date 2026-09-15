@@ -55,6 +55,7 @@ import { fromInternal, type Principal } from './security/principal.ts';
 import { initSecurity, security, admitTurn, requestIp } from './security/runtime.ts';
 import { writeDenial } from './security/guard.ts';
 import { requireOwner } from './security/owner-only.ts';
+import { flushEscalations } from './security/escalate.ts';
 import { lookupIdempotent, rememberIdempotent } from './idempotency.ts';
 import { apiKeyRouter } from './api-key-routes.ts';
 import { addUnread, markRead as markUnread, getUnreads } from './unread.ts';
@@ -2271,6 +2272,14 @@ async function gracefulShutdown(signal: string, opts: { exit?: boolean } = {}) {
   }
 
   console.log(`[server] drain complete — ${getActiveLockCount()} stream(s) still active, closing`);
+
+  // Batched escalation digests live only in memory: hand them to the owners before exiting. Best-effort, bounded.
+  let flushTimer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    flushEscalations().then((n) => { if (n) console.log(`[server] flushed ${n} pending escalation digest(s)`); }),
+    new Promise<void>((r) => { flushTimer = setTimeout(() => { console.warn('[server] escalation flush timed out'); r(); }, 3000); }),
+  ]).catch((e) => console.error('[server] escalation flush failed:', e?.message ?? e));
+  clearTimeout(flushTimer);
 
   for (const [ws, session] of activeConnections) {
     for (const ac of session.abortControllers.values()) ac.abort();
