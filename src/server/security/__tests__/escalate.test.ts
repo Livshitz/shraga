@@ -125,7 +125,7 @@ describe('global cap (rotating principals)', () => {
     endGlobal(); await tick();
     expect(notices).toHaveLength(6);
     const digest = notices[5];
-    expect(digest).toContain('45 escalations');
+    expect(digest).toContain('45 escalations from 45 senders'); // dropped senders counted too, not just the 20 listed
     expect(digest).toContain('(+25 more not shown)');
     expect(digest.match(/^\*From:\*/gm)).toHaveLength(20);
     expect(digest).toContain('*From:* email:a5@evil.test (role guest)');
@@ -144,6 +144,26 @@ describe('global cap (rotating principals)', () => {
     endWindow(); await tick();
     expect(notices).toHaveLength(1);
     expect(notices[0]).toContain('first');
+  });
+
+  test('a failed immediate notice does not consume the global cap', async () => {
+    let fail = true;
+    const { e, notices } = rig(1000, 20, { globalMax: 1, notify: (t: string) => { if (fail) throw new Error('slack down'); notices.push(t); } });
+    expect(await e.escalate(req('first'))).toBe('batched');
+    fail = false;
+    expect(await e.escalate({ ...req('other'), principal: fromEmailSender('o@x.test', true) })).toBe('sent');
+    expect(await e.escalate({ ...req('third'), principal: fromEmailSender('t@x.test', true) })).toBe('batched'); // cap now used
+  });
+
+  test('a dropped escalation is not promised a digest listing; the digest header counts distinct senders', async () => {
+    expect(escalateReply('dropped')).not.toMatch(/have been notified|will reach them/);
+    expect(escalateReply('dropped')).toContain('counted');
+    const { e, notices, endGlobal } = rig(1000, 1, { globalMax: 0 });
+    const a = fromEmailSender('a@x.test', true), b = fromEmailSender('b@x.test', true);
+    expect([await e.escalate({ ...req('1'), principal: a }), await e.escalate({ ...req('2'), principal: a }), await e.escalate({ ...req('3'), principal: b })]).toEqual(['batched', 'dropped', 'dropped']);
+    endGlobal(); await tick();
+    expect(notices[0]).toContain('3 escalations from 2 senders');
+    expect(notices[0]).toContain('(+2 more not shown)');
   });
 
   test('flushAll sends per-principal and global digests (shutdown) and awaits delivery', async () => {
