@@ -10,6 +10,9 @@
 //   message landing mid-turn lowers the running turn. The hook is load-bearing: the SDK auto-approves
 //   `allowedTools` WITHOUT calling canUseTool, whereas PreToolUse hooks fire for every call (hooks.ts relies on it).
 import type { HookCallback, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
 import type { McpConfig } from '../mcp.ts';
 import type { Principal } from './principal.ts';
 import type { Profile, Resolved } from './policy.ts';
@@ -99,15 +102,67 @@ export function buildAgentEnv(source: Record<string, string | undefined>, p: Pic
 /** Only `*` env profiles get the scoped INTERNAL_API_TOKEN (it authenticates HTTP calls back as the user). */
 export const allowsInternalToken = (p: Pick<Profile, 'env'>) => p.env.includes('*') || p.env.includes('INTERNAL_API_TOKEN');
 
-// ── Server credential files ────────────────────────────────────────────────────
-// Reading one of these IS privilege escalation (forge an owner MCP/local token, replay the raw internal secret, lift
-// api keys), so even a Read-only profile must not see them. Path/command backstop for the file tools + Bash, all
-// profiles, enforcement only. (Grep over a parent dir is not covered — protected paths are the tamper step.)
-const SECRET_FILE_RE = /(?:^|[\s/'"=])(?:\.internal-token|\.mcp-oauth-secret|\.local-auth-secret|api-keys\.json|oauth-clients\.json|users\.json)(?:$|[\s'";|&)])/;
-export function touchesServerSecretFile(tool: string, input: Record<string, unknown>): boolean {
-  if (tool === 'Bash') return SECRET_FILE_RE.test(String(input.command ?? ''));
-  const p = input.file_path ?? input.path ?? input.notebook_path;
-  return typeof p === 'string' && SECRET_FILE_RE.test(p);
+// ── Secret paths ─────────────────────────────────────────────────────────────
+// ONE list. Its first part is what the engine denied before enforcement existed (claude-code.ts canUseTool — flag OFF
+// uses exactly that part, so shadow mode denies nothing new). Enforcement adds the server's own credential files and
+// other turns' credentials: reading one IS privilege escalation (forge an owner MCP/local token, replay the raw
+// internal secret, lift api keys, or a concurrent owner turn's MCP env), so EVERY profile — owner included — is denied.
+// The SDK skips canUseTool for auto-approved Read/Glob, so TurnGuard.check (PreToolUse hook) is the gate that holds.
+export const SENSITIVE_PATH_PATTERNS: readonly RegExp[] = [
+  /\.env($|\.)/i, /secrets?\//i, /credentials/i, /\.pem$/i, /\.key$/i,
+  /service.account.*\.json/i, /\/\.claude\/credentials/i,
+];
+const SERVER_SECRET_NAMES = ['.internal-token', '.mcp-oauth-secret', '.local-auth-secret', 'api-keys.json', 'oauth-clients.json', 'users.json']
+  .map(n => n.replace(/[.]/g, '\\.')).join('|');
+export const SECRET_PATH_PATTERNS: readonly RegExp[] = [
+  ...SENSITIVE_PATH_PATTERNS, // incl. .env*, ~/.claude/.credentials.json, workspace/users/*/.claude/.credentials.json
+  new RegExp(`(?:^|/)(?:${SERVER_SECRET_NAMES})$`),
+  /(?:^|\/)shraga-mcp-[^/]*(?:\/|$)/, // engine/mcp-config-file.ts mkdtemp dir: another turn's MCP servers + their env
+  /^\/proc\/[^/]+\/environ$/,
+];
+/** Bash (full profiles only — restricted ones have no Bash): server credential file names as command words. */
+const SECRET_FILE_CMD_RE = new RegExp(`(?:^|[\\s/'"=])(?:${SERVER_SECRET_NAMES})(?:$|[\\s'";|&)])`);
+const GLOB_CHAR = /[*?[\]{}]/;
+
+/** The literal path, its absolute form, and its realpath (deepest existing ancestor resolved, the rest re-appended). */
+function pathForms(p: string, cwd: string): string[] {
+  const abs = path.resolve(cwd, p.startsWith('~/') ? path.join(homedir(), p.slice(2)) : p);
+  const forms = [p, abs];
+  for (let head = abs, tail = ''; ;) {
+    try { forms.push(path.join(realpathSync(head), tail)); break; } catch { /* not there yet: resolve the parent */ }
+    const parent = path.dirname(head);
+    if (parent === head) break;
+    tail = path.join(path.basename(head), tail);
+    head = parent;
+  }
+  return forms;
+}
+
+/** A glob under a root: its literal prefix (up to the first wildcard segment) is realpath-resolved, the rest kept. */
+function globForms(pattern: string, root: string | undefined, cwd: string): string[] {
+  const joined = root && !path.isAbsolute(pattern) ? path.join(root, pattern) : pattern;
+  const segs = joined.split('/');
+  const i = segs.findIndex(s => GLOB_CHAR.test(s));
+  if (i < 0) return pathForms(joined, cwd);
+  const prefix = segs.slice(0, i).join('/') || (joined.startsWith('/') ? '/' : '.');
+  const rest = segs.slice(i).join('/');
+  const forms = [pattern, joined, ...pathForms(prefix, cwd).map(f => path.join(f, rest))];
+  // Wildcards removed too, so `**/.env*` / `*.pem` still read as the secret name they target.
+  return [...forms, ...forms.map(f => f.replace(/[*?]+/g, ''))];
+}
+
+const isSecretPath = (forms: string[]) => forms.some(f => SECRET_PATH_PATTERNS.some(re => re.test(f)));
+const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+
+/** Would this call read/write/list a secret path? File tools match literal + realpath; Glob/Grep match their search root
+ *  and filename pattern (Grep's `pattern` is a content regex, not a path). Glob only lists names — contents stay behind
+ *  the Read gate. Bash: server credential file names (the engine's legacy command patterns still apply on top). */
+export function touchesSecretPath(tool: string, input: Record<string, unknown>, cwd: string = process.cwd()): boolean {
+  if (tool === 'Bash') return SECRET_FILE_CMD_RE.test(String(input.command ?? ''));
+  const root = str(input.path);
+  const pattern = tool === 'Glob' ? str(input.pattern) : tool === 'Grep' ? str(input.glob) : undefined;
+  if (pattern && isSecretPath(globForms(pattern, root, cwd))) return true;
+  return [str(input.file_path), str(input.notebook_path), root].some(p => p !== undefined && isSecretPath(pathForms(p, cwd)));
 }
 
 // ── Turn guard ───────────────────────────────────────────────────────────────
@@ -142,26 +197,27 @@ export class TurnGuard {
   }
 
   /** Gate one tool call. Audits tool.allow / tool.deny (deduped per session+tool+role per window). Never throws. */
-  public check(tool: string, input: Record<string, unknown> = {}): GateResult {
+  /** `cwd` resolves relative paths for the secret-path deny (the hook passes the CLI's; default: this process's). */
+  public check(tool: string, input: Record<string, unknown> = {}, cwd?: string): GateResult {
     const { runtime, principal, sessionId, log } = this.options;
     let eff: Resolved;
     try { eff = this.current(); } catch (e: any) {
       log.error(`[security] effective-role lookup failed — denying ${tool}: ${e.message}`);
       return { allow: false, message: 'Tool use is unavailable right now (security check failed).' };
     }
-    const secretFile = touchesServerSecretFile(tool, input);
+    const secretFile = touchesSecretPath(tool, input, cwd);
     const allowed = !secretFile && profileAllowsTool(eff.profile, tool);
     const base = { principal: principal.id, role: eff.role, sessionId, target: tool };
     try {
       runtime.record(allowed
         ? { type: 'tool.allow', ...base }
-        : { type: 'tool.deny', ...base, reason: secretFile ? 'server-secret-file' : 'profile', meta: { profile: eff.profileName, rank: eff.rank } },
+        : { type: 'tool.deny', ...base, reason: secretFile ? 'secret-path' : 'profile', meta: { profile: eff.profileName, rank: eff.rank } },
       `tool.${allowed ? 'allow' : 'deny'}|${sessionId ?? ''}|${tool}|${eff.role}`);
     } catch (e: any) { log.error(`[security] tool audit failed: ${e.message}`); }
     if (allowed) return { allow: true };
-    log.log(`[security] Denied ${tool} for ${principal.id} (role=${eff.role} profile=${eff.profileName}${secretFile ? ' server-secret-file' : ''}) session=${sessionId ?? 'new'}`);
+    log.log(`[security] Denied ${tool} for ${principal.id} (role=${eff.role} profile=${eff.profileName}${secretFile ? ' secret-path' : ''}) session=${sessionId ?? 'new'}`);
     const hint = allowsEscalate(eff.profile) ? ` Use the ${ESCALATE_TOOL} tool to hand this request to an owner.` : '';
-    return { allow: false, message: secretFile ? 'Server credential files are not accessible.' : `Tool ${tool} is not available to role "${eff.role}" in this session.${hint}` };
+    return { allow: false, message: secretFile ? 'Credential and secret files are not accessible.' : `Tool ${tool} is not available to role "${eff.role}" in this session.${hint}` };
   }
 
   /** PreToolUse hook: the gate on every call, including auto-approved (`allowedTools`) tools. */
@@ -169,7 +225,7 @@ export class TurnGuard {
     return async (input) => {
       if (input.hook_event_name !== 'PreToolUse') return {};
       const { tool_name, tool_input } = input as PreToolUseHookInput;
-      const r = this.check(tool_name, (tool_input ?? {}) as Record<string, unknown>);
+      const r = this.check(tool_name, (tool_input ?? {}) as Record<string, unknown>, (input as PreToolUseHookInput).cwd || undefined);
       if (r.allow) return {};
       return { hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'deny' as const, permissionDecisionReason: r.message } };
     };
