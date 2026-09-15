@@ -10,7 +10,7 @@ Shraga exposes an embedded MCP endpoint at `POST /mcp` so external Claude client
 
 Keys use the `uck_` prefix. `data/api-keys.json` holds only a sha256 hash + a short preview per key — the plaintext is returned once, at create, and can't be recovered (an old plaintext file is hashed on first load, original kept at `api-keys.json.bak`).
 
-A key acts for its creator. Optional `role` caps it (effective role = the lower of the creator's role and the key's role — never owner, never above the creator). Optional `expiresAt` (epoch ms) rejects it from then on.
+A key acts for its creator. Optional `role` caps it (effective role = the lower of the creator's role and the key's role — then never owner, never above the creator). Optional `expiresAt` (epoch ms) rejects it from then on.
 
 **REST endpoints** (require auth; writes return 409 on a passive standby):
 - `POST /api/api-keys` — create your own key. Body: `{ "label": "my-key" }`.
@@ -20,7 +20,7 @@ A key acts for its creator. Optional `role` caps it (effective role = the lower 
 
 **Revoking sessions/tokens** (owner only): `POST /api/owner/tokens/revoke` with `{ "principalId": "user:<email|uid>" }` or `"internal:<uid>"` invalidates every login, MCP OAuth token/code and scoped internal token issued to that principal before now. It does not touch API keys — delete the key instead — nor the legacy shared `INTERNAL_API_TOKEN` (`internal:agent-internal` is refused; rotate the env var).
 
-An API key never acts as owner: owner-only routes answer 403 for any key (even an owner's), its role is capped below owner, and creating keys requires an interactive login.
+Owner and keys: a key WITHOUT `role` is a delegated login credential (e.g. the one `shraga term` gets via browser consent) — it keeps its creator's owner status and role, re-checked on every request, so removing the creator from `OWNERS` takes effect immediately. A key WITH `role` is never owner: owner-only routes answer 403 and its role stays below owner. No key can create keys or approve MCP OAuth consent — both require an interactive login.
 
 **Generating a key via curl** (from an agent session):
 ```bash

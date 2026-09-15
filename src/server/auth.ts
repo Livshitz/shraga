@@ -174,10 +174,12 @@ export interface AuthUser {
   principal: Principal;
 }
 
-// Owner comes only from an interactive login, or a server-minted scoped internal token acting for one. An API key
-// never acts as owner, whatever its creator's email or role cap.
+// Owner comes from an interactive login, a server-minted scoped internal token acting for one, or an UNCAPPED API key
+// (a delegated login credential — only an interactive login can mint a key, e.g. `shraga term`'s /cli-auth consent).
+// A role-capped key is never owner. OWNERS is read per call, so removing the creator takes effect on the next request.
+const ownerCapable = (p: Principal) => p.kind === 'user' || p.kind === 'internal' || (p.kind === 'apikey' && typeof p.attrs.role !== 'string');
 const authUser = (uid: string, email: string, principal: Principal): AuthUser => ({
-  uid, email, principal, isOwner: (principal.kind === 'user' || principal.kind === 'internal') && isOwnerEmail(email),
+  uid, email, principal, isOwner: ownerCapable(principal) && isOwnerEmail(email),
 });
 const internalUser = (t: { uid: string; email: string }) => authUser(t.uid, t.email, fromInternal(t));
 const apiKeyUser = (k: { id: string; uid: string; email: string; role?: string }) => authUser(k.uid, k.email, apiKeyPrincipal(k));

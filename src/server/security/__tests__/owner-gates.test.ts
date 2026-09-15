@@ -169,8 +169,8 @@ describe('owner-gated admin routes', () => {
   }));
 });
 
-describe('API keys never act as owner, and only an interactive login mints keys', () => {
-  test("an owner's key (no role, or guest-capped) → 403 on owner routes, isOwner false; a scoped internal token for the owner stays owner", () => asActive(async () => {
+describe("an owner's uncapped key acts as owner, a role-capped key never does; only an interactive login mints keys", () => {
+  test("uncapped → isOwner + owner routes (until removed from OWNERS); guest-capped → 403; neither mints keys; a scoped internal token for the owner stays owner", () => asActive(async () => {
     (await import('../runtime.ts')).security()!.activate(); // booted PASSIVE: load the policy so role "guest" exists
     const mint = async (body: Record<string, unknown>) => {
       const r = await call(ownerTok, 'POST', '/api/owner/api-keys', body);
@@ -178,15 +178,30 @@ describe('API keys never act as owner, and only an interactive login mints keys'
       expect({ status: r.status, j }).toMatchObject({ status: 200 });
       return j.key as string;
     };
-    const plain = await mint({ label: 'owner-plain' }), capped = await mint({ label: 'owner-guest', role: 'guest' });
+    // `plain` is what `shraga term` gets: POST /api/api-keys from the logged-in consent page, no role.
+    const plain = (await (await call(ownerTok, 'POST', '/api/api-keys', { label: 'shraga term @ test' })).json()).key as string;
+    const capped = await mint({ label: 'owner-guest', role: 'guest' });
     const mcps = await (await call(ownerTok, 'GET', '/api/mcps')).json();
+    const isOwner = async (key: string) => (await (await call(key, 'GET', '/api/config')).json()).isOwner;
+
+    expect(plain).toMatch(/^uck_/);
+    expect(await isOwner(plain)).toBe(true);
+    expect((await call(plain, 'GET', '/api/owner/api-keys')).status).toBe(200);
+    process.env.OWNERS = `someone-else-${Date.now()}@gates.test`; // creator removed from OWNERS → the next request is not owner
+    try {
+      expect(await isOwner(plain)).toBe(false);
+      expect((await call(plain, 'GET', '/api/owner/api-keys')).status).toBe(403);
+    } finally { process.env.OWNERS = OWNER; }
+    expect(await isOwner(plain)).toBe(true); // and back
+
+    expect(capped).toMatch(/^uck_/);
+    expect(await isOwner(capped)).toBe(false);
+    expect((await call(capped, 'PUT', '/api/mcps', mcps)).status).toBe(403);
+    expect((await call(capped, 'GET', '/api/owner/api-keys')).status).toBe(403);
+    expect((await call(capped, 'POST', '/api/owner/tokens/revoke', { principalId: `user:${BOB}` })).status).toBe(403);
+
     for (const key of [plain, capped]) {
-      expect(key).toMatch(/^uck_/);
-      expect((await (await call(key, 'GET', '/api/config')).json()).isOwner).toBe(false);
-      expect((await call(key, 'PUT', '/api/mcps', mcps)).status).toBe(403);
-      expect((await call(key, 'GET', '/api/owner/api-keys')).status).toBe(403);
-      expect((await call(key, 'POST', '/api/owner/tokens/revoke', { principalId: `user:${BOB}` })).status).toBe(403);
-      // the escalation chain: a (capped) key minting an uncapped one, on either mount
+      // the escalation chain: a key (capped or not) minting another key, on either mount
       expect((await call(key, 'POST', '/api/owner/api-keys', { label: 'escalated' })).status).toBe(403);
       const self = await call(key, 'POST', '/api/api-keys', { label: 'escalated-self' });
       expect(self.status).toBe(403);

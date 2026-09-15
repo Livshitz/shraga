@@ -12,13 +12,14 @@ import { Audit, type AuditEvent, type AuditOptions } from './audit.ts';
 import { Guard, type GuardOptions, type TurnAdmission } from './guard.ts';
 import { fromAuthUser, type Principal } from './principal.ts';
 
-/** principal → role. An API key acts for its creator: effective role = min(creator's resolved role, the key's
- *  `attrs.role` when set, the highest role below owner) — a key never exceeds its creator and is never owner. */
+/** principal → role. An API key acts for its creator, re-resolved per call (so an OWNERS removal applies at once):
+ *  - no `attrs.role` (a delegated login credential) ⇒ the creator's role, owner included;
+ *  - `attrs.role` set ⇒ min(creator's role, that role, the highest role below owner) — never above the creator, never owner. */
 export function resolvePrincipal(policy: Policy, p: Principal): Resolved {
   if (p.kind !== 'apikey') return policy.resolve(p);
-  let r = policy.resolve(fromAuthUser({ uid: String(p.attrs.uid ?? ''), email: p.email }));
-  if (r.role === OWNER_ROLE) r = policy.belowOwner();
-  if (typeof p.attrs.role !== 'string') return r;
+  const creator = policy.resolve(fromAuthUser({ uid: String(p.attrs.uid ?? ''), email: p.email }));
+  if (typeof p.attrs.role !== 'string') return creator;
+  const r = creator.role === OWNER_ROLE ? policy.belowOwner() : creator;
   const cap = policy.effective(Infinity, p.attrs.role); // the named role (unknown ⇒ the policy default)
   return cap.rank < r.rank ? cap : r;
 }
