@@ -9,6 +9,7 @@
 // deduped per key per window, so a busy client isn't one line per request.
 import { Policy, type PolicyOptions, type TamperReason } from './policy.ts';
 import { Audit, type AuditEvent, type AuditOptions } from './audit.ts';
+import { Guard, type GuardOptions, type TurnAdmission } from './guard.ts';
 import type { Principal } from './principal.ts';
 
 export interface Decision {
@@ -22,6 +23,7 @@ export interface Decision {
 export class SecurityRuntimeOptions {
   policy: Partial<PolicyOptions> = {};
   audit: Partial<AuditOptions> = {};
+  guard: Partial<GuardOptions> = {};
   /** Audit writes (and tamper notices) only while this is true. */
   isActive: () => boolean = () => true;
   /** A deduped event with the same key is written at most once per window. */
@@ -42,19 +44,34 @@ export class SecurityRuntime {
   public options: SecurityRuntimeOptions;
   public readonly policy: Policy;
   public readonly audit: Audit;
+  public readonly guard: Guard;
   private seen = new Map<string, number>();
 
   public constructor(options?: Partial<SecurityRuntimeOptions>) {
     this.options = { ...new SecurityRuntimeOptions(), ...options };
-    const { policy, audit, log } = this.options;
+    const { policy, audit, guard, log, clock } = this.options;
     this.audit = new Audit({ log, ...audit });
     this.policy = new Policy({ log, isActive: () => this.active(), ...policy, onTamper: (info) => { policy.onTamper?.(info); this.onTamper(info); } });
+    this.guard = new Guard({
+      log, clock, isActive: () => this.active(),
+      audit: (e, k) => this.record(e, k),
+      blocklist: (p) => this.policy.blocked(p, this.options.clock() / 1000),
+      ...guard,
+    });
   }
 
-  /** Passive → active promotion (after `isActive` turns true): re-load the policy from disk with boot trust. */
+  /** Passive → active promotion (after `isActive` turns true): re-load the policy and auto-blocks from disk with boot trust. */
   public activate(): void {
     this.options.log.info('[security] activated — reloading policy from disk');
     this.policy.activate();
+    this.guard.activate();
+  }
+
+  /** Guard a turn start: principal → rank/rate → blocklist, rate, concurrency. Call BEFORE any LLM spend and
+   *  `release()` when the turn ends (try/finally). Shadow unless SECURITY_ENFORCE=true. */
+  public admitTurn(principal: Principal, ctx: { ip?: string; channel?: string } = {}): TurnAdmission {
+    const r = this.policy.resolve(principal);
+    return this.guard.admit({ principal, ...ctx, rank: r.rank, rate: r.profile.rate });
   }
 
   private active(): boolean {
@@ -118,6 +135,21 @@ export function initSecurity(options?: Partial<SecurityRuntimeOptions>): Securit
 
 /** The process-wide runtime, or undefined when never initialized (call sites then skip auditing). */
 export function security(): SecurityRuntime | undefined { return current; }
+
+/**
+ * Turn-start gate for the core lanes AND add-ons (e.g. a Gmail lane): `admitTurn(principal, { ip, channel })`.
+ * `{ ok: false, status, retryAfter?, reason }` only when enforcing; on ok, call `release()` when the turn ends.
+ * No runtime, or a guard bug ⇒ admitted (logged): the guard limits spend, it is not the auth layer.
+ */
+export function admitTurn(principal: Principal, ctx?: { ip?: string; channel?: string }): TurnAdmission {
+  try { return current ? current.admitTurn(principal, ctx) : { ok: true, release: () => {} }; }
+  catch (e: any) { console.error(`[security] admitTurn threw — admitting: ${e?.message ?? e}`); return { ok: true, release: () => {} }; }
+}
+
+/** Client IP of a request/upgrade, honoring TRUSTED_PROXIES. */
+export function requestIp(req: Parameters<Guard['ipOf']>[0]): string | undefined {
+  return current?.guard.ipOf(req);
+}
 
 /** Test-only: drop the process-wide runtime. */
 export function __resetSecurityForTest(): void { current?.close(); current = undefined; }

@@ -15,7 +15,7 @@ import { getAgentConfig, MAX_TURNS_NOTICE } from './claude.ts';
 import { validateApiKey } from './api-keys.ts';
 import { verifyMcpToken } from './auth.ts';
 import { fromApiKey, fromAuthUser, fromInternal, type Principal } from './security/principal.ts';
-import { security } from './security/runtime.ts';
+import { security, admitTurn, requestIp } from './security/runtime.ts';
 import { makeProgressEmitter } from './mcp-progress.ts';
 import { lookupIdempotent, rememberIdempotent } from './idempotency.ts';
 import type { WsEvent } from './claude.ts';
@@ -43,7 +43,7 @@ export interface McpServerDeps {
   runChatTurn: RunChatTurn;
 }
 
-export interface McpCaller { uid: string; email: string; principal: Principal }
+export interface McpCaller { uid: string; email: string; principal: Principal; ip?: string }
 
 /** Identity of the legacy raw INTERNAL_API_TOKEN caller — unchanged effective identity, now an internal principal. */
 const LEGACY_INTERNAL_CALLER: McpCaller = {
@@ -315,6 +315,13 @@ export function createShragaMcp(deps: McpServerDeps) {
       // Pre-allocate the session id so async callers get a real id back immediately
       // (parity with POST /api/chat). Lets timeout-prone MCP clients recover/continue
       // instead of double-submitting and creating duplicate sessions.
+      // Guard before any spend: blocklist → rate → concurrency (shadow unless SECURITY_ENFORCE).
+      const admission = admitTurn(caller.principal, { ip: caller.ip, channel: 'mcp' });
+      if (!admission.ok) {
+        return json({ error: admission.status === 403 ? 'Forbidden' : 'Too many requests', reason: admission.reason, retryAfter: admission.retryAfter },
+          { status: admission.status, headers: admission.retryAfter ? { 'Retry-After': String(admission.retryAfter) } : undefined });
+      }
+
       const sid = sessionId || `api-${crypto.randomUUID()}`;
       if (idemKey) rememberIdempotent(caller.uid, idemKey, sid);
       const turn = { prompt, sessionId: sid, uid: caller.uid, userEmail: caller.email, principal: caller.principal, context: { source: 'mcp', user: caller.email } };
@@ -322,16 +329,19 @@ export function createShragaMcp(deps: McpServerDeps) {
       if (sync === false) {
         // Reject a duplicate before responding 'accepted' (lock is acquired inside the turn).
         if (sessionId && isSessionLocked(sid)) {
+          admission.release();
           return json({ error: 'Session is already processing a request' }, { status: 409 });
         }
         // Fire-and-forget: kick off the turn, return the real session id immediately.
-        void deps.runChatTurn(turn);
+        void deps.runChatTurn(turn).finally(admission.release);
         return json({ sessionId: sid, status: 'accepted' });
       }
 
       // Capture the progress channel here (within the tools/call async context) and stream
       // agent events as notifications/progress. No-op unless the client requested progress.
-      const result = await deps.runChatTurn(turn, { onEvent: makeProgressEmitter(captureMcpProgress()) });
+      let result: Awaited<ReturnType<typeof deps.runChatTurn>>;
+      try { result = await deps.runChatTurn(turn, { onEvent: makeProgressEmitter(captureMcpProgress()) }); }
+      finally { admission.release(); }
       if ('status' in result) return json({ error: 'Session is already processing a request' }, { status: 409 });
       if ('error' in result) return json({ error: result.error, sessionId: result.sessionId }, { status: 500 });
       // A turn that hit the step ceiling is a PARTIAL answer. Without this the MCP caller got the
@@ -454,7 +464,7 @@ export function mountMcpServer(app: Application, deps: McpServerDeps) {
       return void res.status(401).json({ error: 'Unauthorized — provide API key or complete OAuth' });
     }
     security()?.authAllow(caller.principal, via);
-    return mcpCallerStore.run(caller, () => bridge(req, res));
+    return mcpCallerStore.run({ ...caller, ip: requestIp(req) }, () => bridge(req, res));
   });
 
   // Bridge Express Request → Web API Request → MCPAdapter.httpHandler → Express Response. Runs inside

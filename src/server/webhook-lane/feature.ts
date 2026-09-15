@@ -47,6 +47,8 @@ import {
 } from '../sessions.ts';
 import { validateApiKey } from '../api-keys.ts';
 import { fromApiKey, type Principal } from '../security/principal.ts';
+import { admitTurn, requestIp } from '../security/runtime.ts';
+import { writeDenial } from '../security/guard.ts';
 import { WebhookStreamer, type WebhookTarget } from './streamer.ts';
 
 /** One receiver connection, as learned from a turn. Handed to `onTurnAccepted` so an add-on can
@@ -206,6 +208,11 @@ export function createWebhookLaneFeature(opts: WebhookLaneOptions): ServerFeatur
           if (u.protocol !== 'https:' && u.hostname !== 'localhost' && u.hostname !== '127.0.0.1') throw new Error('https required');
         } catch { return void res.status(400).json({ error: 'callback.url must be a valid HTTPS URL' }); }
 
+        // Guard before any spend: blocklist → rate → concurrency (shadow unless SECURITY_ENFORCE).
+        const principal = fromApiKey(caller);
+        const admission = admitTurn(principal, { ip: requestIp(req), channel });
+        if (!admission.ok) return void writeDenial(res, admission);
+
         const cb: WebhookTarget = { url: callback.url, secret: callback.secret, connId };
         try {
           opts.onTurnAccepted?.({ ...cb, convId, at: Date.now(), uid: caller.uid, email: caller.email });
@@ -215,13 +222,14 @@ export function createWebhookLaneFeature(opts: WebhookLaneOptions): ServerFeatur
 
         // ACCEPT, then run. The answer arrives on the callback, so holding this response open would
         // only give the caller's trigger a socket to time out on.
-        res.json({ status: 'accepted', sessionId: sessionId || convId });
+        try { res.json({ status: 'accepted', sessionId: sessionId || convId }); }
+        catch (err) { admission.release(); throw err; }
         void runWebhookTurn({
           callback: cb, convId, msgId, sessionId: sessionId || convId, prompt,
-          uid: caller.uid, userEmail: caller.email, principal: fromApiKey(caller),
+          uid: caller.uid, userEmail: caller.email, principal,
           sendSegments: Array.isArray(accepts) && accepts.includes('segments'),
           channel, source, streamer: opts.streamer,
-        });
+        }).finally(admission.release);
       });
 
       console.log(`[${opts.name}] turn ingress mounted at POST ${opts.route}`);

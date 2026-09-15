@@ -22,6 +22,7 @@ import { pipeAgentReply, type AgentEvent, type IngressMessage } from 'mcp-slack-
 import { makeSlackQuestionHandler } from './questions.ts';
 import * as contacts from '../contacts.ts';
 import { fromInternal, fromSlack } from '../security/principal.ts';
+import { admitTurn } from '../security/runtime.ts';
 import { getChannelContext, invalidateChannelContext } from './context-cache.ts';
 import { noteSlackSeen } from '../downtime.ts';
 import { getOrCreateSession, registerThreadAlias, setLastMessageTs, setUseUserToken, findSlackSessionBySessionId, getProactiveOrigin, hasSessionForThread, isSlackBotPlaceholderEmail } from './sessions.ts';
@@ -287,22 +288,33 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
   if (msg.rawThreadTs) triggerContext.thread = msg.rawThreadTs;
   if (contact?.emails[0]) triggerContext.user = contact.emails[0];
 
+  // The real human sender; a message with no Slack user falls back to the bot identity, marked internal.
+  const principal = msg.user ? fromSlack(msg.user, { email: contact?.emails[0] }) : fromInternal({ uid: SLACK_UID, lane: 'slack' });
+  // Guard before any spend: blocklist → rate → concurrency (shadow unless SECURITY_ENFORCE).
+  const admission = admitTurn(principal, { channel: 'slack' });
+  if (!admission.ok) {
+    console.warn(`[slack-bot] Turn refused for ${principal.id}: ${admission.reason}`);
+    await postMessage(channel, `⏳ _Not now — ${admission.status === 403 ? 'access is blocked' : `too many requests, try again in ${admission.retryAfter ?? 60}s`}._`, threadTs, useUserToken);
+    msg.sessionId = undefined; // nothing to bookkeep — no reply produced
+    return;
+  }
+
   const abortController = new AbortController();
   if (!acquireSessionLock(sessionId, 'slack', abortController)) {
+    admission.release();
     console.warn(`[slack-bot] Session ${sessionId.slice(0, 8)} already locked, queuing in Slack thread`);
     await postMessage(channel, '⏳ _Session is busy — please wait for the current task to finish._', threadTs, useUserToken);
     msg.sessionId = undefined; // nothing to bookkeep — no reply produced
     return;
   }
-  setRunStatus(sessionId, 'running', 'slack');
-  broadcastFn({ type: 'session_messages_changed', sessionId });
-  broadcastFn({ type: 'session_busy', sessionId, busy: true });
 
   try {
+    setRunStatus(sessionId, 'running', 'slack');
+    broadcastFn({ type: 'session_messages_changed', sessionId });
+    broadcastFn({ type: 'session_busy', sessionId, busy: true });
     yield* pumpStream(
       streamChat({
-        // The real human sender; a message with no Slack user falls back to the bot identity, marked internal.
-        principal: msg.user ? fromSlack(msg.user, { email: contact?.emails[0] }) : fromInternal({ uid: SLACK_UID, lane: 'slack' }),
+        principal,
         prompt: resolvedText,
         attachments: attachments.length ? attachments : undefined,
         sessionId,
@@ -319,6 +331,7 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
       { partial: true, artifacts: true },
     );
   } finally {
+    admission.release();
     if (releaseSessionLock(sessionId, abortController)) {
       setRunStatus(sessionId, 'idle');
       broadcastFn({ type: 'session_busy', sessionId, busy: false });
