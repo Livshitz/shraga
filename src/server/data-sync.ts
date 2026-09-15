@@ -4,9 +4,13 @@ import path from 'node:path';
 import { DATA_DIR } from './paths.ts';
 import { notifyOwners } from './notify-owners.ts';
 import { runTextQuery } from './sdk-utils.ts';
+import { GENESIS_HASH, readAuditHead } from './security/audit.ts';
 
 const TAG = '[data-sync]';
 const DEPLOYMENT_ID_FILE = '.deployment-id';
+/** Tracked, append-only, single-writer (security/audit.ts): committed on every flush, never pulled over, never stashed. */
+const AUDIT_DIR = 'audit';
+const NOT_AUDIT = ['--', '.', `:(exclude)${AUDIT_DIR}`];
 
 /** How long the LLM commit-message call may take before we fall back (ms). */
 const COMMIT_MSG_TIMEOUT_MS = 60_000;
@@ -357,11 +361,32 @@ export class DataSync {
       return;
     }
 
-    // Stash dirty + untracked files before merging (untracked can block merge if remote adds same paths)
-    const dirty = !!(await this.git('status', '--porcelain')).trim();
+    // The audit log is append-only with ONE writer, this instance. A remote commit touching audit/ would rewrite the local
+    // chain (and under `chattr +a` git can't even apply it) — refuse the whole pull and alert.
+    let incomingAudit: string;
+    try {
+      incomingAudit = (await this.git('diff', '--name-only', `HEAD...origin/${this.options.branch}`, '--', AUDIT_DIR)).trim();
+    } catch (err) {
+      console.warn(`${TAG} Audit pull check failed, skipping pull:`, (err as Error).message);
+      return;
+    }
+    if (incomingAudit) {
+      console.error(`${TAG} 🚫 Remote commits change the audit log — pull refused:\n${incomingAudit}`);
+      await this.alertOnce('audit-pull', incomingAudit,
+        `🚫 Data sync refused a pull: remote commits change the audit log, which only this instance writes.\n\n${incomingAudit}\n\n` +
+        `Inspect: \`cd data && git log origin/${this.options.branch} -- ${AUDIT_DIR}\``,
+      ).catch(err => console.warn(`${TAG} Audit pull notify failed:`, (err as Error).message));
+      return;
+    }
+    this.clearAlert('audit-pull');
+
+    // Stash dirty + untracked files before merging (untracked can block merge if remote adds same paths) — except audit/:
+    // stashing removes the live log from disk while the server appends to it (lost lines, forked chain) and fails under
+    // `chattr +a`. The merge can't touch audit/ (checked above), so it stays dirty in place.
+    const dirty = !!(await this.git('status', '--porcelain', ...NOT_AUDIT)).trim();
     if (dirty) {
       try {
-        await this.git('stash', 'push', '--include-untracked', '-m', 'data-sync: pre-pull stash');
+        await this.git('stash', 'push', '--include-untracked', '-m', 'data-sync: pre-pull stash', ...NOT_AUDIT);
       } catch (err) {
         console.warn(`${TAG} Stash failed, skipping pull:`, (err as Error).message);
         return;
@@ -441,12 +466,19 @@ export class DataSync {
         }
       }
 
+      // The audit log rides along with every sync commit — the data repo is its offsite copy — and the commit message
+      // anchors its head. Head read BEFORE staging: the committed chain always contains that hash.
+      const auditHead = this.auditHead();
+      if (existsSync(path.join(DATA_DIR, AUDIT_DIR))) {
+        await this.git('add', '--', AUDIT_DIR).catch(err => console.warn(`${TAG} Staging audit log failed:`, (err as Error).message));
+      }
+
       const status = await this.git('status', '--porcelain');
       if (!status.trim()) return;
 
       if (await this.guardMassDeletions('flush')) return;
       const msg = await this.generateCommitMessage(files);
-      await this.git('commit', '-m', msg).catch(() => {});
+      await this.git('commit', '-m', auditHead ? `${msg}\n\naudit-head: ${auditHead}` : msg).catch(() => {});
       const ahead = await this.git('rev-list', '--count', `origin/${this.options.branch}..HEAD`).catch(() => '0');
       if (parseInt(ahead.trim()) === 0) return;
       await this.git('push', 'origin', this.options.branch).catch(async (err) => {
@@ -468,11 +500,23 @@ export class DataSync {
     }
   }
 
+  /** Audit chain head for the commit anchor; undefined when there's no record yet or it can't be read (logged). */
+  private auditHead(): string | undefined {
+    try {
+      const head = readAuditHead(path.join(DATA_DIR, AUDIT_DIR));
+      return head === GENESIS_HASH ? undefined : head;
+    } catch (err) {
+      console.warn(`${TAG} Audit head unreadable, committing without anchor:`, (err as Error).message);
+      return undefined;
+    }
+  }
+
   private async generateCommitMessage(files: string[]): Promise<string> {
     const fallback = fallbackCommitMessage(files);
     try {
-      const diff = await this.git('diff', '--cached', '--stat').catch(() => '');
-      const diffContent = await this.git('diff', '--cached', '--no-color', '-U2').catch(() => '');
+      // The audit log's appended lines are not "behavioral config" and would crowd the real diff out of the prompt.
+      const diff = await this.git('diff', '--cached', '--stat', ...NOT_AUDIT).catch(() => '');
+      const diffContent = await this.git('diff', '--cached', '--no-color', '-U2', ...NOT_AUDIT).catch(() => '');
       if (!diffContent.trim()) return fallback;
       const truncated = diffContent.slice(0, 3000);
       // Bounded: a hung `claude` subprocess used to wedge flush() forever (it holds the push latch).
@@ -763,7 +807,10 @@ export class DataSync {
     'scheduler/', '.mcp-catalog.json',
     'api-keys.json.bak', // pre-hashing plaintext keys (api-keys.ts migration) — never commit
     'workspace/users/*/.claude/', // per-user Claude logins (claude-account.ts) — credentials, never commit
-    'security/blocks.json', // guard auto-blocks: live per-instance state, a pull must not overwrite the active copy
+    // Live security state of the ACTIVE instance, which is its single writer — a pull must never overwrite it:
+    // blocks.json (guard auto-blocks); policy.json + .migrated (the Owner Console writes them; a pulled change trips
+    // the policy provenance/tamper check). Blue-green shares one DATA_DIR on one host, so nothing needs to cross hosts.
+    'security/',
   ];
 
   /** Write or refresh .gitignore, appending any canonical entries it's missing (idempotent). */

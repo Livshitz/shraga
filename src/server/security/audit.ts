@@ -6,7 +6,8 @@
 // newest file backwards from its end (never the whole file). The first-ever line carries GENESIS_HASH.
 // Head state is shared per resolved dir within the process, so several Audit instances on one dir append to one chain.
 // Across PROCESSES (blue-green flip: promoted instance + the old one's drain lines) every append holds a cross-process
-// mutex — mkdir(<dir>/.lock), atomic on a local fs — across the whole re-sync + write: if the NEWEST month file in the dir
+// mutex — mkdir of a SIBLING `.<dir>.lock` (auditLockPath), atomic on a local fs — across the whole re-sync + write:
+// if the NEWEST month file in the dir
 // isn't the file/size we last left (another process appended or rotated), tail recovery re-runs before linking. So
 // writers that take the lock serialize into one chain. The wait is bounded (LOCK_WAIT_MS): on timeout the append fails
 // (counted, logged, not written). A lock older than LOCK_STALE_MS (holder died mid-section) is broken with a warn.
@@ -23,7 +24,16 @@
 //
 // Limitations — the chain is UNKEYED: anyone with write access can rewrite the whole log with recomputed hashes, and
 // deleting the newest file(s) or tail lines leaves a valid shorter chain. Neither is detectable without an external
-// head anchor; the OS append-only flag (`chattr +a`) + offsite copy (tamper-protection step) are the mitigation.
+// head anchor; the OS append-only flag (`chattr +a`, src/scripts/harden-audit.sh) + the data-sync offsite copy, whose
+// commit messages carry `audit-head: <hash>` (readAuditHead), are the mitigation.
+//
+// `chattr +a` compatibility — everything this module does inside the dir must work when the dir and its month files are
+// append-only: an append-only DIR allows creating entries but not unlinking/renaming them; an append-only FILE opens
+// for write only with O_APPEND and never with O_TRUNC. So: appends use appendFileSync (O_APPEND) ✓, sealTail appends
+// '\n' ✓, reads are read-only ✓ — and the lock lives OUTSIDE the dir, because rmdir of a lock inside an append-only dir
+// is EPERM (the first append would leave it held forever, then every append fails breaking it). A pre-tamper build
+// locks `<dir>/.lock` instead: during a blue-green flip between such a build and this one the two don't exclude each
+// other (verify() reports a fork), and harden-audit.sh refuses to run while `<dir>/.lock` exists.
 import { createHash } from 'node:crypto';
 import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmdirSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -157,6 +167,33 @@ const realDir = (dir: string): string => {
   try { return realpathSync(abs); } catch { const up = path.dirname(abs); return up === abs ? abs : path.join(realDir(up), path.basename(abs)); }
 };
 
+/** Cross-process lock for `dir`: a sibling of the (real) dir, so it can be released when the dir is `chattr +a`. */
+export const auditLockPath = (dir: string): string => {
+  const real = realDir(dir);
+  return path.join(path.dirname(real), `.${path.basename(real)}.lock`);
+};
+
+/** Hash of the newest parseable record in `files` (sorted), read backwards; `bound` caps the read of one file. */
+function tailHash(dir: string, files: string[], bound?: { file: string; size: number }, onSkip?: (file: string) => void): string {
+  for (const f of [...files].reverse()) {
+    const fp = path.join(dir, f);
+    for (const { line } of reverseLines(fp, fp === bound?.file ? bound.size : undefined)) {
+      const r = parse(line);
+      if (r) return r.hash;
+      onSkip?.(f);
+    }
+  }
+  return GENESIS_HASH;
+}
+
+/** Read-only chain head of `dir` (no seal, no lock, no shared state) — for anchoring it outside the box. GENESIS_HASH
+ *  when there's no record; throws if the dir exists but can't be read. */
+export function readAuditHead(dir: string = dataPath('audit')): string {
+  let files: string[];
+  try { files = readdirSync(dir).filter(f => FILE_RE.test(f)).sort(); } catch (e: any) { if (e.code === 'ENOENT') return GENESIS_HASH; throw e; }
+  return tailHash(dir, files);
+}
+
 /** Chain head per real dir, shared by every Audit instance in the process. */
 interface Head {
   lastHash: string; lastMonth: string; healthy: boolean;
@@ -215,21 +252,12 @@ export class Audit {
     const s = this.state;
     try {
       const files = this.files();
-      let hash = GENESIS_HASH;
       const newest = files.length ? path.join(this.options.dir, files[files.length - 1]) : '';
       if (newest && sealTail(newest)) this.options.log.warn(`[audit] sealed partial last line in ${files[files.length - 1]}`);
       // Size first, tail read bounded by it: a line another process appends meanwhile shows up as a size mismatch
       // on our next append (→ recover again) instead of being absorbed unseen.
       const size = sizeOf(newest);
-      found: for (const f of [...files].reverse()) {
-        const fp = path.join(this.options.dir, f);
-        for (const { line } of reverseLines(fp, fp === newest ? size : undefined)) {
-          const r = parse(line);
-          if (r) { hash = r.hash; break found; }
-          this.options.log.warn(`[audit] skipping unparseable tail line in ${f}`);
-        }
-      }
-      s.lastHash = hash; s.lastMonth = files.length ? files[files.length - 1].slice(0, 7) : ''; s.healthy = true;
+      s.lastHash = tailHash(this.options.dir, files, { file: newest, size }, f => this.options.log.warn(`[audit] skipping unparseable tail line in ${f}`)); s.lastMonth = files.length ? files[files.length - 1].slice(0, 7) : ''; s.healthy = true;
       s.lastWrite = { file: newest, size };
     } catch (e: any) {
       s.healthy = false;
@@ -293,7 +321,7 @@ export class Audit {
     try {
       if (!TYPES.has(event?.type)) throw new Error(`unknown audit type "${event?.type}"`);
       mkdirSync(this.options.dir, { recursive: true });
-      const lockPath = path.join(this.options.dir, '.lock');
+      const lockPath = auditLockPath(this.options.dir);
       if (!this.lock(lockPath)) throw new Error(`lock ${lockPath} not acquired within ${LOCK_WAIT_MS}ms`);
       lk = lockPath;
       if (!s.healthy) this.recover();

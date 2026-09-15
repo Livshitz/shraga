@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   buildAgentEnv, builtinTools, filterMcpServers, isServerSecretEnv, profileAllowsTool, touchesSecretPath, TurnGuard, enforcing,
+  PROTECTED_DATA_MESSAGE, writesProtectedData,
 } from '../enforce.ts';
+import { DATA_DIR } from '../../paths.ts';
+import { buildHooks } from '../../hooks.ts';
 import { SecurityRuntime } from '../runtime.ts';
 import { defaultPolicy } from '../policy.ts';
 import { fromAuthUser } from '../principal.ts';
@@ -263,6 +266,52 @@ describe('taint floor', () => {
       expect(denied(member, 'Glob', { pattern: '../vault/*' }, ws)).toBe(true);
       expect(denied(member, 'Glob', { pattern: 'src/../../vault/*' }, ws)).toBe(true);
       expect(rt.audit.query({ limit: 50, type: 'tool.deny' }).items.some(r => r.reason === 'outside-workspace')).toBe(true);
+    });
+    // Tamper protection: server-owned data under DATA_DIR (the preload's temp dir) is never written by agent file tools.
+    const PROTECTED = ['audit/2026-09.jsonl', 'audit', 'Audit/2026-09.jsonl', 'conversations/s1.jsonl', 'sessions/s1/artifacts/_index.json',
+      'sessions.json', 'security/policy.json', 'security/.migrated', 'api-keys.json', 'api-keys.json.bak', 'oauth-clients.json',
+      'mcps/u1.json', '.internal-token', '.mcp-oauth-secret', '.local-auth-secret', 'users.json'];
+    const WRITERS: [string, string][] = [['Write', 'file_path'], ['Edit', 'file_path'], ['MultiEdit', 'file_path'], ['NotebookEdit', 'notebook_path']];
+    const UNPROTECTED = ['workspace/notes.md', 'skills/x.md', 'audit-notes.md', 'schedules.json', 'contacts.json'];
+
+    test('protected data: every write tool on each protected path is denied for member AND owner (enforce ON), reason protected-path; reads and normal writes are not', () => {
+      const { rt, member, owner } = guards();
+      for (const g of [member, owner]) for (const rel of PROTECTED) for (const [tool, key] of WRITERS) {
+        expect([rel, tool, g.check(tool, { [key]: path.join(DATA_DIR, rel) })]).toEqual([rel, tool, { allow: false, message: PROTECTED_DATA_MESSAGE }]);
+      }
+      expect(rt.audit.query({ limit: 1000, type: 'tool.deny' }).items.filter(r => r.reason === 'protected-path').length).toBeGreaterThan(0);
+      for (const g of [member, owner]) expect(g.check('Read', { file_path: path.join(DATA_DIR, 'conversations/s1.jsonl') }).allow).toBe(true);
+      for (const rel of UNPROTECTED) expect([rel, owner.check('Write', { file_path: path.join(DATA_DIR, rel) }).allow]).toEqual([rel, true]);
+      expect(owner.check('Write', { file_path: '/srv/other/audit/x.jsonl' }).allow).toBe(true); // an `audit/` outside DATA_DIR is not ours
+    });
+
+    test('protected data: resolved via realpath and cwd — a symlinked dir and a relative path reach the same deny', () => {
+      const { owner } = guards();
+      const { ws } = workspace();
+      mkdirSync(path.join(DATA_DIR, 'audit'), { recursive: true });
+      symlinkSync(path.join(DATA_DIR, 'audit'), path.join(ws, 'logs'));
+      expect(writesProtectedData('Write', { file_path: path.join(ws, 'logs', '2026-09.jsonl') })).toBe(true);
+      expect(writesProtectedData('Edit', { file_path: `${path.basename(DATA_DIR)}/conversations/s1.jsonl` }, path.dirname(DATA_DIR))).toBe(true);
+      expect(writesProtectedData('Write', { file_path: '../security/policy.json' }, path.join(DATA_DIR, 'workspace'))).toBe(true);
+      expect(owner.check('Write', { file_path: 'logs/x.jsonl' }, ws).allow).toBe(false);
+      expect(writesProtectedData('Read', { file_path: path.join(DATA_DIR, 'audit', 'x.jsonl') })).toBe(false);
+      expect(writesProtectedData('Bash', { command: `rm -rf ${DATA_DIR}/audit` })).toBe(false); // best-effort layer only; OS-level chattr covers audit
+    });
+
+    test('protected data, flag OFF: the always-on engine hook denies the same writes with no TurnGuard at all', async () => {
+      const prev = process.env.SECURITY_ENFORCE;
+      delete process.env.SECURITY_ENFORCE;
+      try {
+        expect(enforcing()).toBe(false);
+        const m = buildHooks().PreToolUse!.find(x => x.hooks.some(h => h.name === 'denyProtectedDataWrites'))!;
+        const call = (tool_name: string, tool_input: unknown, cwd = '') => m.hooks[0]({ hook_event_name: 'PreToolUse', tool_name, tool_input, tool_use_id: 't', session_id: 's', transcript_path: '', cwd } as any, 't', { signal: new AbortController().signal });
+        const deny = { hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: PROTECTED_DATA_MESSAGE } };
+        for (const rel of PROTECTED) for (const [tool, key] of WRITERS) expect(await call(tool, { [key]: path.join(DATA_DIR, rel) })).toMatchObject(deny);
+        expect(await call('Write', { file_path: `${path.basename(DATA_DIR)}/audit/x.jsonl` }, path.dirname(DATA_DIR))).toMatchObject(deny);
+        for (const rel of UNPROTECTED) expect(await call('Write', { file_path: path.join(DATA_DIR, rel) })).toEqual({});
+        expect(await call('Read', { file_path: path.join(DATA_DIR, 'audit/2026-09.jsonl') })).toEqual({});
+        expect(new RegExp(`^(?:${m.matcher})$`).test('NotebookEdit') && !new RegExp(`^(?:${m.matcher})$`).test('Read')).toBe(true);
+      } finally { if (prev === undefined) delete process.env.SECURITY_ENFORCE; else process.env.SECURITY_ENFORCE = prev; }
     });
   });
 

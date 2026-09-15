@@ -126,7 +126,7 @@ The request authenticates as the current session user automatically.
 
 ## MCP Tools
 
-MCP servers are configured per-deployment in `data/mcps/*.json`. All MCP tools are available to you, but most are **deferred** — you must call **ToolSearch** to load their schemas before invoking them. ToolSearch is always available.
+MCP servers are configured per-deployment in `data/mcps/*.json` (server-owned: changed via the UI, not your file tools — like `data/audit/`, `data/conversations/`, `data/sessions/` and `data/security/`). All MCP tools are available to you, but most are **deferred** — you must call **ToolSearch** to load their schemas before invoking them. ToolSearch is always available.
 
 Startup logs show `[claude] MCP: name:status` for each server. If a tool call fails with `InputValidationError`, you likely forgot to ToolSearch it first.
 

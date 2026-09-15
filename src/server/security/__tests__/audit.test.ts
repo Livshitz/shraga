@@ -1,8 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, appendFileSync, chmodSync, symlinkSync, mkdirSync, utimesSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, appendFileSync, chmodSync, symlinkSync, mkdirSync, utimesSync, existsSync, realpathSync, rmdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { Audit, GENESIS_HASH, canonical, __resetAuditHeadsForTest, type AuditRecord } from '../audit.ts';
+import { Audit, GENESIS_HASH, auditLockPath, canonical, readAuditHead, __resetAuditHeadsForTest, type AuditRecord } from '../audit.ts';
 import { Policy, defaultPolicy, type PolicyOptions } from '../policy.ts';
 
 const errors: string[] = [];
@@ -246,8 +247,47 @@ describe('Audit hardening (regressions)', () => {
     expect(mk().verify()).toEqual({ ok: true, lines: 2 * N });
   }, 20_000);
 
+  test('lock lives OUTSIDE the audit dir (a sibling), so it can be released when the dir is append-only', () => {
+    const d = path.join(dir, 'audit');
+    expect(auditLockPath(d)).toBe(path.join(realpathSync(dir), '.audit.lock'));
+    expect(path.dirname(auditLockPath(d))).not.toBe(realpathSync(dir) + '/audit');
+  });
+
+  // uappnd (macOS, owner-settable) has chattr +a's directory semantics: entries can be created, never unlinked/renamed.
+  test.skipIf(process.platform !== 'darwin')('append-only audit dir (uappnd ≈ chattr +a): appends, month rotation and verify keep working', () => {
+    const d = path.join(dir, 'audit');
+    const a = mk();
+    expect(a.append({ type: 'auth.allow' })).not.toBeNull();
+    execFileSync('chflags', ['uappnd', d]);
+    try {
+      mkdirSync(path.join(d, 'probe'));
+      expect(() => rmdirSync(path.join(d, 'probe'))).toThrow(); // precondition: the dir really refuses removal
+      for (let i = 0; i < 5; i++) expect(a.append({ type: 'turn.start', target: String(i) })).not.toBeNull();
+      now = Date.parse('2026-02-01T00:00:01Z');
+      expect(a.append({ type: 'turn.end' })).not.toBeNull(); // new month file created inside the append-only dir
+      expect(a.failures).toBe(0);
+      expect(existsSync(auditLockPath(d))).toBe(false);
+      __resetAuditHeadsForTest();
+      expect(mk().verify()).toEqual({ ok: true, lines: 7 });
+    } finally { execFileSync('chflags', ['nouappnd', d]); }
+  });
+
+  test('readAuditHead: read-only head of the chain (last record across files), genesis when empty, never seals', () => {
+    const d = path.join(dir, 'audit');
+    expect(readAuditHead(d)).toBe(GENESIS_HASH);
+    const a = mk();
+    a.append({ type: 'auth.allow' });
+    now = Date.parse('2026-02-01T00:00:01Z');
+    const last = a.append({ type: 'turn.end' })!;
+    expect(readAuditHead(d)).toBe(last.hash);
+    appendFileSync(path.join(d, '2026-02.jsonl'), '{"partial');
+    const before = readFileSync(path.join(d, '2026-02.jsonl'), 'utf8');
+    expect(readAuditHead(d)).toBe(last.hash);
+    expect(readFileSync(path.join(d, '2026-02.jsonl'), 'utf8')).toBe(before);
+  });
+
   test('lock: a stale lock is broken (warned) and the append proceeds', () => {
-    const d = path.join(dir, 'audit'), lk = path.join(d, '.lock'), warns: string[] = [];
+    const d = path.join(dir, 'audit'), lk = auditLockPath(d), warns: string[] = [];
     mkdirSync(lk, { recursive: true }); utimesSync(lk, new Date(Date.now() - 10_000), new Date(Date.now() - 10_000));
     const a = new Audit({ dir: d, clock: () => now, log: { ...quiet, warn: (m: string) => warns.push(m) } });
     expect(a.append({ type: 'auth.allow' })).not.toBeNull();
@@ -256,14 +296,15 @@ describe('Audit hardening (regressions)', () => {
   });
 
   test('lock: a held (fresh) lock times out → append returns null, counted, logged, nothing written', () => {
-    const d = path.join(dir, 'audit'), lk = path.join(d, '.lock');
+    const d = path.join(dir, 'audit'), lk = auditLockPath(d);
     mkdirSync(lk, { recursive: true });
     const a = mk(), t = Date.now();
     expect(a.append({ type: 'auth.allow' })).toBeNull();
     expect(Date.now() - t).toBeLessThan(1000); // bounded wait
     expect(a.failures).toBe(1);
     expect(errors.some(e => e.includes('not acquired'))).toBe(true);
-    expect(readdirSync(d)).toEqual(['.lock']); // no month file, and the other holder's lock is untouched
+    expect(readdirSync(d)).toEqual([]); // no month file…
+    expect(existsSync(lk)).toBe(true); // …and the other holder's lock is untouched
   });
 
   test('unreadable dir: appends fail (no genesis fork), verify reports unreadable, heals once readable', () => {

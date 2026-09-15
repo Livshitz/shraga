@@ -11,12 +11,15 @@
 //   `allowedTools` WITHOUT calling canUseTool, whereas PreToolUse hooks fire for every call (hooks.ts relies on it).
 // - secret files: a GUARANTEE only for restricted profiles (no Bash, no Grep, path-checked file tools). For full
 //   profiles (owner/operator) it is BEST-EFFORT: they have Bash, which reads any file, and the engine's legacy
-//   SENSITIVE_BASH_PATTERNS sit in canUseTool, which auto-approved Bash never reaches. OS-level isolation is plan step 8.
+//   SENSITIVE_BASH_PATTERNS sit in canUseTool, which auto-approved Bash never reaches. Per-role OS isolation is out of
+//   scope; server-owned data is write-protected for file tools in every profile and the audit log at the OS level
+//   (see Protected data).
 import type { HookCallback, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import type { McpConfig } from '../mcp.ts';
+import { DATA_DIR } from '../paths.ts';
 import type { Principal } from './principal.ts';
 import type { Profile, Resolved } from './policy.ts';
 import type { SecurityRuntime } from './runtime.ts';
@@ -189,6 +192,33 @@ export function touchesSecretPath(tool: string, input: Record<string, unknown>, 
   return [str(input.file_path), str(input.notebook_path), root].some(p => p !== undefined && secret(pathForms(p, cwd)));
 }
 
+// ── Protected data (tamper protection) ───────────────────────────────────────
+// Server-owned state under DATA_DIR that NO agent file tool may write or edit: every profile, owner included, and
+// whatever SECURITY_ENFORCE says (hooks.ts applies it always; TurnGuard also audits it when enforcing). The server
+// writes these with fs calls, never agent tools, so it is unaffected. Reads are not covered: they follow the profile
+// (secret files stay denied by SECRET_PATH_PATTERNS). Bash is not covered (best-effort, see Secret paths) — for the
+// audit log the guarantee is OS-level `chattr +a` (src/scripts/harden-audit.sh) plus the data-sync offsite copy.
+/** DATA_DIR-relative; a trailing `/` protects the whole directory. */
+export const PROTECTED_DATA_WRITE: readonly string[] = [
+  'audit/', 'conversations/', 'sessions/', 'sessions.json', 'security/', 'api-keys.json', 'api-keys.json.bak',
+  'oauth-clients.json', 'mcps/', '.internal-token', '.mcp-oauth-secret', '.local-auth-secret', 'users.json',
+];
+const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+export const PROTECTED_DATA_MESSAGE = 'Audit logs, conversations, sessions, security policy, keys and MCP config are server-owned and cannot be modified by agent tools.';
+
+/** Would this file tool write a protected data path? Target and data dir both matched in absolute and realpath form. */
+export function writesProtectedData(tool: string, input: Record<string, unknown>, cwd: string = process.cwd(), dataDir: string = DATA_DIR): boolean {
+  const target = WRITE_TOOLS.has(tool) ? str(input.file_path) ?? str(input.notebook_path) : undefined;
+  if (!target) return false;
+  const roots = [...new Set(pathForms(dataDir, cwd).slice(1))];
+  return pathForms(target, cwd).slice(1).some(f => roots.some(root => {
+    const rel = path.relative(root, f);
+    if (!rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return false;
+    const r = rel.split(path.sep).join('/').toLowerCase(); // case-insensitive filesystems (macOS) alias Audit/ to audit/
+    return PROTECTED_DATA_WRITE.some(e => (e.endsWith('/') ? r === e.slice(0, -1) || r.startsWith(e) : r === e));
+  }));
+}
+
 /** Restricted profiles: does this Glob search outside the workspace root (`cwd`)? Its base is realpath-checked; any
  *  `..` segment in the pattern counts as outside. */
 export function globOutsideWorkspace(input: Record<string, unknown>, cwd: string = process.cwd()): boolean {
@@ -241,7 +271,8 @@ export class TurnGuard {
       return { allow: false, message: 'Tool use is unavailable right now (security check failed).' };
     }
     const restricted = !eff.profile.tools.includes('*');
-    const reason = touchesSecretPath(tool, input, cwd, restricted) ? 'secret-path'
+    const reason = writesProtectedData(tool, input, cwd) ? 'protected-path'
+      : touchesSecretPath(tool, input, cwd, restricted) ? 'secret-path'
       : !profileAllowsTool(eff.profile, tool) ? 'profile'
         : restricted && tool === 'Glob' && globOutsideWorkspace(input, cwd) ? 'outside-workspace' : undefined;
     const base = { principal: principal.id, role: eff.role, sessionId, target: tool };
@@ -253,6 +284,7 @@ export class TurnGuard {
     } catch (e: any) { log.error(`[security] tool audit failed: ${e.message}`); }
     if (!reason) return { allow: true };
     log.log(`[security] Denied ${tool} for ${principal.id} (role=${eff.role} profile=${eff.profileName} ${reason}) session=${sessionId ?? 'new'}`);
+    if (reason === 'protected-path') return { allow: false, message: PROTECTED_DATA_MESSAGE };
     if (reason === 'secret-path') return { allow: false, message: 'Credential and secret files are not accessible.' };
     if (reason === 'outside-workspace') return { allow: false, message: `Glob is limited to the workspace for role "${eff.role}".` };
     const hint = allowsEscalate(eff.profile) ? ` Use the ${ESCALATE_TOOL} tool to hand this request to an owner.` : '';
