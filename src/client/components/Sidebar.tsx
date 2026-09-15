@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, MessageSquare, Hash, AtSign, MessageCircle } from 'lucide-react';
+import { Plus, MessageSquare, Hash, AtSign, MessageCircle, ShieldCheck } from 'lucide-react';
 import { Button } from './ui/button';
 import { ScrollArea } from './ui/scroll-area';
 import { cn } from '@/lib/utils';
@@ -10,6 +10,8 @@ import type { UnreadSession } from '@/hooks/useUnread';
 import type { AgentSocket } from '@/lib/ws';
 import { useSessionList, type SessionRow as Session, type ChatsFilter } from '@/hooks/useSessionList';
 import { CLIENT_BUILD_VERSION } from '@/lib/build-version';
+import { useOwner } from '@/hooks/useOwner';
+import { OwnerConsole } from './owner/OwnerConsole';
 
 interface Props {
   getToken: () => Promise<string | null>;
@@ -75,6 +77,7 @@ export function Sidebar({ getToken, activeSessionId, onSelect, onNew, refreshKey
   const [filter, setFilter] = useState<ChatsFilter>(() => (localStorage.getItem(FILTER_KEY) as ChatsFilter) || 'mine');
   const [unreadOnly, setUnreadOnly] = useState(() => localStorage.getItem(UNREAD_FILTER_KEY) === 'true');
   const [version, setVersion] = useState<string>('');
+  const { isOwner, call: ownerCall } = useOwner(getToken);
   const activeRef = useRef<HTMLButtonElement | null>(null);
 
   function changeFilter(f: ChatsFilter) {
@@ -242,6 +245,17 @@ export function Sidebar({ getToken, activeSessionId, onSelect, onNew, refreshKey
       </ScrollArea>
 
       <div className="px-4 py-2 flex flex-col items-center gap-1">
+        {isOwner && (
+          <OwnerConsole
+            call={ownerCall}
+            onOpenSession={(id) => onSelect(id)}
+            trigger={
+              <button className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors" title="Roles, bindings, keys, blocklist, audit">
+                <ShieldCheck className="w-3.5 h-3.5" /> Owner Console
+              </button>
+            }
+          />
+        )}
         <MachineStats socket={socket ?? null} getToken={getToken} />
         {slots.sidebarExtras?.()}
         {version && (

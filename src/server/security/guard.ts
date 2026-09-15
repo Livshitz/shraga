@@ -160,6 +160,14 @@ export class Guard {
     return [...this.blocks.map].filter(([, b]) => b.until > now).map(([key, b]) => ({ key, ...b }));
   }
 
+  /** Clear an auto-block (Owner Console) and its hit window; persists. False when no such block exists. */
+  public unblock(key: string): boolean {
+    if (!this.blocks.map.delete(key)) return false;
+    this.hits.map.delete(key);
+    this.save();
+    return true;
+  }
+
   /** blocklist → auto-blocks → rate. Consumes one token from each applicable bucket only when all pass. */
   public check(input: GuardInput): GuardVerdict {
     const denial = this.evaluate(input);
