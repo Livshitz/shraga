@@ -10,17 +10,28 @@ const TYPES = ['auth.allow', 'auth.deny', 'role.resolve', 'turn.start', 'turn.en
   'escalate', 'policy.change', 'policy.tamper', 'key.create', 'key.revoke', 'token.revoke', 'session.delete'];
 const PAGE = 100;
 
-export function AuditTab({ call, onOpenSession, onPolicyChange, ownerIds }: { call: OwnerCall; onOpenSession: (sessionId: string) => void; onPolicyChange: () => Promise<void>; ownerIds: string[] }) {
+export function AuditTab({ call, onOpenSession, onPolicyChange, ownerIds }: { call: OwnerCall; onOpenSession: (sessionId: string) => void | Promise<void>; onPolicyChange: () => Promise<void>; ownerIds: string[] }) {
   const [f, setF] = useState({ principal: '', type: '', from: '', to: '' });
   const [items, setItems] = useState<Rec[]>([]);
   const [cursor, setCursor] = useState<string | undefined>();
   const [verify, setVerify] = useState<Verify | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [deleted, setDeleted] = useState<ReadonlySet<string>>(new Set());
   const { busy, error, run } = useAction();
   const actions = principalActions(call, onPolicyChange, ownerIds);
-  const deleteSession = (id: string) => run('del', async () => {
+  /** Run a per-conversation action; a 404 means it's gone: hide its row actions and say so plainly. */
+  const onSession = (key: string, id: string, fn: () => void | Promise<void>) => run(key, async () => {
+    try { await fn(); } catch (e: any) {
+      if (e?.status !== 404) throw e;
+      setDeleted((s) => new Set(s).add(id));
+      setPendingDelete(null);
+      throw new Error('Conversation no longer exists');
+    }
+  });
+  const deleteSession = (id: string) => onSession('del', id, async () => {
     await call(`/sessions/${encodeURIComponent(id)}`, 'DELETE');
+    setDeleted((s) => new Set(s).add(id));
     setPendingDelete(null);
     setNotice(`Deleted conversation ${id}.`);
   });
@@ -67,7 +78,7 @@ export function AuditTab({ call, onOpenSession, onPolicyChange, ownerIds }: { ca
       {notice && <p className="text-xs text-muted-foreground">{notice}</p>}
       {pendingDelete && (
         <div role="alertdialog" className="flex flex-wrap items-center gap-2 text-xs border border-destructive/50 rounded-md p-2">
-          <span className="flex-1 min-w-0">Delete conversation <b className="font-mono break-all">{pendingDelete}</b>? Its messages and uploads are removed for everyone; audit records stay.</span>
+          <span className="flex-1 min-w-0">Delete conversation <b className="font-mono break-all">{pendingDelete}</b>? Removed for everyone: its messages, uploads, artifacts, unread badges, Slack thread links and its resumable Claude transcript. Audit records stay.</span>
           <Button size="sm" variant="destructive" className="h-7 text-xs" disabled={!!busy} onClick={() => deleteSession(pendingDelete)}>
             {busy === 'del' ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Trash2 className="w-3 h-3 mr-1" />} Delete conversation
           </Button>
@@ -91,8 +102,8 @@ export function AuditTab({ call, onOpenSession, onPolicyChange, ownerIds }: { ca
                 <td className={tdCls}>{r.role ?? '—'}</td>
                 <td className={`${tdCls} break-all`}>{[r.target, r.reason].filter(Boolean).join(' · ') || '—'}</td>
                 <td className={`${tdCls} whitespace-nowrap text-right`}>
-                  {r.sessionId && <button className={`${iconBtn} mr-2`} title="Open session" onClick={() => onOpenSession(r.sessionId!)}><ExternalLink className="w-3.5 h-3.5" /></button>}
-                  {r.sessionId && r.type !== 'session.delete' && <button className={`${iconBtn} hover:text-destructive mr-2`} title="Delete conversation" disabled={!!busy} onClick={() => { setNotice(null); setPendingDelete(r.sessionId!); }}><Trash2 className="w-3.5 h-3.5" /></button>}
+                  {r.sessionId && !deleted.has(r.sessionId) && <button className={`${iconBtn} mr-2`} title="Open session" disabled={!!busy} onClick={() => { setNotice(null); onSession('open', r.sessionId!, () => onOpenSession(r.sessionId!)); }}><ExternalLink className="w-3.5 h-3.5" /></button>}
+                  {r.sessionId && !deleted.has(r.sessionId) && r.type !== 'session.delete' && <button className={`${iconBtn} hover:text-destructive mr-2`} title="Delete conversation" disabled={!!busy} onClick={() => { setNotice(null); setPendingDelete(r.sessionId!); }}><Trash2 className="w-3.5 h-3.5" /></button>}
                   {r.principal && actions.canRevoke(r.principal) && (
                     <button className={`${iconBtn} mr-2`} title="Revoke tokens" disabled={!!busy} onClick={() => run('rv', () => actions.revoke(r.principal!))}><KeyRound className="w-3.5 h-3.5" /></button>
                   )}

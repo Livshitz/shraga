@@ -11,7 +11,6 @@ const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) { try { chmodSync(path.join(d, '2025-01.jsonl'), 0o600); } catch {} rmSync(d, { recursive: true, force: true }); } });
 
 const rec = (ts: string, principal: string) => JSON.stringify({ ts, type: 'turn.start', principal, prevHash: 'x', hash: `h-${principal}-${ts}` }) + '\n';
-const month = (ms: number) => new Date(ms).toISOString().slice(0, 7);
 
 test('old month files are never opened: 200k old records + an empty window returns fast', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'audit-window-')); dirs.push(dir);
@@ -28,24 +27,23 @@ test('old month files are never opened: 200k old records + an empty window retur
   expect(() => audit.query({ limit: 1 })).toThrow();
 });
 
-test('within a current file, reading stops below the window (+ skew slack) but in-window records are all returned', () => {
+test('a back-skewed record (real append, clock jumps back 90d once) never hides earlier in-window records', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'audit-window-')); dirs.push(dir);
   const now = Date.now();
-  const stale = new Date(now - 90 * 86_400_000).toISOString();
-  const fresh = (i: number) => new Date(now - 1000 + i).toISOString();
-  // 200k records older than from − 31d at the top of THIS month's file, then 3 in-window records (appended last = newest).
-  writeFileSync(path.join(dir, `${month(now)}.jsonl`), rec(stale, 'user:old@x').repeat(200_000) + [0, 1, 2].map(i => rec(fresh(i), `user:new${i}@x`)).join(''));
-  const audit = new Audit({ dir, log: quiet });
-  const t0 = performance.now();
-  const page = audit.query({ from: now - 86_400_000, limit: 500 });
-  const ms = performance.now() - t0;
-  expect(page.items.map(r => r.principal)).toEqual(['user:new2@x', 'user:new1@x', 'user:new0@x']);
-  expect(page.nextCursor).toBeUndefined();
-  expect(ms).toBeLessThan(200);
-  // Control: a full scan of the same file (no from) reaches the old records.
-  const t1 = performance.now();
-  expect(audit.query({ principal: 'user:none', limit: 1 }).items).toEqual([]);
-  expect(performance.now() - t1).toBeGreaterThan(ms * 3);
+  let t = now - 3000;
+  const audit = new Audit({ dir, log: quiet, clock: () => t });
+  audit.append({ type: 'turn.start', principal: 'user:a-before@x' });
+  t = now - 90 * 86_400_000;
+  audit.append({ type: 'turn.start', principal: 'user:skewed@x' }); // written between the two, stamped 90d ago
+  t = now - 1000;
+  audit.append({ type: 'turn.start', principal: 'user:b-after@x' });
+  const from = now - 86_400_000;
+  expect(audit.query({ limit: 10 }).items.map(r => r.principal)).toEqual(['user:b-after@x', 'user:skewed@x', 'user:a-before@x']);
+  expect(audit.query({ from, limit: 10 }).items.map(r => r.principal)).toEqual(['user:b-after@x', 'user:a-before@x']);
+  expect(recentPrincipals({ audit } as any, from, 200).principals.map((p: any) => p.id).sort()).toEqual(['user:a-before@x', 'user:b-after@x']);
+  // Pagination keeps it too: one record per page still reaches the record below the skewed one.
+  const p1 = audit.query({ from, limit: 1 });
+  expect(audit.query({ from, limit: 1, cursor: p1.nextCursor }).items.map(r => r.principal)).toEqual(['user:a-before@x']);
 });
 
 test('skew slack: a record in the month file before `from`\'s month is still found; older files are skipped', () => {

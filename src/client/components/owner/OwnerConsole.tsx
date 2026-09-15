@@ -23,7 +23,7 @@ function storedTab(): Tab {
 }
 
 /** Owner-only security console. Every write goes through `/api/owner/*` (validated + audited server-side). */
-export function OwnerConsole({ call, onOpenSession, trigger }: { call: OwnerCall; onOpenSession: (sessionId: string) => void; trigger: ReactNode }) {
+export function OwnerConsole({ call, onOpenSession, trigger }: { call: OwnerCall; onOpenSession: (sessionId: string) => void | Promise<void>; trigger: ReactNode }) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<Tab>(storedTab);
   const [doc, setDoc] = useState<PolicyDoc | null>(null);
@@ -79,7 +79,7 @@ export function OwnerConsole({ call, onOpenSession, trigger }: { call: OwnerCall
           {tab === 'principals' && <PrincipalsTab call={call} onPolicyChange={loadPolicy} ownerIds={doc?.ownerIds ?? []} />}
           {tab === 'keys' && <ApiKeysTab call={call} roles={roles} />}
           {tab === 'blocks' && <BlocklistTab call={call} onPolicyChange={loadPolicy} />}
-          {tab === 'audit' && <AuditTab call={call} onPolicyChange={loadPolicy} ownerIds={doc?.ownerIds ?? []} onOpenSession={(id) => { setOpen(false); onOpenSession(id); }} />}
+          {tab === 'audit' && <AuditTab call={call} onPolicyChange={loadPolicy} ownerIds={doc?.ownerIds ?? []} onOpenSession={async (id) => { await onOpenSession(id); setOpen(false); }} />}
         </div>
       </DialogContent>
     </Dialog>

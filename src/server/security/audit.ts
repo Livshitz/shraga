@@ -422,13 +422,15 @@ export class Audit {
   }
 
   /**
-   * Newest first, streaming backwards over the month files; each record is filtered by its own ts. With `from`, reading
-   * stops at a skew slack of one month before `from`'s month: older month files are never opened, and a file is left at
-   * its first record older than that — so a small window costs the window, not the whole history. A clock skewed back
-   * by more than the slack can hide a record from a `from` query. Cursor is opaque (file + byte offset).
-   * Throws (after logging) if the dir or a month file can't be read — never a silently short page. Planted
-   * (non-regular) entries are skipped, not thrown: they're alerted and verify() reports them, and throwing would let
-   * one planted name (undeletable under +a) blind the audit viewer.
+   * Newest first, streaming backwards over the month files; each record is filtered by its own ts. Two skip rules:
+   * - Month-name floor: with `from`, regular month files named older than the month before `from`'s month are skipped
+   *   whole (never opened). Every record in every remaining regular file (any month from that floor on, including
+   *   future-named ones) is checked, so a back-skewed record never hides earlier in-window ones; a record whose ts
+   *   was written into a file below the floor (clock skewed back by more than a month) is not found.
+   * - Planted (non-regular) month entries are skipped, not thrown: they're alerted and verify() reports them, and
+   *   throwing would let one planted name (undeletable under +a) blind the audit viewer.
+   * Throws (after logging) if the dir or a regular month file can't be read — never a silently short page.
+   * Cursor is opaque (file + byte offset).
    */
   public query(q: AuditQuery): AuditPage {
     const limit = Math.max(1, Math.min(MAX_QUERY, Math.floor(q.limit) || 1));
@@ -450,7 +452,6 @@ export class Audit {
       try {
         for (const { line, start } of reverseLines(path.join(this.options.dir, f), cur?.file === f ? cur.offset : undefined)) {
           const r = parse(line);
-          if (r && floor && r.ts < floor) break;
           if (!r || (from && r.ts < from) || (to && r.ts > to) || (types && !types.has(r.type)) || (q.principal !== undefined && r.principal !== q.principal)) continue;
           if (items.length === limit) return { items, nextCursor: Buffer.from(`${last!.file}:${last!.start}`).toString('base64url') };
           items.push(r); last = { file: f, start };

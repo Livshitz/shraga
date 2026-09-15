@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { dataPath } from './paths.ts';
 import { getSession } from './sessions.ts';
 
@@ -64,6 +64,16 @@ export function markRead(uid: string, sessionId: string): void {
   if (!data.sessions[sessionId]) return;
   delete data.sessions[sessionId];
   save(uid, data);
+}
+
+/** Remove a deleted session's unread marker from every user's file (previews carry message text). */
+export function forgetUnreadSession(sessionId: string): void {
+  if (!existsSync(UNREAD_DIR)) return;
+  for (const f of readdirSync(UNREAD_DIR)) {
+    if (!f.endsWith('.json')) continue;
+    const uid = f.slice(0, -5), data = load(uid);
+    if (data.sessions?.[sessionId]) { delete data.sessions[sessionId]; save(uid, data); }
+  }
 }
 
 export function getUnreads(uid: string): UserUnreads {

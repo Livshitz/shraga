@@ -11,6 +11,7 @@ import type { AgentSocket } from '@/lib/ws';
 import { useSessionList, type SessionRow as Session, type ChatsFilter } from '@/hooks/useSessionList';
 import { CLIENT_BUILD_VERSION } from '@/lib/build-version';
 import { useOwner } from '@/hooks/useOwner';
+import { api } from '@/lib/api';
 import { OwnerConsole } from './owner/OwnerConsole';
 
 interface Props {
@@ -248,7 +249,7 @@ export function Sidebar({ getToken, activeSessionId, onSelect, onNew, refreshKey
         {isOwner && (
           <OwnerConsole
             call={ownerCall}
-            onOpenSession={(id) => onSelect(id)}
+            onOpenSession={async (id) => { await api(`/api/sessions/${encodeURIComponent(id)}/meta`, getToken); onSelect(id); }}
             trigger={
               <button className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors" title="Roles, bindings, keys, blocklist, audit">
                 <ShieldCheck className="w-3.5 h-3.5" /> Owner Console

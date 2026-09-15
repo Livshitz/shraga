@@ -264,7 +264,7 @@ ownerRouter.delete('/api/owner/blocks', ...writeGate, (req, res) => {
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
 
-/** Delete a conversation (index entry, conversation files, uploads). 409 while a turn runs. Audit keeps its records. */
+/** Delete a conversation and every per-session store (see deleteSession). 409 while a turn runs. Audit keeps its records. */
 ownerRouter.delete('/api/owner/sessions/:id', ...writeGate, (req, res) => {
   const sec = runtimeOr(res, true);
   if (!sec) return;
