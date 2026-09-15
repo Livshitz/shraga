@@ -77,3 +77,100 @@ describe('flag OFF: spawn config is today\'s', () => {
     expect(await shape(await spawnConfig())).toMatchSnapshot();
   });
 });
+
+describe('flag ON: the engine applies the effective profile', () => {
+  const { mkdtempSync, rmSync } = require('node:fs') as typeof import('node:fs');
+  const { tmpdir } = require('node:os') as typeof import('node:os');
+  const path = require('node:path') as typeof import('node:path');
+  const { SecurityRuntime } = require('../security/runtime.ts') as typeof import('../security/runtime.ts');
+  const { TurnGuard } = require('../security/enforce.ts') as typeof import('../security/enforce.ts');
+  const { fromAuthUser, fromSlack } = require('../security/principal.ts') as typeof import('../security/principal.ts');
+
+  const OWNER = 'owner@engine-sec.test';
+  const SECRETS = { OWNERS: OWNER, SLACK_SIGNING_SECRET: 'sss', SLACK_CLIENT_SECRET: 'ccc', DATA_SYNC_WEBHOOK_SECRET: 'www', FIREBASE_SERVICE_ACCOUNT_JSON_PROD: '{"k":1}' };
+  const prev: Record<string, string | undefined> = {};
+  let root: string;
+  let rt: InstanceType<typeof SecurityRuntime>;
+  const floors = new Map<string, number>();
+
+  beforeAll(() => {
+    for (const [k, v] of Object.entries({ ...SECRETS, GITHUB_TOKEN: 'ghp_probe' })) { prev[k] = process.env[k]; process.env[k] = v; }
+    root = mkdtempSync(path.join(tmpdir(), 'engine-sec-'));
+    rt = new SecurityRuntime({ policy: { path: path.join(root, 'security', 'policy.json'), whitelistPath: path.join(root, 'w.json'), watch: false }, audit: { dir: path.join(root, 'audit') }, notify: () => {}, log: { info() {}, warn() {}, error() {} } });
+    const p = rt.policy.current;
+    p.profiles.standard.mcps = ['mcp-notion'];
+    p.bindings = [{ match: { kind: 'user', emailIn: ['member@engine-sec.test'] }, role: 'member' }, { match: { kind: 'slack', id: 'slack:UGUEST' }, role: 'guest' }];
+    rt.policy.save(p);
+  });
+  afterAll(() => {
+    for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function guardFor(principal: ReturnType<typeof fromAuthUser>, sessionId: string) {
+    const r = rt.policy.resolve(principal);
+    floors.set(sessionId, r.rank);
+    return new TurnGuard({ runtime: rt, principal, sessionId, role: r.role, rank: r.rank, floorOf: (s) => floors.get(s), log: { log() {}, error() {} } });
+  }
+  const run = (principal: ReturnType<typeof fromAuthUser>, sessionId: string) =>
+    spawnConfig({ sessionId, security: guardFor(principal, sessionId) });
+  const deny = async (o: any, tool: string, input: Record<string, unknown> = {}) => (await o.canUseTool(tool, input)).behavior;
+  const hookDecision = async (o: any, tool: string, input: Record<string, unknown> = {}) => {
+    const r = await o.hooks.PreToolUse[0].hooks[0]({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input, tool_use_id: 't' }, 't', { signal: new AbortController().signal });
+    return r.hookSpecificOutput?.permissionDecision ?? 'pass';
+  };
+
+  test('owner (full): all tools + MCPs, env = everything minus server secrets, scoped internal token, gate hook first', async () => {
+    const { options: o, mcpFile } = await run(fromAuthUser({ uid: 'o', email: OWNER }), 'eng-on-owner');
+    expect(o.tools).toEqual({ type: 'preset', preset: 'claude_code' });
+    expect(o.allowedTools).toEqual(['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch']);
+    expect(Object.keys(mcpFile.mcpServers ?? mcpFile).sort()).toEqual(['mcp-notion', 'mcp-slack-use']);
+    expect(o.mcpServers).toBeUndefined();
+    for (const k of Object.keys(SECRETS)) expect(o.env).not.toHaveProperty(k);
+    expect(o.env.GITHUB_TOKEN).toBe('ghp_probe');
+    expect(o.env.PATH).toBe(process.env.PATH);
+    expect(o.env.INTERNAL_API_TOKEN).not.toBe(process.env.INTERNAL_API_TOKEN);
+    expect(o.env.INTERNAL_API_TOKEN).toMatch(/^[0-9a-f]{64}:u-sec:sec@x\.test$/); // scoped to the turn's uid/email, never the raw secret
+    expect(o.hooks.PreToolUse[0].matcher).toBeUndefined();
+    expect(o.hooks.PreToolUse.slice(1).map((m: any) => m.matcher)).toEqual(['Bash', 'mcp__mcp-slack-use__post_slack_.*', 'mcp__mcp-firebase-(?:prod|lab)__get_db.*']);
+    expect(await deny(o, 'Bash', { command: 'ls' })).toBe('allow');
+  });
+
+  test('member (standard + mcp-notion): tools availability, MCP filtered before the file, baseline env only', async () => {
+    const { options: o, mcpFile } = await run(fromAuthUser({ uid: 'm', email: 'member@engine-sec.test' }), 'eng-on-member');
+    expect(o.tools).toEqual(['Read', 'Glob', 'LS', 'WebSearch', 'ToolSearch']);
+    expect(o.allowedTools).toEqual(['Read', 'WebSearch', 'Glob', 'LS', 'ToolSearch']);
+    expect(Object.keys(mcpFile.mcpServers ?? mcpFile)).toEqual(['mcp-notion']);
+    expect(o.env).not.toHaveProperty('GITHUB_TOKEN');
+    expect(o.env).not.toHaveProperty('INTERNAL_API_TOKEN');
+    for (const k of Object.keys(SECRETS)) expect(o.env).not.toHaveProperty(k);
+    expect(o.env.SHRAGA_SESSION_ID).toBe('eng-on-member');
+    expect(await deny(o, 'Bash', { command: 'ls' })).toBe('deny'); // onPermissionRequest: allow does NOT override
+    expect(await deny(o, 'mcp__mcp-slack-use__post_slack_message')).toBe('deny');
+    expect(await deny(o, 'mcp__mcp-notion__get_notion_search')).toBe('allow');
+  });
+
+  test('guest (reply-only): no built-ins, no MCP file, only the in-process escalate server', async () => {
+    const { options: o, mcpFile } = await run(fromSlack('UGUEST', {}) as any, 'eng-on-guest');
+    expect(o.tools).toEqual(['ToolSearch']);
+    expect(o.allowedTools).toEqual(['ToolSearch']);
+    expect(mcpFile).toBeUndefined();
+    expect(o.extraArgs).toBeUndefined();
+    expect(Object.keys(o.mcpServers)).toEqual(['security']);
+    expect(o.mcpServers.security.type).toBe('sdk');
+    expect(await hookDecision(o, 'Read', { file_path: 'a' })).toBe('deny');
+    expect(await hookDecision(o, 'mcp__security__escalate', { summary: 'x' })).toBe('pass');
+  });
+
+  test('taint mid-turn: a lower floor after spawn flips canUseTool AND the hook to deny for the running turn', async () => {
+    const sid = 'eng-on-taint';
+    const { options: o } = await run(fromAuthUser({ uid: 'o', email: OWNER }), sid);
+    expect(await deny(o, 'Bash', { command: 'ls' })).toBe('allow');
+    expect(await hookDecision(o, 'Bash', { command: 'ls' })).toBe('pass');
+    floors.set(sid, 20); // a guest's message lands in the session while the turn runs
+    expect(await deny(o, 'Bash', { command: 'ls' })).toBe('deny');
+    expect(await hookDecision(o, 'Bash', { command: 'ls' })).toBe('deny');
+    const recs = rt.audit.query({ limit: 50, type: 'tool.deny' }).items;
+    expect(recs.find(r => r.sessionId === sid && r.target === 'Bash')).toMatchObject({ role: 'guest', principal: `user:${OWNER}` });
+  });
+});

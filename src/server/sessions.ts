@@ -49,6 +49,8 @@ export interface SessionMeta {
   /** claude-code engine SDK-resume mapping (opt-in flag) — see engine/claude-resume.ts. */
   claudeResume?: ClaudeResumeState;
   forkedFrom?: string;
+  /** Security taint (SECURITY_ENFORCE): rank of the lowest-ranked principal that ever contributed. Only lowers. */
+  floorRank?: number;
 }
 
 // ── Index cache ──────────────────────────────────────────────────────────────
@@ -222,6 +224,7 @@ export function upsertSession(sessionId: string, firstPrompt: string, user: { ui
       lastModified: now,
       ...(scope ? { scope } : {}),
       ...(kind ? { kind } : {}),
+      ...floorField(sessionId),
     });
   }
 
@@ -398,6 +401,35 @@ export function setClaudeResume(sessionId: string, state: ClaudeResumeState | un
   saveIndex(sessions);
 }
 
+// ── Security taint floor (SECURITY_ENFORCE) ─────────────────────────────────
+// The engine's tool gate re-reads the floor on EVERY tool call, so it's served from this Map (write-through to
+// `floorRank` in the index; single-writer process, see the index cache note). A floor only ever lowers.
+const floors = new Map<string, number>();
+
+/** The session's taint floor, or undefined when none was recorded. */
+export function getSessionFloor(sessionId: string): number | undefined {
+  const cached = floors.get(sessionId);
+  if (cached !== undefined) return cached;
+  const f = loadIndex().find((s) => s.sessionId === sessionId)?.floorRank;
+  if (f !== undefined) floors.set(sessionId, f);
+  return f;
+}
+
+/** Lower the floor to min(floor, rank) — the first contributor sets it. Returns the new floor. Never raises it.
+ *  Works before the index record exists (some channels create it after streaming): creation picks it up. */
+export function lowerSessionFloor(sessionId: string, rank: number): number {
+  const prev = getSessionFloor(sessionId);
+  const next = prev === undefined ? rank : Math.min(prev, rank);
+  floors.set(sessionId, next);
+  const sessions = loadIndex();
+  const s = sessions.find((x) => x.sessionId === sessionId);
+  if (s && s.floorRank !== next) { s.floorRank = next; saveIndex(sessions); }
+  return next;
+}
+
+/** A pending floor for a record being created now. */
+const floorField = (sessionId: string) => (floors.has(sessionId) ? { floorRank: floors.get(sessionId)! } : {});
+
 export function getSessionsByScheduleId(scheduleId: string): SessionMeta[] {
   return loadIndex()
     .filter((s) => s.scheduleId === scheduleId)
@@ -420,6 +452,7 @@ export function createScheduledSession(sessionId: string, scheduleId: string, ti
     scheduleId,
     scheduleRunAt: now,
     scheduleRunStatus: 'running',
+    ...floorField(sessionId),
   });
   saveIndex(sessions);
 }
@@ -710,6 +743,8 @@ export function forkSession(sourceId: string, user: { uid: string; email: string
     lastModified: now,
     forkedFrom: sourceId,
     ...(source.directives ? { directives: source.directives } : {}),
+    // The fork copies the source's (possibly tainted) content, so it keeps its floor.
+    ...(getSessionFloor(sourceId) !== undefined ? { floorRank: getSessionFloor(sourceId)! } : {}),
   });
   saveIndex(sessions);
 

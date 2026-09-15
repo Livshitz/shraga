@@ -6,7 +6,7 @@
 import crypto from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { streamChat, type AttachmentMeta, type WsEvent } from '../claude.ts';
+import { streamChat, taintSession, type AttachmentMeta, type WsEvent } from '../claude.ts';
 import { handleArtifactToolUse } from '../artifacts/artifacts.handler.ts';
 import { getMcpConfig } from '../mcp.ts';
 import { dataPath } from '../paths.ts';
@@ -216,6 +216,12 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
         const speakerName = !isBot && m.user ? await getUserName(m.user).catch(() => null) : null;
         const prefixed = speakerName ? `[${speakerName}]: ${resolved}` : resolved;
         appendMessage(sessionId, { id: crypto.randomUUID(), role, blocks: [{ type: 'text', text: prefixed }], channel: 'slack' });
+        // Another human's message is input to this session: taint it with their rank (SECURITY_ENFORCE only; lazy, so
+        // shadow mode makes no extra Slack call). An unresolvable profile resolves without email — fail closed.
+        const speaker = !isBot ? m.user : undefined;
+        if (speaker) await taintSession(sessionId, async () => fromSlack(speaker, {
+          email: await getUserProfile(speaker).then((p) => p.email, (err: any) => { console.error(`[slack-bot] getUserProfile failed (taint ${speaker}):`, err?.message); return null; }),
+        }));
       }
       recordSeenSlackTs(sessionId, [...processedTs, msg.ts]);
     } else if (isNew) {
@@ -276,7 +282,12 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
     { type: 'text' as const, text: resolvedText },
   ];
   const senderName = contact?.name || contact?.emails[0]?.split('@')[0] || undefined;
+  // The real human sender; a message with no Slack user falls back to the bot identity, marked internal.
+  const principal = msg.user ? fromSlack(msg.user, { email: contact?.emails[0] }) : fromInternal({ uid: SLACK_UID, lane: 'slack' });
   appendMessage(sessionId, { id: crypto.randomUUID(), role: 'user', blocks: userBlocks, channel: 'slack', senderName });
+  // Taint at the append, not only at turn start: if the session is busy below, no turn runs for this message but the
+  // next turn still reads it (SECURITY_ENFORCE only).
+  await taintSession(sessionId, principal);
   setLastMessageTs(channel, threadTs, userMessageTs);
   if (useUserToken) setUseUserToken(channel, threadTs, true);
 

@@ -3,6 +3,7 @@ import type { WsEvent, AttachmentMeta, PermissionHandler, QuestionHandler } from
 import type { ConvMessage } from '../sessions.ts';
 import type { Directives } from '../directives.ts';
 import type { AgentSettings } from '../shraga-config.ts';
+import type { TurnGuard } from '../security/enforce.ts';
 
 export interface EngineStreamOpts {
   /** The user's effective prompt (after directive stripping, slash command expansion, skill/workspace mentions) */
@@ -35,6 +36,9 @@ export interface EngineStreamOpts {
   /** True when the conversation was truncated (user replayed/edited a message) — engines with cached state should reset. */
   conversationReset?: boolean;
   context?: Record<string, string>;
+  /** SECURITY_ENFORCE only: the turn's security context. The engine derives tools/MCP/env from its effective
+   *  profile and gates every tool call through it. Absent (flag off) ⇒ today's behavior, untouched. */
+  security?: TurnGuard;
 
   directives: Directives;
   config: AgentSettings;
@@ -42,6 +46,9 @@ export interface EngineStreamOpts {
 
 export interface AgentEngine {
   readonly name: string;
+  /** True if the engine applies `EngineStreamOpts.security` (profile tools/MCP/env + per-call gate). Under
+   *  SECURITY_ENFORCE an engine without it may only run turns whose effective profile is unrestricted. */
+  readonly enforcesProfile?: boolean;
   stream(opts: EngineStreamOpts): AsyncGenerator<WsEvent>;
   /** Return model options for the UI picker (only called when engine is available) */
   getModels(): EngineModel[];
