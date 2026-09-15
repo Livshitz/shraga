@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, appendFileSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, appendFileSync, chmodSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Audit, GENESIS_HASH, canonical, type AuditRecord } from '../audit.ts';
@@ -77,14 +77,13 @@ describe('Audit sanitize', () => {
       type: 'key.create', principal: 'user:a', reason: 'y'.repeat(1000),
       meta: {
         keyId: 'k_1', apiKey: 'sk-live', token: 't', accessToken: 't', client_secret: 's', password: 'p', Authorization: 'a',
-        cookie: 'c', prompt: 'hello', body: 'b', nested: { refreshToken: 'r', ok: 1, header: 'Bearer abc.def', slack: 'xoxb-123' },
+        cookie: 'c', prompt: 'hello', body: 'b', nested: { refreshToken: 'r', ok: 1, header: 'Bearer abc.defghijklmnopqrst', slack: 'xoxb-123' },
         long: 'z'.repeat(1000),
       },
     })!;
     const line = readFileSync(path.join(dir, 'audit', '2026-01.jsonl'), 'utf8');
     for (const bad of ['sk-live', 'apiKey', 'accessToken', 'client_secret', 'password', 'Authorization', 'cookie', 'prompt', 'refreshToken', 'Bearer', 'xoxb']) expect(line).not.toContain(bad);
-    expect(rec.meta).toEqual({ keyId: 'k_1', nested: { ok: 1, header: '[redacted]', slack: '[redacted]' }, long: `${'z'.repeat(256)}…` });
-    expect(rec.reason!.length).toBe(257);
+    expect(rec.meta).toEqual({ keyId: 'k_1', nested: { ok: 1, header: '[redacted]', slack: '[redacted]' }, long: `${'z'.repeat(256)}…` });    expect(rec.reason!.length).toBe(257);
     expect(a.verify().ok).toBe(true);
   });
 
@@ -149,16 +148,64 @@ describe('Audit hardening (regressions)', () => {
     expect(c.verify('2026-02.jsonl')).toEqual({ ok: true, lines: 1 }); // chain after the break verifies
   });
 
-  test('redacts credential values in every string and secret-named keys/tuples', () => {
-    const rec = mk().append({ type: 'tool.allow', reason: 'Bearer abcdefSECRET1', target: 'https://x.io/cb?token=SECRET2&page=2', principal: 'xoxp-SECRET9',
-      meta: { keyId: 'k1', headers: [['Authorization', 'SECRET3raw'], ['Content-Type', 'json']], apiKeys: ['SECRET4'], private_key_pem: 'SECRET5',
-        text: 'user prompt body SECRET6', jwt: 'eyJhbGciOi.SECRET7', list: ['ok', 'sk-SECRET10abcdef', '-----BEGIN RSA PRIVATE KEY-----SECRET11'],
-        Credentials: 'SECRET12', message: 'SECRET13', input: 'SECRET14', output: 'SECRET15', session_key: 'SECRET16' } })!;
+  test('redacts only the credential substring in every string; strips secret/content-named keys', () => {
+    const rec = mk().append({ type: 'tool.allow', reason: 'got Bearer abcdefSECRET1xyz00 from caller', principal: 'xoxp-SECRET9',
+      meta: { keyId: 'k1', X_Api_Key: 'SECRET4', private_key: 'SECRET5', AUTHORIZATION: 'SECRET3', pwd: 'SECRET8', signature: 'SECRET2',
+        text: 'user prompt body SECRET6', jwt: 'x eyJhbGciOi.SECRET7 y', list: ['ok', 'sk-SECRET10abcdef', '-----BEGIN RSA PRIVATE KEY-----\nSECRET11\n-----END RSA PRIVATE KEY----- tail'],
+        clientSecret: 'SECRET12', message: 'SECRET13', input: 'SECRET14', output: 'SECRET15', refresh_token: 'SECRET16' } })!;
     const line = readFileSync(F(), 'utf8');
-    for (let i = 1; i <= 16; i++) if (i !== 8) expect(line).not.toContain(`SECRET${i}`);
-    expect(rec.target).toBe('https://x.io/cb?token=[redacted]&page=2');
-    expect(rec.meta).toEqual({ keyId: 'k1', headers: [['Authorization', '[redacted]'], ['Content-Type', 'json']], jwt: '[redacted]', list: ['ok', '[redacted]', '[redacted]'] });
+    for (let i = 1; i <= 16; i++) expect(line).not.toContain(`SECRET${i}`);
+    expect(rec.reason).toBe('got [redacted] from caller');
+    expect(rec.meta).toEqual({ keyId: 'k1', jwt: 'x [redacted] y', list: ['ok', '[redacted]', '[redacted] tail'] });
     expect(mk().verify().ok).toBe(true);
+  });
+
+  test('no over-redaction: ids, event types, prose mentioning credentials, URLs survive', () => {
+    const meta = { keyId: 'k1', apiKeyId: 'ak1', credentialId: 'c1', idempotencyKey: 'i1', publicKey: 'pk', inputTokens: 10, outputTokens: 5,
+      contentType: 'json', promptId: 'p1', types: ['token.revoke', 'session.delete'], tools: ['TokenCounter', 'Read'], commit: '5a84e9b1c0ffee' };
+    const rec = mk().append({ type: 'policy.change', role: 'basic', reason: 'missing Bearer header on request', target: 'https://docs.x.io/search?keyword=audit&page=2', meta })!;
+    expect(rec).toMatchObject({ role: 'basic', reason: 'missing Bearer header on request', target: 'https://docs.x.io/search?keyword=audit&page=2', meta });
+  });
+
+  test('credentials in object KEYS are redacted, incl. the _truncated key list', () => {
+    const a = mk();
+    expect(a.append({ type: 'tool.allow', meta: { 'Bearer abcdefZZLEAK1xyz0000': 1 } })!.meta).toEqual({ '[redacted]': 1 });
+    const big: Record<string, string> = { 'sk-ZZLEAK2abcdefghijkl': 'v' }; for (let i = 0; i < 400; i++) big[`k${i}pad`] = 'vvvvvvvvvv';
+    const r = a.append({ type: 'tool.allow', meta: big })!;
+    expect((r.meta as any)._truncated).toBe(true);
+    expect((r.meta as any).keys[0]).toBe('[redacted]');
+    expect(readFileSync(F(), 'utf8')).not.toContain('ZZLEAK');
+  });
+
+  test('perf: pathological 96KB strings (values and keys) append in < 50ms', () => {
+    const a = mk(); a.append({ type: 'auth.allow' }); // warm up file + JIT
+    for (const s of ['?'.repeat(96_000), '&'.repeat(96_000), `?${'key'.repeat(32_000)}`, 'bearer '.repeat(14_000), `eyJ${'a'.repeat(96_000)}`]) {
+      const t = performance.now();
+      const r = a.append({ type: 'tool.deny', target: s, meta: { [s]: s } })!;
+      expect(performance.now() - t).toBeLessThan(50);
+      expect(r.target!.length).toBeLessThanOrEqual(257);
+    }
+  });
+
+  test('unreadable month FILE: verify reports it, query logs then throws, append fails closed', () => {
+    const a = mk(); a.append({ type: 'auth.allow' });
+    chmodSync(F(), 0o000); errors.length = 0;
+    try {
+      const b = mk();
+      expect(b.verify()).toEqual({ ok: false, lines: 0, brokenAt: { file: '2026-01.jsonl', line: 0, reason: 'unreadable' } });
+      expect(() => b.query({ limit: 5 })).toThrow('EACCES');
+      expect(errors.some(e => e.includes('query cannot read 2026-01.jsonl'))).toBe(true);
+      expect(b.append({ type: 'auth.deny' })).toBeNull();
+    } finally { chmodSync(F(), 0o600); }
+  });
+
+  test('symlinked dir spelling shares one chain head', () => {
+    const real = path.join(dir, 'audit'), link = path.join(dir, 'link');
+    mk().append({ type: 'auth.allow' });
+    symlinkSync(real, link);
+    const a = mk(), b = new Audit({ dir: link, clock: () => now, log: quiet });
+    a.append({ type: 'auth.allow' }); b.append({ type: 'auth.deny' }); a.append({ type: 'auth.allow' });
+    expect(mk().verify()).toEqual({ ok: true, lines: 4 });
   });
 
   test('two instances on one dir append to one chain', () => {
@@ -193,12 +240,15 @@ describe('Audit hardening (regressions)', () => {
     expect(a.verify().ok).toBe(true);
   });
 
-  test('query finds clock-skewed records in a neighbouring month file', () => {
+  test('query finds clock-skewed records in any month file', () => {
     const a = mk();
     now = Date.parse('2026-03-01T00:00:00Z'); a.append({ type: 'escalate', target: 'mar' });
     now = Date.parse('2026-02-15T00:00:00Z'); a.append({ type: 'escalate', target: 'skewed' }); // lands in 2026-03.jsonl
     expect(a.query({ limit: 10, to: '2026-02-28T00:00:00Z' }).items.map(r => r.target)).toEqual(['skewed']);
     expect(a.query({ limit: 10, from: '2026-02-01T00:00:00Z', to: '2026-02-20T00:00:00Z' }).items.map(r => r.target)).toEqual(['skewed']);
+    now = Date.parse('2027-01-05T00:00:00Z'); a.append({ type: 'escalate', target: 'jumped' }); // clock jumps 10 months ahead…
+    now = Date.parse('2026-03-10T00:00:00Z'); a.append({ type: 'escalate', target: 'corrected' }); // …then corrects: lands in 2027-01.jsonl
+    expect(a.query({ limit: 10, from: '2026-03-05T00:00:00Z', to: '2026-03-31T00:00:00Z' }).items.map(r => r.target)).toEqual(['corrected']);
   });
 });
 

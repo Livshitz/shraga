@@ -18,7 +18,7 @@
 // deleting the newest file(s) or tail lines leaves a valid shorter chain. Neither is detectable without an external
 // head anchor; the OS append-only flag (`chattr +a`) + offsite copy (tamper-protection step) are the mitigation.
 import { createHash } from 'node:crypto';
-import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readdirSync, readSync } from 'node:fs';
+import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { dataPath } from '../paths.ts';
 
@@ -32,15 +32,13 @@ const TYPES = new Set<string>(['auth.allow', 'auth.deny', 'role.resolve', 'turn.
 
 /**
  * What callers pass. `meta` must carry ids/names/enums — NOT free text (conversations already hold content).
- * Sanitization is best-effort defence, never a licence to pass raw payloads:
- * - keys naming secrets (token, secret, passw, authorization, cookie, credential, api-key(s), private-key, session-key,
- *   *key) or content (prompt, body, content, text, message(s), input, output) are STRIPPED at any depth; `keyId` stays.
- * - `[name, value]` tuples whose name is a secret key get the value redacted (header arrays).
- * - EVERY string (top-level fields, meta values, array items) is scanned: credential-looking values (Bearer/Basic,
- *   sk-…, xox?-…, JWT, PEM keys) become '[redacted]'; URL query params named like token/key/secret/sig/password/code
- *   keep the name with a redacted value.
- * - every string is truncated to `maxString`; meta depth ≤ 4, arrays ≤ 50 items;
- *   serialized meta over `maxMetaBytes` is replaced by `{ _truncated: true, keys }`.
+ * Sanitization is a safety net, not DLP:
+ * - EVERY string (top-level fields, meta keys and values, array items) is truncated to `maxString` FIRST (bounds regex
+ *   cost), then only the credential substring (Bearer/Basic + ≥16-char token, sk-…, xox?-…, JWT, PEM key) → '[redacted]'.
+ * - meta keys named (whole, or as a `_`/`-`/camelCase suffix) token, accessToken, refreshToken, secret, clientSecret,
+ *   password, passwd, pwd, authorization, cookie, apiKey, privateKey, signature are STRIPPED at any depth; `*Id` keys stay.
+ *   Keys named exactly prompt, body, content, text, message(s), input, output are stripped too.
+ * - meta depth ≤ 4, arrays ≤ 50 items; serialized meta over `maxMetaBytes` is replaced by `{ _truncated: true, keys }`.
  */
 export interface AuditEvent {
   type: AuditEventType;
@@ -58,10 +56,15 @@ export interface AuditVerify { ok: boolean; lines: number; brokenAt?: { file: st
 
 export const GENESIS_HASH = '0'.repeat(64);
 const FILE_RE = /^\d{4}-\d{2}\.jsonl$/;
-const SECRET_KEY_RE = /token|secret|passw|authorization|cookie|credential|api[-_]?keys?|private[-_]?key|session[-_]?key|key$/i;
-const CONTENT_KEY_RE = /prompt|body|content|^(text|messages?|input|output)$/i;
-const CRED_PATTERNS = /\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{6,}|\bsk-[A-Za-z0-9_-]{10,}|\bxox[a-z]-|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|-----BEGIN [^-]*KEY-----/i;
-const URL_PARAM_RE = /([?&][^=&#\s]*(?:token|key|secret|sig|passw|code)[^=&#\s]*=)[^&#\s]*/gi;
+const SECRET_NAMES = new Set(['token', 'accesstoken', 'refreshtoken', 'secret', 'clientsecret', 'password', 'passwd', 'pwd', 'authorization', 'cookie', 'apikey', 'privatekey', 'signature']);
+const CONTENT_KEY_RE = /^(prompt|body|content|text|messages?|input|output)$/i;
+const CRED_RE = /\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}|\bsk-[A-Za-z0-9_-]{10,}|\bxox[a-z]-[A-Za-z0-9-]*|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?|-----BEGIN [A-Z ]*KEY-----[\s\S]*?(?:-----END [A-Z ]*KEY-----|$)/gi;
+/** Whole key, or its last one/two `_`/`-`/camelCase words, is a secret name. `*Id` keys (apiKeyId) are ids, kept. */
+const isSecretKey = (k: string) => {
+  if (k.endsWith('Id')) return false;
+  const w = k.split(/[_-]|(?<=[a-z0-9])(?=[A-Z])/).map(s => s.toLowerCase());
+  return [w.join(''), w.at(-1)!, w.slice(-2).join('')].some(n => SECRET_NAMES.has(n));
+};
 const CHUNK = 64 * 1024;
 const MAX_QUERY = 1000;
 
@@ -136,10 +139,13 @@ const parse = (line: string): AuditRecord | null => {
   try { const r = JSON.parse(line); return r && typeof r.hash === 'string' && typeof r.prevHash === 'string' ? r : null; } catch { return null; }
 };
 const toIso = (v: string | number | Date) => new Date(v).toISOString();
-/** 'YYYY-MM' shifted by `d` months. */
-const shiftMonth = (month: string, d: number) => new Date(Date.UTC(+month.slice(0, 4), +month.slice(5, 7) - 1 + d, 1)).toISOString().slice(0, 7);
+/** Canonical dir identity: realpath of the nearest existing ancestor + the rest (a symlink spelling or a not-yet-created dir under /var → /private/var must not get its own head). */
+const realDir = (dir: string): string => {
+  const abs = path.resolve(dir);
+  try { return realpathSync(abs); } catch { const up = path.dirname(abs); return up === abs ? abs : path.join(realDir(up), path.basename(abs)); }
+};
 
-/** Chain head per resolved dir, shared by every Audit instance in the process. */
+/** Chain head per real dir, shared by every Audit instance in the process. */
 interface Head { lastHash: string; lastMonth: string; healthy: boolean }
 const heads = new Map<string, Head>();
 
@@ -160,7 +166,7 @@ export class Audit {
 
   public constructor(options?: Partial<AuditOptions>) {
     this.options = { ...new AuditOptions(), ...options };
-    const key = path.resolve(this.options.dir);
+    const key = realDir(this.options.dir);
     this.state = heads.get(key) ?? { lastHash: GENESIS_HASH, lastMonth: '', healthy: true };
     heads.set(key, this.state);
     this.recover();
@@ -204,25 +210,24 @@ export class Audit {
     }
   }
 
-  /** Redact credential-looking values, then truncate. */
+  /** Truncate (before any regex — bounds its cost), then redact credential substrings. */
   private str(v: unknown): string | undefined {
     if (v === undefined || v === null) return undefined;
-    const raw = String(v);
-    const s = CRED_PATTERNS.test(raw) ? '[redacted]' : raw.replace(URL_PARAM_RE, '$1[redacted]');
-    return s.length > this.options.maxString ? `${s.slice(0, this.options.maxString)}…` : s;
+    const s = String(v), max = this.options.maxString;
+    return (s.length > max ? `${s.slice(0, max)}…` : s).replace(CRED_RE, '[redacted]');
   }
 
   private clean(v: unknown, depth: number): unknown {
     if (v === null || typeof v === 'number' || typeof v === 'boolean') return v;
     if (typeof v === 'string') return this.str(v);
     if (depth >= 4) return '[depth]';
-    if (Array.isArray(v)) {
-      if (v.length === 2 && typeof v[0] === 'string' && SECRET_KEY_RE.test(v[0])) return [this.str(v[0]), '[redacted]'];
-      return v.slice(0, 50).map(x => this.clean(x, depth + 1));
-    }
+    if (Array.isArray(v)) return v.slice(0, 50).map(x => this.clean(x, depth + 1));
     if (typeof v === 'object') {
       const out: Record<string, unknown> = {};
-      for (const [k, x] of Object.entries(v)) if (!SECRET_KEY_RE.test(k) && !CONTENT_KEY_RE.test(k) && x !== undefined) out[k] = this.clean(x, depth + 1);
+      for (const [raw, x] of Object.entries(v)) {
+        const k = this.str(raw)!; // keys can carry secrets too; the `_truncated.keys` list reuses these
+        if (x !== undefined && !isSecretKey(k) && !CONTENT_KEY_RE.test(k)) out[k] = this.clean(x, depth + 1);
+      }
       return out;
     }
     return undefined; // functions, symbols, bigint
@@ -264,7 +269,11 @@ export class Audit {
     }
   }
 
-  /** Newest first, streaming backwards over the month files in range. Cursor is opaque (file + byte offset). */
+  /**
+   * Newest first, streaming backwards over ALL month files (no month-name pruning: a skewed clock can put any ts in any
+   * file); each record is filtered by its own ts. Cursor is opaque (file + byte offset).
+   * Throws (after logging) if the dir or a month file can't be read — never a silently short page.
+   */
   public query(q: AuditQuery): AuditPage {
     const limit = Math.max(1, Math.min(MAX_QUERY, Math.floor(q.limit) || 1));
     const from = q.from !== undefined ? toIso(q.from) : undefined, to = q.to !== undefined ? toIso(q.to) : undefined;
@@ -275,21 +284,20 @@ export class Audit {
       if (!FILE_RE.test(file ?? '') || !/^\d+$/.test(off ?? '')) throw new Error('invalid audit cursor');
       cur = { file, offset: Number(off) };
     }
-    // Files are pruned by month with one month of slack either side (clock skew puts records in a neighbouring
-    // month's file); each record is still filtered by its own ts.
-    const maxMonth = to && shiftMonth(to.slice(0, 7), 1), minMonth = from && shiftMonth(from.slice(0, 7), -1);
     const items: AuditRecord[] = [];
     let last: { file: string; start: number } | undefined;
     for (const f of this.files().reverse()) {
-      const month = f.slice(0, 7);
       if (cur && f > cur.file) continue;
-      if (maxMonth && month > maxMonth) continue;
-      if (minMonth && month < minMonth) break;
-      for (const { line, start } of reverseLines(path.join(this.options.dir, f), cur?.file === f ? cur.offset : undefined)) {
-        const r = parse(line);
-        if (!r || (from && r.ts < from) || (to && r.ts > to) || (types && !types.has(r.type)) || (q.principal !== undefined && r.principal !== q.principal)) continue;
-        if (items.length === limit) return { items, nextCursor: Buffer.from(`${last!.file}:${last!.start}`).toString('base64url') };
-        items.push(r); last = { file: f, start };
+      try {
+        for (const { line, start } of reverseLines(path.join(this.options.dir, f), cur?.file === f ? cur.offset : undefined)) {
+          const r = parse(line);
+          if (!r || (from && r.ts < from) || (to && r.ts > to) || (types && !types.has(r.type)) || (q.principal !== undefined && r.principal !== q.principal)) continue;
+          if (items.length === limit) return { items, nextCursor: Buffer.from(`${last!.file}:${last!.start}`).toString('base64url') };
+          items.push(r); last = { file: f, start };
+        }
+      } catch (e: any) {
+        this.options.log.error(`[audit] query cannot read ${f}: ${e.message}`);
+        throw e;
       }
     }
     return { items };
@@ -299,26 +307,32 @@ export class Audit {
   public verify(file?: string): AuditVerify {
     let all: string[];
     try { all = this.files(); } catch { return { ok: false, lines: 0, brokenAt: { file: '', line: 0, reason: 'unreadable' } }; }
-    let targets = all, expected = GENESIS_HASH, lines = 0;
-    if (file) {
-      const base = path.basename(file), i = all.indexOf(base);
-      if (i === -1) return { ok: false, lines: 0, brokenAt: { file: base, line: 0, reason: 'unparseable' } };
-      targets = [base];
-      for (let j = i - 1; j >= 0 && expected === GENESIS_HASH; j--) {
-        for (const { line } of reverseLines(path.join(this.options.dir, all[j]))) { const r = parse(line); if (r) { expected = r.hash; break; } }
+    let targets = all, expected = GENESIS_HASH, lines = 0, f = '';
+    try {
+      if (file) {
+        const base = path.basename(file), i = all.indexOf(base);
+        if (i === -1) return { ok: false, lines: 0, brokenAt: { file: base, line: 0, reason: 'unparseable' } };
+        targets = [base];
+        for (let j = i - 1; j >= 0 && expected === GENESIS_HASH; j--) {
+          f = all[j];
+          for (const { line } of reverseLines(path.join(this.options.dir, f))) { const r = parse(line); if (r) { expected = r.hash; break; } }
+        }
       }
-    }
-    for (const f of targets) {
-      for (const { line, n } of forwardLines(path.join(this.options.dir, f))) {
-        lines++;
-        const r = parse(line);
-        if (!r) return { ok: false, lines, brokenAt: { file: f, line: n, reason: 'unparseable' } };
-        if (r.prevHash !== expected) return { ok: false, lines, brokenAt: { file: f, line: n, reason: 'prev-hash' } };
-        const { hash, ...rest } = r;
-        if (hashOf(rest) !== hash) return { ok: false, lines, brokenAt: { file: f, line: n, reason: 'hash' } };
-        expected = hash;
+      for (f of targets) {
+        for (const { line, n } of forwardLines(path.join(this.options.dir, f))) {
+          lines++;
+          const r = parse(line);
+          if (!r) return { ok: false, lines, brokenAt: { file: f, line: n, reason: 'unparseable' } };
+          if (r.prevHash !== expected) return { ok: false, lines, brokenAt: { file: f, line: n, reason: 'prev-hash' } };
+          const { hash, ...rest } = r;
+          if (hashOf(rest) !== hash) return { ok: false, lines, brokenAt: { file: f, line: n, reason: 'hash' } };
+          expected = hash;
+        }
       }
+      return { ok: true, lines };
+    } catch (e: any) {
+      this.options.log.error(`[audit] verify cannot read ${f}: ${e.message}`);
+      return { ok: false, lines, brokenAt: { file: f, line: 0, reason: 'unreadable' } };
     }
-    return { ok: true, lines };
   }
 }
