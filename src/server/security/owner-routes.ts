@@ -7,6 +7,8 @@ import { requireOwner } from './owner-only.ts';
 import { revocablePrincipalId, revokeTokens } from './revocation.ts';
 
 const gate = [requireAuth, requireOwner()];
+/** The raw INTERNAL_API_TOKEN's principal (auth.ts) — no issued-at, so tokensValidAfter can never reject it. */
+const LEGACY_INTERNAL_ID = 'internal:agent-internal';
 const userOf = (req: Request) => (req as any).user as AuthUser;
 
 const fail = (res: Response, e: any, status = 400) => {
@@ -24,6 +26,12 @@ ownerRouter.post('/api/owner/tokens/revoke', ...gate, (req, res) => {
     return void res.status(400).json({
       error: 'principalId must be "user:<email|uid>" or "internal:<uid>" (the token kinds revocation checks). '
         + 'To revoke an API key, DELETE /api/owner/api-keys/:id.',
+    });
+  }
+  if (id === LEGACY_INTERNAL_ID) {
+    return void res.status(400).json({
+      error: `${LEGACY_INTERNAL_ID} is the legacy shared internal token, which carries no issue time — it can only be `
+        + 'rotated by changing INTERNAL_API_TOKEN and restarting.',
     });
   }
   try {

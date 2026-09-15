@@ -169,6 +169,38 @@ describe('owner-gated admin routes', () => {
   }));
 });
 
+describe('API keys never act as owner, and only an interactive login mints keys', () => {
+  test("an owner's key (no role, or guest-capped) → 403 on owner routes, isOwner false; a scoped internal token for the owner stays owner", () => asActive(async () => {
+    (await import('../runtime.ts')).security()!.activate(); // booted PASSIVE: load the policy so role "guest" exists
+    const mint = async (body: Record<string, unknown>) => {
+      const r = await call(ownerTok, 'POST', '/api/owner/api-keys', body);
+      const j = await r.json();
+      expect({ status: r.status, j }).toMatchObject({ status: 200 });
+      return j.key as string;
+    };
+    const plain = await mint({ label: 'owner-plain' }), capped = await mint({ label: 'owner-guest', role: 'guest' });
+    const mcps = await (await call(ownerTok, 'GET', '/api/mcps')).json();
+    for (const key of [plain, capped]) {
+      expect(key).toMatch(/^uck_/);
+      expect((await (await call(key, 'GET', '/api/config')).json()).isOwner).toBe(false);
+      expect((await call(key, 'PUT', '/api/mcps', mcps)).status).toBe(403);
+      expect((await call(key, 'GET', '/api/owner/api-keys')).status).toBe(403);
+      expect((await call(key, 'POST', '/api/owner/tokens/revoke', { principalId: `user:${BOB}` })).status).toBe(403);
+      // the escalation chain: a (capped) key minting an uncapped one, on either mount
+      expect((await call(key, 'POST', '/api/owner/api-keys', { label: 'escalated' })).status).toBe(403);
+      const self = await call(key, 'POST', '/api/api-keys', { label: 'escalated-self' });
+      expect(self.status).toBe(403);
+      expect((await self.json()).error).toMatch(/interactive login/);
+    }
+    const { signInternalToken } = await import('../../auth.ts');
+    const internal = { 'x-internal-token': signInternalToken(OWNER, OWNER) };
+    const cfg = await fetch(`${base}/api/config`, { headers: internal });
+    expect((await cfg.json()).isOwner).toBe(true);
+    expect((await fetch(`${base}/api/api-keys`, { method: 'POST', headers: { ...internal, 'content-type': 'application/json' }, body: '{}' })).status).toBe(403);
+    expect((await call(ownerTok, 'POST', '/api/api-keys', { label: 'login-control' })).status).toBe(200); // control
+  }));
+});
+
 describe('MCP OAuth consent requires an interactive login', () => {
   test("owner's API key and internal token → 403 + auth.deny audited; an interactive login still gets a code", async () => {
     const sec = (await import('../runtime.ts')).security()!;
@@ -213,6 +245,10 @@ describe('owner routes (/api/owner/*) for an owner', () => {
     const passive = await call(ownerTok, 'POST', '/api/owner/tokens/revoke', { principalId: `user:${BOB}` });
     expect(passive.status).toBe(409);
     expect((await call(ownerTok, 'POST', '/api/owner/tokens/revoke', { principalId: 'nope' })).status).toBe(400);
+    expect((await call(ownerTok, 'POST', '/api/owner/tokens/revoke', { principalId: `user:${BOB}​` })).status).toBe(400);
+    const legacy = await call(ownerTok, 'POST', '/api/owner/tokens/revoke', { principalId: 'internal:agent-internal' });
+    expect(legacy.status).toBe(400);
+    expect((await legacy.json()).error).toMatch(/INTERNAL_API_TOKEN/);
     for (const principalId of ['apikey:abc', `email:${BOB}`, 'slack:U1']) {
       const r = await call(ownerTok, 'POST', '/api/owner/tokens/revoke', { principalId });
       expect(r.status).toBe(400);

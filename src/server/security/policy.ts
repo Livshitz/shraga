@@ -355,6 +355,13 @@ export class Policy {
     return this.resolved(best === Infinity ? c.file.default : b[best].role);
   }
 
+  /** The highest-ranked role strictly below owner (else the default) — the ceiling for a non-interactive principal. */
+  public belowOwner(): Resolved {
+    const ownerRank = this.resolved(OWNER_ROLE).rank;
+    const top = this.compiled.byRank.find(([name, d]) => name !== OWNER_ROLE && d.rank < ownerRank);
+    return this.resolved(top ? top[0] : this.compiled.file.default);
+  }
+
   /** Taint: a session's effective role is the lowest-ranked role that contributed. */
   public effective(floorRank: number, role: string): Resolved {
     const r = this.resolved(role);

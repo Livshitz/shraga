@@ -45,8 +45,8 @@ import {
   appendMessage, upsertSession, setRunStatus, acquireSessionLock, releaseSessionLock,
   type ConvBlock,
 } from '../sessions.ts';
-import { validateApiKey } from '../api-keys.ts';
-import { fromApiKey, type Principal } from '../security/principal.ts';
+import { apiKeyPrincipal, validateApiKey } from '../api-keys.ts';
+import type { Principal } from '../security/principal.ts';
 import { admitTurn, requestIp } from '../security/runtime.ts';
 import { writeDenial } from '../security/guard.ts';
 import { WebhookStreamer, type WebhookTarget } from './streamer.ts';
@@ -209,7 +209,7 @@ export function createWebhookLaneFeature(opts: WebhookLaneOptions): ServerFeatur
         } catch { return void res.status(400).json({ error: 'callback.url must be a valid HTTPS URL' }); }
 
         // Guard before any spend: blocklist → rate → concurrency (shadow unless SECURITY_ENFORCE).
-        const principal = fromApiKey(caller);
+        const principal = apiKeyPrincipal(caller); // carries the key's role cap, so guard rank and the turn's role agree
         const admission = admitTurn(principal, { ip: requestIp(req), channel });
         if (!admission.ok) return void writeDenial(res, admission);
 

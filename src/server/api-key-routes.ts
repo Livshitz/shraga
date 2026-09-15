@@ -4,6 +4,7 @@
 import { Router, type Request, type RequestHandler, type Response } from 'express';
 import type { AuthUser } from './auth.ts';
 import { apiKeyStore, ApiKeyStoreError } from './api-keys.ts';
+import { security } from './security/runtime.ts';
 
 export class ApiKeyRoutesOptions {
   base: string = '/api/api-keys';
@@ -34,6 +35,14 @@ export function apiKeyRouter(options?: Partial<ApiKeyRoutesOptions>): Router {
   /** Body: { label?, role?, expiresAt? (epoch ms) } — role/expiresAt honored on the owner mount only. Plaintext returned once. */
   router.post(base, ...gate, (req, res) => {
     const user = userOf(req);
+    // Minting a key is minting a credential AS this identity — only an interactive login may (same rule as OAuth
+    // consent). Otherwise a role-capped or expiring key could mint itself an uncapped, non-expiring one.
+    const kind = user.principal?.kind ?? 'unknown';
+    if (kind !== 'user') {
+      console.warn(`[api-keys] create refused: non-interactive credential (${kind})`);
+      security()?.authDeny(`http:${base}`, `non-interactive:${kind}`, req.ip);
+      return void res.status(403).json({ error: 'Creating an API key requires an interactive login' });
+    }
     const { label, role, expiresAt } = (req.body ?? {}) as { label?: string; role?: string; expiresAt?: number };
     try {
       const opts = asOwner ? { role, expiresAt } : {};
