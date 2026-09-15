@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, renameSync, rmSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { homedir } from 'node:os';
@@ -574,6 +574,26 @@ export function replaceSessionLock(sessionId: string, origin: SessionLock['origi
 
 export function getSessionAbortController(sessionId: string): AbortController | undefined {
   return globalSessionLocks.get(sessionId)?.abortController;
+}
+
+/**
+ * Delete a conversation: its index entry, its files in `data/conversations/` (`<id>.jsonl`, `.partial.json`,
+ * `.summary.md`, `.trace.yaml`) and its uploads dir. Never touches `data/audit`. Refused while a turn holds the
+ * session lock. Returns the removed meta (for auditing), or why nothing was removed.
+ */
+export function deleteSession(sessionId: string): { ok: true; meta: SessionMeta } | { ok: false; reason: 'invalid' | 'not_found' | 'running' } {
+  if (!/^[A-Za-z0-9._-]+$/.test(sessionId) || sessionId.startsWith('.')) return { ok: false, reason: 'invalid' }; // reaches rmSync
+  if (isSessionLocked(sessionId)) return { ok: false, reason: 'running' };
+  const sessions = loadIndex();
+  const meta = sessions.find((s) => s.sessionId === sessionId);
+  if (!meta) return { ok: false, reason: 'not_found' };
+  saveIndex(sessions.filter((s) => s !== meta));
+  flushIndex();
+  for (const ext of ['jsonl', 'partial.json', 'summary.md', 'trace.yaml']) rmSync(path.join(CONV_DIR, `${sessionId}.${ext}`), { force: true });
+  rmSync(dataPath('uploads', sessionId), { recursive: true, force: true });
+  unregisterLivePartial(sessionId);
+  liveModels.delete(sessionId);
+  return { ok: true, meta };
 }
 
 function findSessionFile(sessionId: string): string | null {

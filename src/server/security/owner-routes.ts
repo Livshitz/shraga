@@ -7,17 +7,24 @@ import { Router, type Request, type Response } from 'express';
 import { requireAuth, type AuthUser } from '../auth.ts';
 import { apiKeyRouter } from '../api-key-routes.ts';
 import { apiKeyPrincipal } from '../api-keys.ts';
+import { getOwners } from '../owners.ts';
+import { deleteSession } from '../sessions.ts';
 import { canonical, type AuditEventType } from './audit.ts';
-import { validatePolicy, type BindingMatch, type PolicyFile } from './policy.ts';
+import { matches, validatePolicy, type BindingMatch, type PolicyFile } from './policy.ts';
 import { anonymous, fromAuthUser, fromEmailSender, fromInternal, fromSlack, type Principal } from './principal.ts';
-import { requireOwner } from './owner-only.ts';
+import { requireInteractive, requireOwner } from './owner-only.ts';
 import { revocablePrincipalId, revokeTokens } from './revocation.ts';
 import { resolvePrincipal, security, type SecurityRuntime } from './runtime.ts';
 
+/** Reads: owner via interactive login or uncapped owner API key (never the agent's internal token). */
 const gate = [requireAuth, requireOwner()];
+/** Writes: interactive login only. */
+const writeGate = [...gate, requireInteractive()];
 /** The raw INTERNAL_API_TOKEN's principal (auth.ts) — no issued-at, so tokensValidAfter can never reject it. */
 const LEGACY_INTERNAL_ID = 'internal:agent-internal';
 const userOf = (req: Request) => (req as any).user as AuthUser;
+/** OWNERS as the principals a block could hit: each owner's login and verified email channel. */
+const ownerPrincipals = () => getOwners().flatMap(e => [fromAuthUser({ uid: e, email: e }), fromEmailSender(e, true)]);
 
 const fail = (res: Response, e: any, status = 400) => {
   console.warn(`[owner-routes] ${e?.message ?? e}`);
@@ -143,7 +150,7 @@ export const ownerRouter = Router();
 // ── Tokens + API keys ─────────────────────────────────────────────────────────
 
 /** Invalidate every token issued to a principal until now. Body: { principalId: "user:<email|uid>" | "internal:<uid>" }. */
-ownerRouter.post('/api/owner/tokens/revoke', ...gate, (req, res) => {
+ownerRouter.post('/api/owner/tokens/revoke', ...writeGate, (req, res) => {
   const { principalId } = (req.body ?? {}) as { principalId?: unknown };
   const id = typeof principalId === 'string' ? revocablePrincipalId(principalId) : null;
   if (!id) {
@@ -164,7 +171,7 @@ ownerRouter.post('/api/owner/tokens/revoke', ...gate, (req, res) => {
   } catch (e: any) { fail(res, e, 409); }
 });
 
-ownerRouter.use(apiKeyRouter({ base: '/api/owner/api-keys', gate, asOwner: true }));
+ownerRouter.use(apiKeyRouter({ base: '/api/owner/api-keys', gate, writeGate: [requireInteractive()], asOwner: true }));
 
 // ── Policy ────────────────────────────────────────────────────────────────────
 
@@ -172,19 +179,24 @@ ownerRouter.get('/api/owner/policy', ...gate, (_req, res) => {
   const sec = runtimeOr(res);
   if (!sec) return;
   const policy = sec.policy.current;
-  res.json({ policy, version: policyVersion(policy), valid: sec.policy.valid });
+  // ownerIds: a UI hint (hide Block on owner rows); the block route enforces it.
+  res.json({ policy, version: policyVersion(policy), valid: sec.policy.valid, ownerIds: ownerPrincipals().map(p => p.id) });
 });
 
-/** Body: { policy, version? } — the whole document; `version` from GET guards against overwriting a newer save. */
-ownerRouter.put('/api/owner/policy', ...gate, (req, res) => {
+/** Body: { policy, version } — the whole document; `version` (from GET, required) guards against overwriting a newer
+ *  save. `tokensValidAfter` and `blocklist` always come from the CURRENT policy — they change only via their own routes,
+ *  so a PUT can't un-revoke or un-block. */
+ownerRouter.put('/api/owner/policy', ...writeGate, (req, res) => {
   const sec = runtimeOr(res, true);
   if (!sec) return;
   const { policy, version } = (req.body ?? {}) as { policy?: unknown; version?: unknown };
-  if (!isObj(policy)) return void res.status(400).json({ error: 'Body must be { policy, version? }' });
-  if (version !== undefined && version !== policyVersion(sec.policy.current)) {
-    return void res.status(409).json({ error: 'The policy changed since you loaded it — reload and re-apply your edit' });
+  if (!isObj(policy)) return void res.status(400).json({ error: 'Body must be { policy, version }' });
+  const current = sec.policy.current;
+  if (version !== policyVersion(current)) {
+    return void res.status(409).json({ error: version === undefined ? 'version is required — GET the policy first' : 'The policy changed since you loaded it — reload and re-apply your edit' });
   }
-  if (commit(req, res, sec, policy as PolicyFile, 'policy')) res.json({ ok: true, version: policyVersion(sec.policy.current), valid: sec.policy.valid });
+  const next = { ...policy, tokensValidAfter: current.tokensValidAfter, blocklist: current.blocklist } as PolicyFile;
+  if (commit(req, res, sec, next, 'policy')) res.json({ ok: true, version: policyVersion(sec.policy.current), valid: sec.policy.valid });
 });
 
 /** Resolve a descriptor exactly as a turn would (resolvePrincipal — decide()'s path), without auditing `role.resolve`. */
@@ -217,10 +229,12 @@ ownerRouter.get('/api/owner/blocks', ...gate, (_req, res) => {
 });
 
 /** Body: { match, until?: epoch seconds | null, reason? } — a manual block. */
-ownerRouter.post('/api/owner/blocks', ...gate, (req, res) => {
+ownerRouter.post('/api/owner/blocks', ...writeGate, (req, res) => {
   const sec = runtimeOr(res, true);
   if (!sec || !requireValidPolicy(res, sec)) return;
   const { match, until = null, reason } = (req.body ?? {}) as { match?: unknown; until?: unknown; reason?: unknown };
+  const owner = isObj(match) && ownerPrincipals().find(p => matches(match as BindingMatch, p));
+  if (owner) return void res.status(400).json({ error: `This block would match the owner ${owner.email ?? owner.id} — owners can't be blocked (change OWNERS instead)` });
   if (until !== null && (typeof until !== 'number' || until >= 1e11)) return void res.status(400).json({ error: 'until must be epoch SECONDS or null' });
   if (typeof until === 'number' && until <= Date.now() / 1000) return void res.status(400).json({ error: 'until is in the past' });
   const next = sec.policy.current;
@@ -229,7 +243,7 @@ ownerRouter.post('/api/owner/blocks', ...gate, (req, res) => {
 });
 
 /** Body: { source: "manual", index, match } (match must still equal the entry at index) | { source: "auto", key }. */
-ownerRouter.delete('/api/owner/blocks', ...gate, (req, res) => {
+ownerRouter.delete('/api/owner/blocks', ...writeGate, (req, res) => {
   const sec = runtimeOr(res, true);
   if (!sec) return;
   const b = (req.body ?? {}) as { source?: unknown; index?: unknown; match?: unknown; key?: unknown };
@@ -246,6 +260,22 @@ ownerRouter.delete('/api/owner/blocks', ...gate, (req, res) => {
   if (canonical(entry.match) !== canonical(b.match)) return void res.status(409).json({ error: 'The blocklist changed since you loaded it — reload' });
   next.blocklist = next.blocklist.filter((_, i) => i !== b.index);
   if (commit(req, res, sec, next, 'blocklist.remove')) res.json({ ok: true });
+});
+
+// ── Sessions ──────────────────────────────────────────────────────────────────
+
+/** Delete a conversation (index entry, conversation files, uploads). 409 while a turn runs. Audit keeps its records. */
+ownerRouter.delete('/api/owner/sessions/:id', ...writeGate, (req, res) => {
+  const sec = runtimeOr(res, true);
+  if (!sec) return;
+  const id = String(req.params.id), r = deleteSession(id);
+  if (!r.ok) {
+    const [status, error] = ({ invalid: [400, 'Invalid session id'], not_found: [404, 'No such session'], running: [409, 'A turn is running in this session — stop it first'] } as const)[r.reason];
+    return void res.status(status).json({ error });
+  }
+  const user = userOf(req);
+  sec.record({ type: 'session.delete', principal: user.principal.id, sessionId: id, meta: { ownerUid: user.uid, sessionUid: r.meta.uid } });
+  res.json({ ok: true });
 });
 
 // ── Audit ─────────────────────────────────────────────────────────────────────

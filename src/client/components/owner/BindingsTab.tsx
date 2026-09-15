@@ -3,12 +3,12 @@ import { ArrowDown, ArrowUp, FlaskConical, Loader2, Plus, Trash2 } from 'lucide-
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { usePolicyDraft } from './RolesTab';
-import { CsvInput, ErrorBox, iconBtn, inputCls, KINDS, selectCls, useAction, type Match, type OwnerCall, type Policy, type PolicyDoc } from './shared';
+import { CsvInput, ErrorBox, iconBtn, inputCls, KINDS, selectCls, useAction, type Match, type OwnerCall, type Policy, type PolicyDoc, type SavePolicy } from './shared';
 
 const KNOWN = new Set(['kind', 'id', 'emailIn', 'domain', 'verified']);
 
-export function BindingsTab({ doc, save, call }: { doc: PolicyDoc; save: (p: Policy) => Promise<void>; call: OwnerCall }) {
-  const { draft, setDraft, error, saveBar } = usePolicyDraft(doc, save);
+export function BindingsTab({ doc, save, call, onDirty }: { doc: PolicyDoc; save: SavePolicy; call: OwnerCall; onDirty: (dirty: boolean) => void }) {
+  const { draft, setDraft, error, saveBar } = usePolicyDraft(doc, save, onDirty);
   const roles = Object.keys(draft.roles).filter((r) => r !== 'owner');
 
   const update = (fn: (b: Policy['bindings']) => Policy['bindings']) => setDraft((d) => ({ ...d, bindings: fn([...d.bindings]) }));

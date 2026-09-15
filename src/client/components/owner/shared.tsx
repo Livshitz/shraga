@@ -13,7 +13,9 @@ export interface Policy {
   blocklist: { match: Match; until: number | null; reason?: string }[];
   tokensValidAfter: Record<string, number>;
 }
-export interface PolicyDoc { policy: Policy; version: string; valid: boolean }
+export interface PolicyDoc { policy: Policy; version: string; valid: boolean; ownerIds?: string[] }
+/** PUT the whole policy, guarded by the version the edit started from. */
+export type SavePolicy = (policy: Policy, version: string) => Promise<void>;
 
 export const KINDS = ['user', 'email', 'slack', 'apikey', 'internal', 'anonymous'];
 export const selectCls = 'h-7 rounded-md border border-input bg-background px-2 text-xs';
@@ -60,18 +62,23 @@ export function CsvInput({ value, onChange, placeholder }: { value: string[] | u
   );
 }
 
-/** Row actions shared by Principals and Audit. Only `user:`/`internal:` principals carry revocable tokens. */
-export function principalActions(call: OwnerCall) {
+/** Row actions shared by Principals and Audit. Only `user:`/`internal:` principals carry revocable tokens. Both actions
+ *  change the policy document, so `onPolicyChange` refreshes its version (else the next Save would 409). */
+export function principalActions(call: OwnerCall, onPolicyChange: () => Promise<void>, ownerIds: string[] = []) {
   return {
     canRevoke: (id: string) => /^(user|internal):/.test(id) && id !== 'internal:agent-internal',
+    /** UI hint only (ownerIds from GET /policy) — the server refuses a block that matches an owner. */
+    canBlock: (id: string) => !ownerIds.includes(id),
     revoke: async (id: string) => {
       if (!confirm(`Revoke every token issued to ${id}? They must sign in again.`)) return;
       await call('/tokens/revoke', 'POST', { principalId: id });
+      await onPolicyChange();
     },
     block: async (id: string) => {
       const reason = prompt(`Block ${id}? Reason (optional):`);
       if (reason === null) return;
       await call('/blocks', 'POST', { match: { id }, until: null, reason });
+      await onPolicyChange();
     },
   };
 }

@@ -170,8 +170,9 @@ describe('as the active instance', () => {
         .toEqual({ d, role: real.role, rank: real.rank, profile: real.profile });
       expect(results[i].principal).toBe(p.id);
     });
-    // internal lane for an owner email is NOT owner via resolve (owner = interactive `user` login only)
-    expect(results.map(r => r.role)).toEqual(['owner', 'member', 'anonymous', 'anonymous', 'guest', 'owner', 'anonymous', 'anonymous']);
+    // main's resolution: internal-for-owner (a no-human lane acting for an OWNERS email) resolves as owner — see
+    // resolution-agreement.test.ts. The owner ROUTES still refuse internal tokens (requireOwner), tested below.
+    expect(results.map(r => r.role)).toEqual(['owner', 'member', 'anonymous', 'anonymous', 'guest', 'owner', 'owner', 'anonymous']);
     expect((await call(ownerTok, 'POST', '/api/owner/policy/test', { kind: 'martian', email: 'x@y' })).status).toBe(400);
   }));
 
@@ -253,4 +254,100 @@ describe('as the active instance', () => {
     expect(v.body).toMatchObject({ ok: true });
     expect(v.body.lines).toBeGreaterThan(0);
   }));
+
+  // The agent subprocess env carries an owner-signed internal token (engine/claude-code.ts) — it must not reach policy.
+  test("owner-signed internal token → 403 on every owner/config/MCP/skills route; an uncapped owner key reads the console but can't write", () => asActive(async () => {
+    const { signInternalToken } = await import('../../auth.ts');
+    const internal = { 'x-internal-token': signInternalToken(OWNER, OWNER) };
+    const key = (await json(ownerTok, 'POST', '/api/api-keys', { label: 'shraga term @ console' })).body.key as string;
+    expect(key).toMatch(/^uck_/);
+    const as = (h: Record<string, string>, method: string, url: string, body?: unknown) => fetch(`${base}${url}`, {
+      method, headers: { 'content-type': 'application/json', ...h }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    const keyH = { authorization: `Bearer ${key}` };
+    const WRITES: [string, string, unknown?][] = [
+      ['PUT', '/api/owner/policy', { policy: {}, version: 'x' }],
+      ['POST', '/api/owner/blocks', { match: { id: 'user:x' } }],
+      ['DELETE', '/api/owner/blocks', { source: 'auto', key: 'x' }],
+      ['POST', '/api/owner/tokens/revoke', { principalId: `user:nobody-${T}@console.test` }],
+      ['POST', '/api/owner/api-keys', { label: 'x' }],
+      ['DELETE', '/api/owner/api-keys/nope'],
+      ['DELETE', '/api/owner/sessions/nope'],
+    ];
+    const READS: [string, string, unknown?][] = [...ROUTES.filter(([m, u]) => !WRITES.some(([wm, wu]) => wm === m && wu === u)), ['GET', '/api/owner/api-keys']];
+    const SYSTEM: [string, string, unknown?][] = [
+      ['PUT', '/api/config', {}], ['PUT', '/api/mcps', {}], ['PUT', '/api/skills/zz-probe', { content: 'x' }], ['DELETE', '/api/skills/zz-probe'],
+      ['POST', '/api/skills/zz-probe/duplicate', { newName: 'zz2' }], ['POST', '/api/skills/zz-probe/rename', { newName: 'zz2' }], ['PUT', '/api/skills-defaults', {}],
+    ];
+    for (const [method, url, body] of [...READS, ...WRITES, ...SYSTEM]) {
+      expect({ via: 'internal', method, url, status: (await as(internal, method, url, body)).status }).toEqual({ via: 'internal', method, url, status: 403 });
+    }
+    for (const [method, url, body] of READS) {
+      expect({ via: 'key', method, url, status: (await as(keyH, method, url, body)).status }).toEqual({ via: 'key', method, url, status: 200 });
+    }
+    for (const [method, url, body] of WRITES) {
+      expect({ via: 'key', method, url, status: (await as(keyH, method, url, body)).status }).toEqual({ via: 'key', method, url, status: 403 });
+    }
+    // controls: the same writes pass the gate for an interactive login (reach the handler: 409/404/400/200, never 403)
+    for (const [method, url, body] of WRITES) {
+      expect({ via: 'login', method, url, status: (await call(ownerTok, method, url, body)).status }).not.toEqual({ via: 'login', method, url, status: 403 });
+    }
+    expect((await as(internal, 'GET', '/api/config')).status).toBe(200); // non-owner routes still work for the agent
+  }));
+
+  test('PUT policy: version is required; tokensValidAfter + blocklist always come from the current policy', () => asActive(async () => {
+    const victim = `user:victim-${T}@console.test`;
+    expect((await call(ownerTok, 'POST', '/api/owner/tokens/revoke', { principalId: victim })).status).toBe(200);
+    expect((await call(ownerTok, 'POST', '/api/owner/blocks', { match: { id: victim }, until: null })).status).toBe(200);
+    const doc = (await json(ownerTok, 'GET', '/api/owner/policy')).body;
+    const { tokensValidAfter, blocklist, ...rest } = doc.policy;
+    expect(tokensValidAfter[victim]).toBeNumber();
+    expect(blocklist.some((b: any) => b.match.id === victim)).toBe(true);
+
+    const noVersion = await json(ownerTok, 'PUT', '/api/owner/policy', { policy: rest });
+    expect(noVersion.status).toBe(409);
+    expect(noVersion.body.error).toMatch(/version is required/);
+
+    const ok = await json(ownerTok, 'PUT', '/api/owner/policy', { policy: { ...rest, tokensValidAfter: {}, blocklist: [] }, version: doc.version });
+    expect(ok.status).toBe(200);
+    const after = (await json(ownerTok, 'GET', '/api/owner/policy')).body.policy;
+    expect(after.tokensValidAfter).toEqual(tokensValidAfter);
+    expect(after.blocklist).toEqual(blocklist);
+  }));
+
+  test('blocks: a manual block matching an OWNERS principal → 400; GET policy names the owner ids (UI hides Block)', () => asActive(async () => {
+    expect((await json(ownerTok, 'GET', '/api/owner/policy')).body.ownerIds).toEqual([`user:${OWNER}`, `email:${OWNER}`]);
+    const domain = OWNER.split('@')[1];
+    for (const match of [{ id: `user:${OWNER}` }, { emailIn: [OWNER.toUpperCase()] }, { domain }, { kind: 'email', emailIn: [OWNER] }]) {
+      const r = await json(ownerTok, 'POST', '/api/owner/blocks', { match, until: null });
+      expect({ match, status: r.status }).toEqual({ match, status: 400 });
+      expect(r.body.error).toMatch(/owner/);
+    }
+    const s = await sec();
+    expect(s.policy.current.blocklist.some(b => canonicalId(b.match).includes(OWNER))).toBe(false);
+  }));
+
+  test('DELETE /api/owner/sessions/:id: login only, 409 while running, removes the conversation, audited without content', () => asActive(async () => {
+    const sessions = await import('../../sessions.ts');
+    const id = `console-del-${T}`;
+    sessions.upsertSession(id, 'private prompt text', { uid: BOB, email: BOB });
+    sessions.appendMessage(id, { id: 'm', role: 'user', blocks: [{ type: 'text', text: 'private message body' }] });
+    const ac = new AbortController();
+    sessions.acquireSessionLock(id, 'web', ac);
+    expect((await call(ownerTok, 'DELETE', `/api/owner/sessions/${id}`)).status).toBe(409);
+    sessions.releaseSessionLock(id, ac);
+    expect((await call(ownerTok, 'DELETE', `/api/owner/sessions/${id}`)).status).toBe(200);
+    expect(sessions.getSession(id)).toBeUndefined();
+    expect(sessions.loadConversation(id)).toEqual([]);
+    expect((await call(ownerTok, 'DELETE', `/api/owner/sessions/${id}`)).status).toBe(404);
+    const rec = (await sec()).audit.query({ limit: 1, type: 'session.delete' }).items[0];
+    expect(rec).toMatchObject({ principal: `user:${OWNER}`, sessionId: id, meta: { ownerUid: OWNER, sessionUid: BOB } });
+    expect(JSON.stringify(rec)).not.toMatch(/private/);
+  }));
+});
+
+const canonicalId = (m: object) => JSON.stringify(m);
+
+test('DELETE /api/owner/sessions/:id on a PASSIVE standby → 409', async () => {
+  expect((await call(ownerTok, 'DELETE', '/api/owner/sessions/whatever')).status).toBe(409);
 });

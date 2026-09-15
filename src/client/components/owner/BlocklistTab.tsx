@@ -10,7 +10,7 @@ interface Blocks {
 }
 const TTL: [string, number][] = [['permanent', 0], ['1 hour', 3600], ['24 hours', 86_400], ['7 days', 604_800], ['30 days', 2_592_000]];
 
-export function BlocklistTab({ call }: { call: OwnerCall }) {
+export function BlocklistTab({ call, onPolicyChange }: { call: OwnerCall; onPolicyChange: () => Promise<void> }) {
   const [blocks, setBlocks] = useState<Blocks | null>(null);
   const [form, setForm] = useState({ field: 'id', value: '', ttl: 0, reason: '' });
   const { busy, error, run } = useAction();
@@ -22,9 +22,9 @@ export function BlocklistTab({ call }: { call: OwnerCall }) {
     const match: Match = form.field === 'emailIn' ? { emailIn: [v] } : { [form.field]: v };
     await call('/blocks', 'POST', { match, until: form.ttl ? Math.floor(Date.now() / 1000) + form.ttl : null, reason: form.reason });
     setForm({ ...form, value: '', reason: '' });
-    await load();
+    await Promise.all([load(), onPolicyChange()]);
   });
-  const remove = (body: object) => run('rm', async () => { await call('/blocks', 'DELETE', body); await load(); });
+  const remove = (body: object) => run('rm', async () => { await call('/blocks', 'DELETE', body); await Promise.all([load(), onPolicyChange()]); });
 
   return (
     <div className="space-y-4">

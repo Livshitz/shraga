@@ -34,18 +34,22 @@ export function OwnerConsole({ call, onOpenSession, trigger }: { call: OwnerCall
   }, [call]);
   useEffect(() => { if (open) loadPolicy(); }, [open, loadPolicy]);
 
-  const savePolicy = async (policy: Policy) => {
-    await call('/policy', 'PUT', { policy, version: doc?.version });
+  const savePolicy = async (policy: Policy, version: string) => {
+    await call('/policy', 'PUT', { policy, version });
     await loadPolicy();
   };
+  /** Unsaved Roles/Bindings edits live in the mounted tab — leaving it discards them, so ask first. */
+  const [dirty, setDirty] = useState(false);
+  const leaveOk = () => !dirty || confirm('You have unsaved policy edits. Discard them?');
   const selectTab = (t: Tab) => {
+    if (t === tab || !leaveOk()) return;
     setTab(t);
     try { localStorage.setItem(TAB_KEY, t); } catch (e) { console.warn('[owner] could not persist tab', e); }
   };
   const roles = doc ? Object.keys(doc.policy.roles).filter((r) => r !== 'owner') : [];
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={(o) => { if (o || leaveOk()) setOpen(o); }}>
       <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent className="max-w-[95vw] sm:max-w-5xl h-[85dvh] flex flex-col gap-0 p-0">
         <DialogHeader className="px-4 pt-4 pb-2 border-b shrink-0">
@@ -70,12 +74,12 @@ export function OwnerConsole({ call, onOpenSession, trigger }: { call: OwnerCall
             </p>
           )}
           {(tab === 'roles' || tab === 'bindings') && !doc && !loadError && <p className="text-sm text-muted-foreground text-center py-8">Loading…</p>}
-          {tab === 'roles' && doc && <RolesTab doc={doc} save={savePolicy} />}
-          {tab === 'bindings' && doc && <BindingsTab doc={doc} save={savePolicy} call={call} />}
-          {tab === 'principals' && <PrincipalsTab call={call} />}
+          {tab === 'roles' && doc && <RolesTab doc={doc} save={savePolicy} onDirty={setDirty} />}
+          {tab === 'bindings' && doc && <BindingsTab doc={doc} save={savePolicy} call={call} onDirty={setDirty} />}
+          {tab === 'principals' && <PrincipalsTab call={call} onPolicyChange={loadPolicy} ownerIds={doc?.ownerIds ?? []} />}
           {tab === 'keys' && <ApiKeysTab call={call} roles={roles} />}
-          {tab === 'blocks' && <BlocklistTab call={call} />}
-          {tab === 'audit' && <AuditTab call={call} onOpenSession={(id) => { setOpen(false); onOpenSession(id); }} />}
+          {tab === 'blocks' && <BlocklistTab call={call} onPolicyChange={loadPolicy} />}
+          {tab === 'audit' && <AuditTab call={call} onPolicyChange={loadPolicy} ownerIds={doc?.ownerIds ?? []} onOpenSession={(id) => { setOpen(false); onOpenSession(id); }} />}
         </div>
       </DialogContent>
     </Dialog>

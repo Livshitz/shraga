@@ -2,20 +2,31 @@ import { useEffect, useState } from 'react';
 import { Check, Loader2, Plus, Trash2, Undo2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { CsvInput, ErrorBox, iconBtn, inputCls, selectCls, useAction, type Policy, type PolicyDoc, type Profile } from './shared';
+import { CsvInput, ErrorBox, iconBtn, inputCls, selectCls, useAction, type Policy, type PolicyDoc, type Profile, type SavePolicy } from './shared';
 
-/** A whole-document policy draft: edit locally, Save = PUT (server validates; errors stay on screen). */
-export function usePolicyDraft(doc: PolicyDoc, save: (p: Policy) => Promise<void>) {
+/** The part of the policy a PUT writes (blocklist/tokensValidAfter have their own routes; the server keeps them). */
+const editable = (p: Policy) => { const { blocklist: _b, tokensValidAfter: _t, ...rest } = p; return JSON.stringify(rest); };
+
+/** A whole-document policy draft: edit locally, Save = PUT with the version the draft started from (server validates;
+ *  errors stay on screen). A refresh never wipes edits: a clean draft follows it; a dirty one adopts the new version only
+ *  when the editable part is unchanged (a block/revoke meanwhile) — otherwise Save still 409s instead of overwriting. */
+export function usePolicyDraft(doc: PolicyDoc, save: SavePolicy, onDirty?: (dirty: boolean) => void) {
+  const [base, setBase] = useState(doc);
   const [draft, setDraft] = useState<Policy>(() => structuredClone(doc.policy));
-  useEffect(() => setDraft(structuredClone(doc.policy)), [doc]);
+  const dirty = editable(draft) !== editable(base.policy);
+  useEffect(() => {
+    if (!dirty || editable(doc.policy) === editable(draft)) { setBase(doc); setDraft(structuredClone(doc.policy)); }
+    else if (editable(doc.policy) === editable(base.policy)) setBase(doc);
+  }, [doc]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { onDirty?.(dirty); }, [dirty, onDirty]);
+  useEffect(() => () => onDirty?.(false), [onDirty]);
   const action = useAction();
-  const dirty = JSON.stringify(draft) !== JSON.stringify(doc.policy);
   const saveBar = (
-    <div className="flex items-center gap-2 sticky bottom-0 bg-background py-2 border-t">
-      <Button size="sm" className="h-7 text-xs" disabled={!dirty || !!action.busy} onClick={() => action.run('save', () => save(draft))}>
+    <div className="flex items-center gap-2 sticky -bottom-3 z-10 -mx-3 -mb-3 px-3 pt-2 pb-3 bg-background border-t">
+      <Button size="sm" className="h-7 text-xs" disabled={!dirty || !!action.busy} onClick={() => action.run('save', () => save(draft, base.version))}>
         {action.busy ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Check className="w-3 h-3 mr-1" />} Save policy
       </Button>
-      <Button size="sm" variant="ghost" className="h-7 text-xs" disabled={!dirty} onClick={() => setDraft(structuredClone(doc.policy))}>
+      <Button size="sm" variant="ghost" className="h-7 text-xs" disabled={!dirty} onClick={() => { setBase(doc); setDraft(structuredClone(doc.policy)); }}>
         <Undo2 className="w-3 h-3 mr-1" /> Discard
       </Button>
       {dirty && <span className="text-[10px] text-amber-500">unsaved changes</span>}
@@ -24,8 +35,8 @@ export function usePolicyDraft(doc: PolicyDoc, save: (p: Policy) => Promise<void
   return { draft, setDraft, error: action.error, saveBar };
 }
 
-export function RolesTab({ doc, save }: { doc: PolicyDoc; save: (p: Policy) => Promise<void> }) {
-  const { draft, setDraft, error, saveBar } = usePolicyDraft(doc, save);
+export function RolesTab({ doc, save, onDirty }: { doc: PolicyDoc; save: SavePolicy; onDirty: (dirty: boolean) => void }) {
+  const { draft, setDraft, error, saveBar } = usePolicyDraft(doc, save, onDirty);
   const [newRole, setNewRole] = useState('');
   const [newProfile, setNewProfile] = useState('');
   const profileNames = Object.keys(draft.profiles);

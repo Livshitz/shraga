@@ -124,7 +124,7 @@ export function validatePolicy(p: any): string[] {
   return errs;
 }
 
-function matches(m: BindingMatch, p: Principal): boolean {
+export function matches(m: BindingMatch, p: Principal): boolean {
   if (m.kind !== undefined && m.kind !== p.kind) return false;
   if (m.id !== undefined && m.id !== p.id) return false;
   if (m.verified !== undefined && m.verified !== p.verified) return false;
