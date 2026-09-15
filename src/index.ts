@@ -25,8 +25,10 @@ import type { AgentEngine, EngineModel, EngineStreamOpts } from './server/engine
 import type { ExtRegisterFn, ExtensionContext } from './server/extensions.ts';
 import type { WebhookOptions } from './server/events/webhook.ts';
 import type { ShragaEvent, ShragaEventMap, PayloadOf } from './server/events/types.ts';
+import type { PolicyOptions, PolicyFile } from './server/security/policy.ts';
 
 export type {
+  PolicyFile,
   ServerHandle,
   ServerFeature,
   FeatureContext,
@@ -67,6 +69,12 @@ export class ShragaOptions {
   runtimeRegistration?: boolean = false;
   /** Arbitrary extra environment to apply before boot (e.g. ANTHROPIC_API_KEY, SHRAGA_FEAT_*). */
   env?: Record<string, string>;
+  /** Security policy seams. `migrate` seeds `data/security/policy.json` ONCE, when it's first generated (no file, no
+   *  `.migrated` marker): it receives the default draft (legacy whitelist already bound as operator) and returns the
+   *  final draft. The result is validated and saved like any policy; an invalid draft or a throw fails closed (owners
+   *  only). Never runs on a PASSIVE standby (it runs on promotion if the file is still missing). Later edits go through
+   *  the Owner Console, not this hook. */
+  security?: { migrate?: PolicyOptions['migrate'] };
 }
 
 export interface ShragaInstance {
@@ -94,7 +102,7 @@ export interface ShragaInstance {
 
 class Shraga implements ShragaInstance {
   public options: ShragaOptions;
-  private reg: Required<BootRegistrations> = { features: [], engines: [], extensions: [], eventSubs: [] };
+  private reg: Required<Omit<BootRegistrations, 'security'>> ={ features: [], engines: [], extensions: [], eventSubs: [] };
   private handle: ServerHandle | null = null;
   private starting: Promise<ServerHandle> | null = null;
 
@@ -150,7 +158,7 @@ class Shraga implements ShragaInstance {
     if (this.starting) return this.starting;
     this.starting = (async () => {
       const { bootServer } = await import('./server/boot.ts');
-      this.handle = await bootServer(this.reg);
+      this.handle = await bootServer({ ...this.reg, security: this.options.security });
       return this.handle;
     })();
     return this.starting;

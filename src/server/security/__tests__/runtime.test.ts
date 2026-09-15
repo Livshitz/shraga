@@ -192,3 +192,61 @@ describe('streamChat shadow audit (real consumer surface)', () => {
     expect(rt.audit.verify().ok).toBe(true);
   });
 });
+
+describe('consumer migrate seam (ShragaOptions.security.migrate → initSecurity → Policy)', () => {
+  const quiet = { info() {}, warn() {}, error() {} };
+  const boot = (dir: string, migrate: (d: any) => any, isActive = () => true) => initSecurity({
+    isActive, notify: () => {},
+    policy: { path: path.join(dir, 'security', 'policy.json'), whitelistPath: path.join(dir, 'whitelist.json'), watch: false, log: quiet, migrate },
+    audit: { dir: path.join(dir, 'audit'), log: quiet }, log: quiet,
+  });
+  const slackOp = { match: { kind: 'slack' as const, id: 'slack:UOPS' }, role: 'operator' };
+
+  test('first boot: the hook sees the whitelist-migrated draft and its binding is saved + resolves', () => {
+    const dir = mkdtempSync(path.join(root, 'seam-'));
+    writeFileSync(path.join(dir, 'whitelist.json'), JSON.stringify(['wl@x.com']));
+    let seen: any;
+    const rt = boot(dir, (d) => { seen = structuredClone(d); d.bindings.push(slackOp); return d; });
+    expect(seen.bindings).toEqual([{ match: { kind: 'user', emailIn: ['wl@x.com'] }, role: 'operator' }]);
+    expect(rt.policy.valid).toBe(true);
+    expect(rt.policy.resolve(fromSlack('UOPS')).role).toBe('operator');
+    const disk = JSON.parse(require('node:fs').readFileSync(path.join(dir, 'security', 'policy.json'), 'utf8'));
+    expect(disk.bindings).toContainEqual(slackOp);
+    expect(existsSync(path.join(dir, 'security', '.migrated'))).toBe(true);
+  });
+
+  test('marker present ⇒ the hook never runs again (policy.json kept, or deleted ⇒ fail closed)', () => {
+    const dir = mkdtempSync(path.join(root, 'seam-'));
+    boot(dir, (d) => { d.bindings.push(slackOp); return d; });
+    let calls = 0;
+    const again = (d: any) => { calls++; d.bindings.push({ match: { kind: 'slack', id: 'slack:ULATE' }, role: 'operator' }); return d; };
+    const rt2 = boot(dir, again);
+    expect(rt2.policy.resolve(fromSlack('ULATE')).role).toBe('anonymous');
+    require('node:fs').unlinkSync(path.join(dir, 'security', 'policy.json'));
+    const rt3 = boot(dir, again);
+    expect(calls).toBe(0);
+    expect(rt3.policy.valid).toBe(false);
+  });
+
+  test('invalid draft from the hook ⇒ no throw, owners only, no marker', () => {
+    const dir = mkdtempSync(path.join(root, 'seam-'));
+    let rt!: SecurityRuntime;
+    expect(() => { rt = boot(dir, (d) => { d.bindings.push({ match: {}, role: 'operator' }); return d; }); }).not.toThrow();
+    expect(rt.policy.valid).toBe(false);
+    expect(rt.policy.resolve(fromAuthUser({ uid: 'o', email: OWNER })).role).toBe('owner');
+    expect(rt.policy.resolve(fromSlack('UOPS')).role).toBe('anonymous');
+    expect(existsSync(path.join(dir, 'security', 'policy.json'))).toBe(false);
+    expect(existsSync(path.join(dir, 'security', '.migrated'))).toBe(false);
+  });
+
+  test('PASSIVE ⇒ hook ignored; runs on promotion', () => {
+    const dir = mkdtempSync(path.join(root, 'seam-'));
+    let active = false, calls = 0;
+    const rt = boot(dir, (d) => { calls++; d.bindings.push(slackOp); return d; }, () => active);
+    expect(calls).toBe(0);
+    expect(existsSync(path.join(dir, 'security'))).toBe(false);
+    active = true; rt.activate();
+    expect(calls).toBe(1);
+    expect(rt.policy.resolve(fromSlack('UOPS')).role).toBe('operator');
+  });
+});
