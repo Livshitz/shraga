@@ -10,6 +10,7 @@
  */
 import { streamChat } from '../src/server/claude.ts';
 import { getMcpConfig } from '../src/server/mcp.ts';
+import { fromInternal } from '../src/server/security/principal.ts';
 
 const argv = process.argv.slice(2);
 let uid = 'cli-smoke';
@@ -32,6 +33,7 @@ console.error('[agent-once] prompt:', prompt.slice(0, 120) + (prompt.length > 12
 
 // Match UI when auto-approve is on: otherwise MCP tools stall waiting for permission.
 for await (const ev of streamChat({
+  principal: fromInternal({ uid, lane: 'cli' }),
   prompt,
   uid,
   mcpServers,

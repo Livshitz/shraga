@@ -22,13 +22,7 @@ A key acts for its creator. Optional `role` caps it (effective role = the lower 
 
 Owner and keys: a key WITHOUT `role` is a delegated login credential (e.g. the one `shraga term` gets via browser consent) — it keeps its creator's owner status and role, re-checked on every request, so removing the creator from `OWNERS` takes effect immediately. A key WITH `role` is never owner: owner-only routes answer 403 and its role stays below owner. No key can create keys or approve MCP OAuth consent — both require an interactive login.
 
-**Generating a key via curl** (from an agent session):
-```bash
-curl -X POST "$SHRAGA_BASE_URL/api/api-keys" \
-  -H "Content-Type: application/json" \
-  -H "x-internal-token: $INTERNAL_API_TOKEN" \
-  -d '{"label":"claude-desktop"}'
-```
+**Getting a key:** a human creates it while logged in (web UI, or `POST /api/api-keys` with their login session). An agent session can't mint one: the internal token and API keys get 403. Ask the user to create the key and hand it over.
 
 ## Connecting Claude Desktop
 
