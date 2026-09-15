@@ -762,6 +762,7 @@ export class DataSync {
     '.internal-token', 'comms-log.jsonl', 'sessions/', 'unread/', '.DS_Store',
     'scheduler/', '.mcp-catalog.json',
     'workspace/users/*/.claude/', // per-user Claude logins (claude-account.ts) — credentials, never commit
+    'security/blocks.json', // guard auto-blocks: live per-instance state, a pull must not overwrite the active copy
   ];
 
   /** Write or refresh .gitignore, appending any canonical entries it's missing (idempotent). */

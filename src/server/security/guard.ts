@@ -133,7 +133,8 @@ export class Guard {
   public options: GuardOptions;
   public readonly limits: GuardLimits;
   private buckets: Lru<Bucket>;
-  private hits: Lru<number[]>;
+  /** Rate-limit hit times per key, with the authenticated principal id (undefined = anonymous) for shared-IP detection. */
+  private hits: Lru<Array<{ t: number; p?: string }>>;
   private blocks: Lru<BlockRecord>;
   private activeTurns = 0;
 
@@ -216,15 +217,17 @@ export class Guard {
       const retryAfter = manual.until ? Math.max(1, Math.ceil(manual.until - now / 1000)) : undefined;
       return { ok: false, status: 403, reason: 'blocked', ...(retryAfter ? { retryAfter } : {}) };
     }
-    for (const key of [pKey, ipKey]) {
+    // IP-keyed state never denies an exempt rank: a shared IP (NAT, same-host proxy) blocked by a guest must not lock out the owner.
+    const exempt = rank >= this.limits.autoBlockExemptRank;
+    for (const key of [pKey, exempt ? undefined : ipKey]) {
       const b = key ? this.activeBlock(key, now) : undefined;
       if (!b) continue;
       this.audit({ type: 'guard.block', principal: principal.id, target: key, reason: b.reason, meta: meta({ source: 'auto' }) }, `guard.block|auto|${key}`);
       return { ok: false, status: 403, reason: 'blocked', retryAfter: Math.max(1, Math.ceil((b.until - now) / 1000)) };
     }
 
-    const wants: Array<[key: string, rate: string, blockable: boolean]> = [[pKey, input.rate, rank < this.limits.autoBlockExemptRank]];
-    if (ipKey) wants.push([ipKey, this.limits.ip, rank < this.limits.autoBlockExemptRank]);
+    const wants: Array<[key: string, rate: string, blockable: boolean]> = [[pKey, input.rate, !exempt]];
+    if (ipKey && !exempt) wants.push([ipKey, this.limits.ip, true]);
     const chRate = channel ? this.limits.channel[channel] : undefined;
     if (chRate !== undefined) wants.push([`channel:${channel}`, chRate, false]);
 
@@ -239,13 +242,13 @@ export class Guard {
       }
       const prev = this.buckets.get(key);
       const b: Bucket = prev && prev.rate === rate
-        ? { rate, at: now, tokens: Math.min(r.cap, prev.tokens + ((now - prev.at) * r.cap) / r.periodMs) }
+        ? { rate, at: now, tokens: Math.min(r.cap, prev.tokens + (Math.max(0, now - prev.at) * r.cap) / r.periodMs) } // clock stepped back → no refill, never a drain
         : { rate, at: now, tokens: r.cap };
       if (b.tokens < 1) {
         const retryAfter = Math.max(1, Math.ceil(((1 - b.tokens) * r.periodMs) / r.cap / 1000));
         this.buckets.set(key, b);
         this.audit({ type: 'guard.limit', principal: principal.id, target: key, reason: 'rate', meta: meta({ rate, retryAfter }) }, `guard.limit|${key}`);
-        if (blockable) this.recordHit(key, principal.id, now, meta({}));
+        if (blockable) this.recordHit(key, principal, now, meta({}));
         return { ok: false, status: 429, retryAfter, reason: 'rate' };
       }
       pending.push([key, b]);
@@ -254,12 +257,15 @@ export class Guard {
     return undefined;
   }
 
-  private recordHit(key: string, principalId: string, now: number, meta: Record<string, unknown>): void {
+  private recordHit(key: string, principal: Principal, now: number, meta: Record<string, unknown>): void {
     const { blockAfter, blockWindowMs, blockTtlMs } = this.limits;
-    const window = (this.hits.get(key) ?? []).filter(t => now - t < blockWindowMs);
-    window.push(now);
+    const window = (this.hits.get(key) ?? []).filter(h => now - h.t < blockWindowMs);
+    window.push({ t: now, p: principal.kind === 'anonymous' ? undefined : principal.id });
     if (window.length < blockAfter) return void this.hits.set(key, window.slice(-blockAfter));
+    // An IP whose hits come from >1 authenticated principal is shared (NAT/proxy): throttle, never block it.
+    if (key.startsWith('ip:') && new Set(window.map(h => h.p).filter(Boolean)).size > 1) return void this.hits.set(key, window.slice(-blockAfter));
     this.hits.map.delete(key);
+    const principalId = principal.id;
     const rec: BlockRecord = { until: now + blockTtlMs, reason: `auto: ${window.length} limit hits in ${Math.round(blockWindowMs / 1000)}s`, at: now };
     this.blocks.set(key, rec);
     this.options.log.warn(`[guard] auto-blocked ${key} until ${new Date(rec.until).toISOString()} (${rec.reason})`);

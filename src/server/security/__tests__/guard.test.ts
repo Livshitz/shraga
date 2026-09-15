@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Guard, clientIp, parseRate, parseTrustedProxies, type GuardOptions } from '../guard.ts';
 import { SecurityRuntime } from '../runtime.ts';
-import { fromApiKey, fromAuthUser } from '../principal.ts';
+import { anonymous, fromApiKey, fromAuthUser } from '../principal.ts';
 import type { AuditEvent } from '../audit.ts';
 
 delete process.env.DATA_SYNC_ENABLE;
@@ -65,6 +65,43 @@ describe('rates', () => {
     expect(g.check({ principal: P, ip: '9.9.9.9', rank: 20, rate: '2/h' }).ok).toBe(true);
     expect(g.check({ principal: P, ip: '9.9.9.9', rank: 20, rate: '2/h' })).toMatchObject({ ok: false, reason: 'rate' }); // ip empty
     expect(g.check({ principal: P, ip: '8.8.8.8', rank: 20, rate: '2/h' }).ok).toBe(true); // principal still had its 2nd token
+  });
+
+  test('clock stepping back 1h does not drain the bucket', () => {
+    const { g, now } = mk({}, { t: 10_000_000 });
+    const input = { principal: P, rank: 20, rate: '60/h' };
+    expect(g.check(input).ok).toBe(true);
+    now.t -= 3_600_000;
+    for (let i = 0; i < 59; i++) expect(g.check(input).ok).toBe(true); // the remaining 59 tokens are all still there
+    expect(g.check(input).ok).toBe(false);
+  });
+});
+
+describe('shared IP', () => {
+  const IP = '203.0.113.7';
+  const guest = fromApiKey({ id: 'guest', uid: 'g' });
+  const owner = fromAuthUser({ uid: 'o', email: 'o@x.test' });
+
+  test('100 guest denials from one IP never lock the owner out of that IP', () => {
+    const { g } = mk({ limits: { ip: '5/h' } });
+    let denials = 0;
+    for (let i = 0; denials < 100; i++) if (!g.check({ principal: guest, ip: IP, rank: 20, rate: '100000/h' }).ok) denials++;
+    expect(g.list().map(b => b.key)).toContain(`ip:${IP}`); // single principal drove it → the IP IS blocked for guests
+    expect(g.check({ principal: guest, ip: IP, rank: 20, rate: '100000/h' })).toMatchObject({ ok: false, reason: 'blocked' });
+    expect(g.check({ principal: owner, ip: IP, rank: 100, rate: '600/h' })).toEqual({ ok: true });
+  });
+
+  test('hits from more than one authenticated principal never auto-block the IP', () => {
+    const { g } = mk({ limits: { ip: '1/h', blockAfter: 5 } });
+    const a = fromApiKey({ id: 'a', uid: 'a' }), b = fromApiKey({ id: 'b', uid: 'b' });
+    for (let i = 0; i < 50; i++) g.check({ principal: i % 2 ? a : b, ip: IP, rank: 20, rate: '100000/h' });
+    expect(g.list()).toHaveLength(0);
+  });
+
+  test('a single abusive unauthenticated source still gets its IP blocked', () => {
+    const { g } = mk({ limits: { ip: '1/h', blockAfter: 5 } });
+    for (let i = 0; i < 10; i++) g.check({ principal: anonymous(), ip: IP, rank: 0, rate: '100000/h' });
+    expect(g.list().map(b => b.key)).toContain(`ip:${IP}`);
   });
 });
 
