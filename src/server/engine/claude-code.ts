@@ -247,6 +247,9 @@ export class ClaudeCodeEngine implements AgentEngine {
     const setIfBlank = (key: string, value: string) => { if (!sdkEnv[key]?.trim()) sdkEnv[key] = value; };
     setIfBlank('BASH_DEFAULT_TIMEOUT_MS', process.env.AGENT_SHELL_TIMEOUT_MS?.trim() || '60000');
     setIfBlank('BASH_MAX_TIMEOUT_MS', process.env.AGENT_SHELL_MAX_TIMEOUT_MS?.trim() || '600000');
+    // The subscription login's claude.ai connectors (Gmail/Calendar/… and this agent's own MCP) load
+    // regardless of settingSources; headless they are auth stubs or self-recursion. Our MCPs come from mcp-config.
+    setIfBlank('ENABLE_CLAUDEAI_MCP_SERVERS', 'false');
     // Per-user subscription (workspace/users/<contactId>/.claude): run on that login, never the box's credentials.
     const accountDir = claudeAccountDir(opts.userEmail);
     if (accountDir) applyClaudeAccount(sdkEnv, accountDir);
@@ -267,6 +270,10 @@ export class ClaudeCodeEngine implements AgentEngine {
       env: sdkEnv,
       allowedTools,
       cwd,
+      // Omitted = ALL sources, so the host's ~/.claude (CLAUDE.md, MCP instructions, hooks) rode into every
+      // query — ~24k tokens re-written to cache per fresh turn on a dev box. Keep 'project': the deployment
+      // ships its own .claude/skills (e.g. shraga-circles' video-ad-pipeline) that the agent relies on.
+      settingSources: ['project'],
       permissionMode: permMode === 'bypassPermissions' ? 'acceptEdits' : permMode,
       maxTurns,
       includePartialMessages: true,
