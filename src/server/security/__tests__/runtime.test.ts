@@ -44,6 +44,19 @@ describe('API-key principal role = creator role capped by the key role', () => {
     expect(resolvePrincipal(rt.policy, key(OWNER, 'operator')).role).toBe('operator');
     expect(resolvePrincipal(rt.policy, key(OWNER, 'ghost')).role).toBe(rt.policy.current.default);
   });
+
+  test('guard rank uses the same capped resolution: an owner\'s guest-capped key is NOT exempt from IP limits', async () => {
+    const { apiKeyPrincipal } = await import('../../api-keys.ts');
+    const dir = mkdtempSync(path.join(root, 'guard-'));
+    const rt = tmpRuntime({ guard: { blocksPath: path.join(dir, 'blocks.json'), enforce: () => true, limits: { ip: '1/h', blockAfter: 100 } } });
+    const IP = '203.0.113.9';
+    const guestKey = apiKeyPrincipal({ id: 'k-guest', uid: OWNER, email: OWNER, role: 'guest' });
+    expect(rt.admitTurn(guestKey, { ip: IP })).toMatchObject({ ok: true }); // guest profile rate 10/h admits
+    expect(rt.admitTurn(guestKey, { ip: IP })).toMatchObject({ ok: false, status: 429, reason: 'rate' }); // IP bucket (1/h) applies: not exempt
+    const plainKey = apiKeyPrincipal({ id: 'k-plain', uid: OWNER, email: OWNER }); // uncapped → operator (rank 80) → IP-exempt
+    for (let i = 0; i < 3; i++) expect(rt.admitTurn(plainKey, { ip: IP })).toMatchObject({ ok: true });
+    rt.close();
+  });
 });
 
 describe('SecurityRuntime.decide', () => {
