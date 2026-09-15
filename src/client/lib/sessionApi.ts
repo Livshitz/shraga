@@ -1,3 +1,4 @@
+import { reportApiFailure, reportApiResponse } from '@/lib/backendHealth';
 import { randomUUID } from '@/lib/utils';
 import type { ChatMessage, MessageBlock } from '@/hooks/useConversation';
 
@@ -15,24 +16,39 @@ export class ApiError extends Error {
   }
 }
 
-/** Authenticated fetch with bearer token + timeout. Throws `ApiError` (with `.status`) on !ok. */
+/** Authenticated fetch with bearer token + timeout. Throws `ApiError` (with `.status`) on !ok.
+ *
+ *  `expect` lists statuses this call site HANDLES as a normal outcome (it still throws — see `ApiError`
+ *  — the list only tells the backend-health classifier not to treat them as a fault). Use it wherever a
+ *  non-2xx is by design, or the shared banner cries wolf on routine traffic. */
 export async function apiFetch(
   path: string,
   getToken: () => Promise<string | null>,
-  init?: RequestInit & { timeoutMs?: number },
+  init?: RequestInit & { timeoutMs?: number; expect?: readonly number[] },
 ) {
   const token = await getToken();
   if (!token) throw new Error('No auth token');
   const timeout = init?.timeoutMs ?? 15_000;
   const controller = new AbortController();
   if (init?.signal) init.signal.addEventListener('abort', () => controller.abort());
-  const timer = setTimeout(() => controller.abort(), timeout);
+  // `timedOut` is the ONLY thing that distinguishes our own deadline from a caller's abort() — both
+  // reject with an identical AbortError, and only the former is a real backend fault.
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeout);
   try {
-    const res = await fetch(path, {
-      ...init,
-      signal: controller.signal,
-      headers: { Authorization: `Bearer ${token}`, ...init?.headers },
-    });
+    let res: Response;
+    try {
+      res = await fetch(path, {
+        ...init,
+        signal: controller.signal,
+        headers: { Authorization: `Bearer ${token}`, ...init?.headers },
+      });
+    } catch (err) {
+      // Single choke point: every apiFetch call site gets backend-fault surfacing for free.
+      reportApiFailure(path, err, { timedOut });
+      throw err;
+    }
+    reportApiResponse(path, res, init?.expect);
     if (!res.ok) throw new ApiError(res.status, res.statusText);
     return res;
   } finally {

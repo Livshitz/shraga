@@ -186,7 +186,18 @@ app.use(express.urlencoded({
 // drown real request logs. Errors and everything else still logs unconditionally.
 const QUIET_POLL_RE = /\/(cwd|ptys|sessions|workspace\/(pty-owners|layout))(\?|$)/;
 
+/** Package version, read once. Served as the `X-Shraga-Version` identity header on EVERY response
+ *  (see the middleware below) — a response WITHOUT it proves the responder is not this server, which
+ *  is what lets the client tell "shraga 404'd" apart from "something else owns this port". */
+const SHRAGA_VERSION: string = (() => {
+  try {
+    return JSON.parse(readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8')).version ?? 'unknown';
+  } catch { return 'unknown'; }
+})();
+
 app.use((req, _res, next) => {
+  // Set BEFORE any route runs, so it rides on error responses (404/401/5xx) too — not just successes.
+  _res.setHeader('X-Shraga-Version', SHRAGA_VERSION);
   const start = Date.now();
   const orig = _res.end.bind(_res);
   (_res as any).end = (...args: any[]) => {
@@ -204,10 +215,7 @@ const SERVER_BUILD_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}
 // ── REST routes ───────────────────────────────────────────────────────────────
 
 app.get('/api/version', (_req, res) => {
-  try {
-    const pkg = JSON.parse(readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8'));
-    res.json({ version: pkg.version });
-  } catch { res.json({ version: 'unknown' }); }
+  res.json({ version: SHRAGA_VERSION });
 });
 
 // ── Self-upgrade (owner only) ────────────────────────────────────────────────

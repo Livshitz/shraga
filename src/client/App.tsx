@@ -35,6 +35,11 @@ import {
 import { useDarkMode } from '@/hooks/useDarkMode';
 import { useUnread } from '@/hooks/useUnread';
 import { ToastStack } from '@/components/Toast';
+import { BackendStatusBanner } from '@/components/BackendStatusBanner';
+import { reportApiFailure, reportApiResponse } from '@/lib/backendHealth';
+import { logger } from '@/lib/debug';
+
+const log = logger.forComponent('App');
 
 function getSessionFromUrl(): string | undefined {
   return new URLSearchParams(window.location.search).get('session') || undefined;
@@ -115,6 +120,9 @@ function AppInner() {
       if (!t) return setAuthorized(false);
       try {
         const res = await fetch('/api/config', { headers: { Authorization: `Bearer ${t}` } });
+        // This raw probe is the FIRST request the app makes, and in the port-hijack incident it was the
+        // one that silently 404'd into an empty shell. Route it through the classifier like the helpers.
+        reportApiResponse('/api/config', res);
         if (res.ok) {
           wasAuthorized.current = true;
           localStorage.setItem('shraga:authorized', '1');
@@ -122,7 +130,7 @@ function AppInner() {
         }
         const body = await res.json().catch(() => ({}));
         if (res.status === 401 && (body.error?.includes('audience') || body.error?.includes('aud'))) {
-          console.warn('[auth] Token audience mismatch — signing out stale session');
+          log.warn('token audience mismatch — signing out stale session');
           logout();
           return;
         }
@@ -132,7 +140,9 @@ function AppInner() {
         }
         if (wasAuthorized.current) return;
         setAuthorized(res.status !== 401 && res.status !== 403);
-      } catch {
+      } catch (err) {
+        reportApiFailure('/api/config', err);
+        log.warn('auth probe could not reach /api/config', err);
         if (wasAuthorized.current) return;
         setAuthorized(true);
       }
@@ -145,7 +155,7 @@ function AppInner() {
     apiFetch('/api/workspace', getToken)
       .then((r) => r.json())
       .then((data: { entries: WorkspaceEntry[] }) => setWorkspaceEntries(data.entries ?? []))
-      .catch((err) => console.warn('[workspace] refresh failed', err));
+      .catch((err) => log.warn('workspace refresh failed', err));
   }, [token, getToken]);
 
   const handleScheduleEvent = useCallback((event: Extract<ServerEvent, { type: `schedule:${string}` }>) => {
@@ -257,15 +267,16 @@ function AppInner() {
   // Load config / skills / workspace / features
   useEffect(() => {
     if (!token) return;
-    apiFetch('/api/config', getToken).then((r) => r.json()).then(setAgentConfig).catch(() => {});
+    apiFetch('/api/config', getToken).then((r) => r.json()).then(setAgentConfig)
+      .catch((err) => log.warn('config load failed', err));
     apiFetch('/api/skills', getToken)
       .then((r) => r.json())
       .then((data: { skills: string[]; builtins: string[] }) => setSkills(data.skills))
-      .catch(() => {});
+      .catch((err) => log.warn('skills load failed', err));
     apiFetch('/api/features', getToken)
       .then((r) => r.json())
       .then((f: { push?: boolean }) => setPushEnabled(!!f.push))
-      .catch(() => {});
+      .catch((err) => log.warn('features load failed', err));
   }, [token, getToken]);
   useEffect(() => {
     refreshWorkspace();
@@ -306,7 +317,18 @@ function AppInner() {
     return <div className="flex h-full items-center justify-center text-muted-foreground text-sm">Loading…</div>;
   }
 
-  if (!user || !token) return <LoginPage mode={mode} needsSetup={needsSetup} onLoginLocal={loginLocal} onRegisterLocal={registerLocal} />;
+  // The banner sits ABOVE the login gate too: a hijacked backend also breaks the auth-mode probe, so
+  // the user would otherwise stare at a sign-in that can never succeed. It stays silent in the ORDINARY
+  // pre-login state, because a healthy /api/auth/mode carries the identity header and clears the store.
+  if (!user || !token)
+    return (
+      <div className="flex h-full flex-col">
+        <BackendStatusBanner />
+        <div className="flex-1 min-h-0">
+          <LoginPage mode={mode} needsSetup={needsSetup} onLoginLocal={loginLocal} onRegisterLocal={registerLocal} />
+        </div>
+      </div>
+    );
 
   if (authorized === null) {
     return <div className="flex h-full items-center justify-center text-muted-foreground text-sm">Verifying access…</div>;
@@ -339,7 +361,9 @@ function AppInner() {
   }
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full flex-col">
+      <BackendStatusBanner />
+      <div className="flex flex-1 min-h-0">
       {/* Sidebar */}
       {sidebarOpen && (
         <div className="fixed inset-0 z-50 bg-background sm:relative sm:inset-auto sm:z-auto sm:w-64 sm:shrink-0 sm:border-r flex flex-col">
@@ -521,6 +545,7 @@ function AppInner() {
           markRead(sid);
         }}
       />
+      </div>
     </div>
   );
 }

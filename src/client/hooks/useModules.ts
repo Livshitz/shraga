@@ -42,7 +42,11 @@ export function useModules(getToken: () => Promise<string | null>, enabled: bool
     setLoading(true);
     setError(null);
     try {
-      const data = await api<{ installed: InstalledModule[]; available: AvailableModule[] }>('/api/modules', getToken);
+      const data = await api<{ installed: InstalledModule[]; available: AvailableModule[] }>('/api/modules', getToken, {
+        // A 404 here is the documented "server predates /api/modules" probe below — a handled outcome,
+        // not a backend fault, so it must not raise the health banner.
+        expect: [404],
+      });
       setInstalled(data.installed ?? []);
       setAvailable(data.available ?? []);
       setUnsupported(false);
