@@ -27,7 +27,7 @@ import { collectTurnContext } from './turn-context.ts';
 import { DATA_DIR, dataPath } from './paths.ts';
 import * as contacts from './contacts.ts';
 import type { Principal } from './security/principal.ts';
-import { security } from './security/runtime.ts';
+import { security, resolvePrincipal } from './security/runtime.ts';
 import { resolveAndGetEngine, ModelUnavailableError } from './engine/index.ts';
 
 const CONFIG_PATH = dataPath('agent-config.json');
@@ -288,7 +288,7 @@ export async function* streamChat(opts: StreamChatOpts): AsyncGenerator<WsEvent>
  *  invalid (fail-closed) policy — callers then apply no rank-based filtering. */
 export function enforcedRank(principal: Principal): number | undefined {
   const sec = security();
-  return enforcing() && sec?.policy.valid ? sec.policy.resolve(principal).rank : undefined;
+  return enforcing() && sec?.policy.valid ? resolvePrincipal(sec.policy, principal).rank : undefined;
 }
 
 /** SECURITY_ENFORCE: input from `principal` entered `sessionId` outside a turn it runs (e.g. another human's Slack
@@ -298,7 +298,7 @@ export async function taintSession(sessionId: string, principal: Principal | (()
   const sec = security();
   if (!enforcing() || !sec?.policy.valid) return undefined;
   const p = typeof principal === 'function' ? await principal() : principal;
-  return lowerSessionFloor(sessionId, sec.policy.resolve(p).rank);
+  return lowerSessionFloor(sessionId, resolvePrincipal(sec.policy, p).rank);
 }
 
 async function* runTurn(opts: StreamChatOpts, guard?: TurnGuard): AsyncGenerator<WsEvent> {

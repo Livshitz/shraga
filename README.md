@@ -217,7 +217,7 @@ common ones:
 | `DATA_DIR` | `./data` | Where state lives |
 | `AUTH_PROVIDER` | `local` | `local` (username/password) or `firebase` |
 | `OWNERS` | *(unset)* | Comma-separated list of admin emails |
-| `SECURITY_ENFORCE` | *(unset)* | `true` = the guard (blocklist, rate limits, auto-block, turn ceiling) denies; unset = shadow (audit only) |
+| `SECURITY_ENFORCE` | *(unset)* | `true` (or `1`) = the ONE switch for both the guard (blocklist, rate limits, auto-block, turn ceiling) and per-role profile enforcement (tools/MCP/env, per-call gate, taint, `escalate`); unset = shadow (audit only, nothing denies) |
 | `TRUSTED_PROXIES` | *(unset)* | IPs/CIDRs whose `X-Forwarded-For` is trusted. Without it, traffic from a same-host proxy (Caddy/cloudflared) arrives from loopback and IP-based limits/blocks don't apply; set `127.0.0.1,::1` when that proxy is the only ingress |
 
 ### The config file (`data/shraga.config.ts`)
