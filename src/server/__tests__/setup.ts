@@ -16,6 +16,9 @@ import path from 'node:path';
 // THIS repo root and calls process.exit(1) if that file doesn't exist here — silently killing
 // the whole `bun test` run with no test output. Tests must be hermetic to the ambient shell.
 delete process.env.ENV_NAME;
+// Same class: a shell exporting AUTH_PROVIDER=firebase froze auth.ts's provider for every test file
+// that imports it, so local-login tests 401'd depending on the developer's shell.
+delete process.env.AUTH_PROVIDER;
 
 if (!process.env.SHRAGA_TEST_ROOT) {
   const root = mkdtempSync(path.join(tmpdir(), 'shraga-tests-'));
