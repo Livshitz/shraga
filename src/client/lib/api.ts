@@ -1,6 +1,6 @@
 import { reportApiFailure, reportApiResponse } from '@/lib/backendHealth';
 
-/** Minimal authenticated JSON fetch helper. Throws `Error("<status> <statusText>")` or the server's `error` field. */
+/** Minimal authenticated JSON fetch helper. Throws `Error("<status> <statusText>")` or the server's `error` field, with `status` set. */
 export async function api<T>(
   path: string,
   getToken: () => Promise<string | null>,
@@ -23,7 +23,7 @@ export async function api<T>(
   reportApiResponse(path, res, init?.expect);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `${res.status} ${res.statusText}`);
+    throw Object.assign(new Error(body.error || `${res.status} ${res.statusText}`), { status: res.status });
   }
   return res.json();
 }

@@ -103,6 +103,18 @@ export function setUseUserToken(channel: string, threadTs: string, useUserToken:
   }
 }
 
+/** Unmap a deleted session from every Slack thread and proactive message, so a reply there starts a new session. */
+export function forgetSlackSession(sessionId: string): void {
+  loadMapping();
+  const threads = Object.keys(mapping).filter((k) => mapping[k].sessionId === sessionId);
+  for (const k of threads) delete mapping[k];
+  if (threads.length) saveMapping();
+  loadProactive();
+  const sent = Object.keys(proactiveMap).filter((k) => proactiveMap[k].sessionId === sessionId);
+  for (const k of sent) delete proactiveMap[k];
+  if (sent.length) saveProactive();
+}
+
 // --- Proactive message registry ---
 interface ProactiveMessage { sessionId: string; sessionTitle: string; sentAt: number; }
 let proactiveMap: Record<string, ProactiveMessage> = {};
