@@ -52,7 +52,8 @@ import { seedOperators } from './contacts.ts';
 import { dataSync } from './data-sync.ts';
 import { mountMcpServer } from './mcp-server.ts';
 import { fromInternal, type Principal } from './security/principal.ts';
-import { initSecurity, security } from './security/runtime.ts';
+import { initSecurity, security, admitTurn, requestIp } from './security/runtime.ts';
+import { writeDenial } from './security/guard.ts';
 import { requireOwner } from './security/owner-only.ts';
 import { lookupIdempotent, rememberIdempotent } from './idempotency.ts';
 import { createApiKey, deleteApiKey, listApiKeys } from './api-keys.ts';
@@ -760,18 +761,26 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     if (existing) return void res.json({ sessionId: existing, status: 'duplicate' });
   }
 
+  // Guard before any spend: blocklist → rate → concurrency (shadow unless SECURITY_ENFORCE).
+  const admission = admitTurn(user.principal, { ip: requestIp(req), channel: 'api' });
+  if (!admission.ok) return void writeDenial(res, admission);
+
   const sid = reqSid || `api-${crypto.randomUUID()}`;
   if (idemKey) rememberIdempotent(user.uid, idemKey, sid);
   const apiAbortController = new AbortController();
-  const run = () => runChatTurn({
-    prompt,
-    sessionId: sid,
-    uid: user.uid,
-    userEmail: user.email,
-    principal: user.principal,
-    abortController: apiAbortController,
-    context: { source: 'api', user: user.email },
-  });
+  const run = async () => {
+    try {
+      return await runChatTurn({
+        prompt,
+        sessionId: sid,
+        uid: user.uid,
+        userEmail: user.email,
+        principal: user.principal,
+        abortController: apiAbortController,
+        context: { source: 'api', user: user.email },
+      });
+    } finally { admission.release(); }
+  };
 
   if (sync) {
     const result = await run();
@@ -781,6 +790,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   } else {
     // Reject a duplicate before responding 'accepted' (lock is acquired inside run()).
     if (reqSid && isSessionLocked(sid)) {
+      admission.release();
       return void res.status(409).json({ error: 'Session is already processing a request' });
     }
     res.json({ sessionId: sid, status: 'accepted' });
@@ -968,6 +978,8 @@ interface WsSession {
   email: string;
   /** Set on ws auth; undefined until then. */
   principal?: Principal;
+  /** Client IP from the upgrade request (TRUSTED_PROXIES-aware). */
+  ip?: string;
   busySessions: Set<string>;
   autoApprove: boolean;
   abortControllers: Map<string, AbortController>;
@@ -1215,7 +1227,7 @@ function proxySidecarWebSocket(req: import('node:http').IncomingMessage, socket:
 server.on('upgrade', (req, socket, head) => {
   if (req.url === '/ws') {
     wss.handleUpgrade(req, socket as any, head, (ws) => {
-      const session: WsSession = { uid: '', email: '', busySessions: new Set(), autoApprove: false, abortControllers: new Map(), pendingPermissions: new Map(), pendingQuestions: new Map(), steerPending: new Map(), lastSessionId: null, viewingSessionId: null, focused: true };
+      const session: WsSession = { uid: '', email: '', ip: requestIp(req), busySessions: new Set(), autoApprove: false, abortControllers: new Map(), pendingPermissions: new Map(), pendingQuestions: new Map(), steerPending: new Map(), lastSessionId: null, viewingSessionId: null, focused: true };
       handleConnection(ws, session);
     });
   } else {
@@ -1870,68 +1882,76 @@ function handleConnection(ws: WebSocket, session: WsSession) {
       let sid = msg.sessionId || crypto.randomUUID();
       const wantsFork = typeof msg.truncateAt === 'number' && msg.truncateAt >= 0 && (session.busySessions.has(sid) || isSessionLocked(sid));
       if (!wantsFork && (session.busySessions.has(sid) || isSessionLocked(sid))) return send(ws, { type: 'error', message: 'Already processing a request', sessionId: sid });
-      if (!wantsFork) session.busySessions.add(sid);
-      const mcpServers = getMcpConfig(session.uid);
-      // Opaque per-send bag from the client's send-options slot. The core forwards it verbatim to the
-      // turn-context/engine seams and interprets no add-on key (a plain object only — never an array/primitive).
-      const turnHints = msg.turnHints && typeof msg.turnHints === 'object' && !Array.isArray(msg.turnHints)
-        ? (msg.turnHints as Record<string, unknown>) : undefined;
-      // Ephemeral user turn (generic hint): a synthetic, add-on-originated opener (e.g. a voice greeting).
-      // Run it, but DON'T persist it as a user message — the reply is the real turn, not a user turn.
-      const ephemeralUser = turnHints?.ephemeralUser === true;
-      const promptText = msg.text ?? '';
-      session.lastSessionId = sid;
-      session.viewingSessionId = sid;
-      session.focused = true;
-      const isNew = !msg.sessionId;
-      if (isNew) {
-        upsertSession(sid, promptText, { uid: session.uid, email: session.email });
-        send(ws, { type: 'session_id', sessionId: sid });
-        // Immediate prompt-derived title so the tab renames off "New Chat" now; the LLM title refines it later.
-        const t0 = getSession(sid)?.title;
-        if (t0) send(ws, { type: 'session_title_updated', sessionId: sid, title: t0 });
-        console.log(`[ws] New session ${sid.slice(0, 8)} for ${session.email}`);
+      // Guard before any spend: blocklist → rate → concurrency (shadow unless SECURITY_ENFORCE).
+      const admission = admitTurn(session.principal ?? fromInternal({ uid: session.uid, email: session.email, lane: 'ws-unresolved' }), { ip: session.ip, channel: 'ws' });
+      if (!admission.ok) {
+        return send(ws, { type: 'error', sessionId: sid, reason: admission.reason, retryAfter: admission.retryAfter,
+          message: admission.status === 403 ? 'Access blocked' : `Too many requests — try again in ${admission.retryAfter ?? 60}s` });
       }
-
-      console.log(`[ws] Message from ${session.email}: "${promptText.slice(0, 100)}" session=${sid.slice(0, 8)}`);
-
-      // Truncate or fork conversation if replaying/editing a previous message
-      if (typeof msg.truncateAt === 'number' && msg.truncateAt >= 0) {
-        if (wantsFork) {
-          // Session is busy — fork instead of destructive truncate to avoid race conditions
-          let forkedId: string | null = null;
-          if (msg.truncateAt > 0) {
-            // forkSession truncateAtIndex is inclusive (slices to index+1), truncateAt is message count to keep
-            forkedId = forkSession(sid, { uid: session.uid, email: session.email, name: session.email.split('@')[0] }, msg.truncateAt - 1);
-          }
-          if (!forkedId) {
-            // truncateAt=0 (restart from scratch) or forkSession failed — create a fresh session
-            forkedId = crypto.randomUUID();
-            upsertSession(forkedId, promptText, { uid: session.uid, email: session.email });
-          }
-          console.log(`[ws] Forked busy session ${sid.slice(0, 8)} → ${forkedId.slice(0, 8)} (truncateAt=${msg.truncateAt})`);
-          session.busySessions.add(forkedId);
-          sid = forkedId;
-          session.lastSessionId = forkedId;
-          send(ws, { type: 'forked', sourceSessionId: msg.sessionId, sessionId: forkedId });
-        } else {
-          const existing = loadConversation(sid);
-          saveConversation(sid, existing.slice(0, msg.truncateAt));
-          console.log(`[ws] Truncated conversation ${sid.slice(0, 8)} to ${msg.truncateAt} messages`);
+      try {
+        if (!wantsFork) session.busySessions.add(sid);
+        const mcpServers = getMcpConfig(session.uid);
+        // Opaque per-send bag from the client's send-options slot. The core forwards it verbatim to the
+        // turn-context/engine seams and interprets no add-on key (a plain object only — never an array/primitive).
+        const turnHints = msg.turnHints && typeof msg.turnHints === 'object' && !Array.isArray(msg.turnHints)
+          ? (msg.turnHints as Record<string, unknown>) : undefined;
+        // Ephemeral user turn (generic hint): a synthetic, add-on-originated opener (e.g. a voice greeting).
+        // Run it, but DON'T persist it as a user message — the reply is the real turn, not a user turn.
+        const ephemeralUser = turnHints?.ephemeralUser === true;
+        const promptText = msg.text ?? '';
+        session.lastSessionId = sid;
+        session.viewingSessionId = sid;
+        session.focused = true;
+        const isNew = !msg.sessionId;
+        if (isNew) {
+          upsertSession(sid, promptText, { uid: session.uid, email: session.email });
+          send(ws, { type: 'session_id', sessionId: sid });
+          // Immediate prompt-derived title so the tab renames off "New Chat" now; the LLM title refines it later.
+          const t0 = getSession(sid)?.title;
+          if (t0) send(ws, { type: 'session_title_updated', sessionId: sid, title: t0 });
+          console.log(`[ws] New session ${sid.slice(0, 8)} for ${session.email}`);
         }
-      }
 
-      // Save user message to disk immediately
-      const attachments: AttachmentMeta[] = msg.attachments ?? [];
-      const attBlocks: ConvBlock[] = attachments.map((a: any) =>
-        a.mimeType.startsWith('image/')
-          ? { type: 'image' as const, src: a.url }
-          : { type: 'file' as const, src: a.url, name: a.name, mimeType: a.mimeType }
-      );
-      if (!ephemeralUser) appendMessage(sid, { id: crypto.randomUUID(), role: 'user', blocks: [...attBlocks, { type: 'text', text: promptText }], channel: 'web', senderName: session.email.split('@')[0] });
+        console.log(`[ws] Message from ${session.email}: "${promptText.slice(0, 100)}" session=${sid.slice(0, 8)}`);
 
-      const wasReset = typeof msg.truncateAt === 'number' && msg.truncateAt >= 0;
-      await runStream(ws, session, sid, promptText, attachments, mcpServers, false, wasReset, turnHints);
+        // Truncate or fork conversation if replaying/editing a previous message
+        if (typeof msg.truncateAt === 'number' && msg.truncateAt >= 0) {
+          if (wantsFork) {
+            // Session is busy — fork instead of destructive truncate to avoid race conditions
+            let forkedId: string | null = null;
+            if (msg.truncateAt > 0) {
+              // forkSession truncateAtIndex is inclusive (slices to index+1), truncateAt is message count to keep
+              forkedId = forkSession(sid, { uid: session.uid, email: session.email, name: session.email.split('@')[0] }, msg.truncateAt - 1);
+            }
+            if (!forkedId) {
+              // truncateAt=0 (restart from scratch) or forkSession failed — create a fresh session
+              forkedId = crypto.randomUUID();
+              upsertSession(forkedId, promptText, { uid: session.uid, email: session.email });
+            }
+            console.log(`[ws] Forked busy session ${sid.slice(0, 8)} → ${forkedId.slice(0, 8)} (truncateAt=${msg.truncateAt})`);
+            session.busySessions.add(forkedId);
+            sid = forkedId;
+            session.lastSessionId = forkedId;
+            send(ws, { type: 'forked', sourceSessionId: msg.sessionId, sessionId: forkedId });
+          } else {
+            const existing = loadConversation(sid);
+            saveConversation(sid, existing.slice(0, msg.truncateAt));
+            console.log(`[ws] Truncated conversation ${sid.slice(0, 8)} to ${msg.truncateAt} messages`);
+          }
+        }
+
+        // Save user message to disk immediately
+        const attachments: AttachmentMeta[] = msg.attachments ?? [];
+        const attBlocks: ConvBlock[] = attachments.map((a: any) =>
+          a.mimeType.startsWith('image/')
+            ? { type: 'image' as const, src: a.url }
+            : { type: 'file' as const, src: a.url, name: a.name, mimeType: a.mimeType }
+        );
+        if (!ephemeralUser) appendMessage(sid, { id: crypto.randomUUID(), role: 'user', blocks: [...attBlocks, { type: 'text', text: promptText }], channel: 'web', senderName: session.email.split('@')[0] });
+
+        const wasReset = typeof msg.truncateAt === 'number' && msg.truncateAt >= 0;
+        await runStream(ws, session, sid, promptText, attachments, mcpServers, false, wasReset, turnHints);
+      } finally { admission.release(); }
     }
 
     if (msg.type === 'interruption_marker') {
