@@ -111,7 +111,9 @@ Prefer a programmatic `createShraga().registerFeature(...)` embed when you own t
 - **Auth** — `AUTH_PROVIDER` ([`src/server/auth.ts`](../../../src/server/auth.ts)): `local`
   (default, self-hosted username/password; local login/register routes exist only in this mode) or
   `firebase` (verifies Firebase ID tokens; optional add-on). `requireAuth` is the shared guard; API
-  keys use the `uck_` prefix. `passive`/`SHRAGA_PASSIVE` boots HTTP-only (no schedulers/consumers/
+  keys use the `uck_` prefix (stored hashed; optional role cap + expiry). Revocation: owners invalidate a
+  principal's tokens via `POST /api/owner/tokens/revoke` (`policy.tokensValidAfter`) and delete keys via
+  `/api/owner/api-keys`. `passive`/`SHRAGA_PASSIVE` boots HTTP-only (no schedulers/consumers/
   writers) for standby twins.
 
 ## Deploy model (generic pattern)

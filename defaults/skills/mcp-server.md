@@ -8,12 +8,17 @@ Shraga exposes an embedded MCP endpoint at `POST /mcp` so external Claude client
 
 ## API Keys
 
-Keys use the `uck_` prefix and are stored in `data/api-keys.json`.
+Keys use the `uck_` prefix. `data/api-keys.json` holds only a sha256 hash + a short preview per key — the plaintext is returned once, at create, and can't be recovered (an old plaintext file is hashed on first load, original kept at `api-keys.json.bak`).
 
-**REST endpoints** (require Firebase auth or internal token):
-- `POST /api/api-keys` — create a key. Body: `{ "label": "my-key" }`. Returns full key (only shown once).
-- `GET /api/api-keys` — list keys (key values masked).
-- `DELETE /api/api-keys/:id` — delete a key (owner or server owner only).
+A key acts for its creator. Optional `role` caps it (effective role = the lower of the creator's role and the key's role — never owner, never above the creator). Optional `expiresAt` (epoch ms) rejects it from then on.
+
+**REST endpoints** (require auth; writes return 409 on a passive standby):
+- `POST /api/api-keys` — create your own key. Body: `{ "label": "my-key" }`.
+- `GET /api/api-keys` — list your keys (an owner sees all). Never includes the secret.
+- `DELETE /api/api-keys/:id` — delete a key (its creator or an owner). Takes effect immediately.
+- Owner only: `GET|POST /api/owner/api-keys`, `DELETE /api/owner/api-keys/:id` — same, but POST also takes `role` and `expiresAt`.
+
+**Revoking sessions/tokens** (owner only): `POST /api/owner/tokens/revoke` with `{ "principalId": "user:<email|uid>" }` or `"internal:<uid>"` invalidates every login, MCP OAuth token/code and internal token issued to that principal before now. It does not touch API keys — delete the key instead.
 
 **Generating a key via curl** (from an agent session):
 ```bash

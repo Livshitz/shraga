@@ -35,7 +35,9 @@ import { security } from './security/runtime.ts';
 import { firebaseIssuedAt, tokenRevoked } from './security/revocation.ts';
 
 // Issued-at (`iat`) + revocation: every token format below carries `iat` for NEW tokens, in a shape the pre-iat
-// verifier REJECTS (never mis-parses into a different identity) — so a rollback only forces re-auth. Old tokens
+// verifier REJECTS (never mis-parses into a different identity) — so for these tokens a rollback only forces re-auth.
+// API keys are NOT covered: pre-hashing code breaks on hashed entries, so a rollback invalidates every key (see the
+// Rollback note in api-keys.ts). Old tokens
 // without iat still verify here, with an implied iat (see security/revocation.ts). Checked against
 // policy.tokensValidAfter for the token's principal: an in-memory lookup, no I/O.
 const nowSec = () => Math.floor(Date.now() / 1000);

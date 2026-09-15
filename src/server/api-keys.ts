@@ -4,6 +4,12 @@
 // the original bytes are kept at `<path>.bak` (mode 600, written only if absent), then the hashed file is written
 // atomically (tmp + rename, mode 600). Only the ACTIVE instance migrates: a PASSIVE standby sharing DATA_DIR hashes
 // in memory and serves the same keys without writing. A file with no plaintext entries is never rewritten.
+// A failed migration is retried only after the file changes or `retryMs` passes (logged once per failing file state).
+// Every store write (create/delete) is refused while PASSIVE.
+//
+// Rollback: code from before hashing expects a plaintext `key` on every entry and breaks on hashed ones, so rolling
+// back invalidates EVERY API key. Before rolling back, restore `api-keys.json.bak` (keys created after the migration
+// are lost), or re-issue the keys afterwards.
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -30,6 +36,11 @@ export type ApiKeyView = Omit<ApiKey, 'hash'>;
 export interface ApiKeyIdentity { id: string; uid: string; email: string; role?: string }
 export interface CreateApiKeyOptions { role?: string; expiresAt?: number; /** Principal id of the creator, for the audit. */ actor?: string }
 
+/** A refused store operation; `status` is the HTTP status a route should answer with. */
+export class ApiKeyStoreError extends Error {
+  public constructor(message: string, public status = 400) { super(message); }
+}
+
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 const previewOf = (key: string) => `${key.slice(0, 8)}…`;
 const view = ({ hash: _h, ...rest }: ApiKey): ApiKeyView => rest;
@@ -39,10 +50,12 @@ export class ApiKeyStoreOptions {
   /** Migration writes only while true (PASSIVE standby ⇒ false). Default: the security runtime's flag. */
   isActive: () => boolean = () => security()?.options.isActive() ?? true;
   clock: () => number = Date.now;
+  /** After a failed migration, don't retry until the file changes or this many ms pass. */
+  retryMs: number = 60_000;
   log: Pick<Console, 'info' | 'warn' | 'error'> = console;
 }
 
-interface Snapshot { mtimeMs: number; size: number; keys: ApiKey[]; byHash: Map<string, ApiKey>; legacy: boolean }
+interface Snapshot { mtimeMs: number; size: number; keys: ApiKey[]; byHash: Map<string, ApiKey>; legacy: boolean; failedAt?: number }
 
 export class ApiKeyStore {
   public options: ApiKeyStoreOptions;
@@ -62,7 +75,9 @@ export class ApiKeyStore {
     const p = this.options.path;
     const st = existsSync(p) ? statSync(p) : null;
     const s = this.snap;
-    if (s && st && s.mtimeMs === st.mtimeMs && s.size === st.size && !(s.legacy && this.active())) return s;
+    const unchanged = !!(s && st && s.mtimeMs === st.mtimeMs && s.size === st.size);
+    const backingOff = s?.failedAt !== undefined && this.options.clock() - s.failedAt < this.options.retryMs;
+    if (unchanged && !(s!.legacy && this.active() && !backingOff)) return s!;
     if (!st) return (this.snap = { mtimeMs: 0, size: -1, keys: [], byHash: new Map(), legacy: false });
     const raw = readFileSync(p, 'utf8');
     let parsed: unknown;
@@ -77,7 +92,7 @@ export class ApiKeyStore {
       const { key, ...rest } = k;
       return { ...rest, hash: sha256(key), keyPreview: previewOf(key) };
     });
-    if (legacy && this.active()) return this.migrate(raw, keys);
+    if (legacy && this.active()) return this.migrate(raw, keys, st, unchanged && s?.failedAt !== undefined);
     return (this.snap = { mtimeMs: st.mtimeMs, size: st.size, keys, byHash: this.index(keys), legacy });
   }
 
@@ -85,7 +100,8 @@ export class ApiKeyStore {
     return new Map(keys.filter(k => typeof k?.hash === 'string').map(k => [k.hash, k]));
   }
 
-  private migrate(raw: string, keys: ApiKey[]): Snapshot {
+  /** `retry` = the same file state already failed once (don't log again). */
+  private migrate(raw: string, keys: ApiKey[], st: { mtimeMs: number; size: number }, retry: boolean): Snapshot {
     const bak = `${this.options.path}.bak`;
     try {
       if (existsSync(bak)) this.options.log.warn(`[api-keys] ${bak} exists — keeping it, not overwriting`);
@@ -94,8 +110,8 @@ export class ApiKeyStore {
       this.options.log.info(`[api-keys] migrated ${keys.length} key(s) to hashed storage (backup: ${bak})`);
       return snap;
     } catch (e: any) {
-      this.options.log.error(`[api-keys] migration failed — serving hashed in memory, will retry: ${e.message}`);
-      return (this.snap = { mtimeMs: -1, size: -1, keys, byHash: this.index(keys), legacy: true });
+      if (!retry) this.options.log.error(`[api-keys] migration failed — serving hashed in memory, retrying when the file changes or every ${this.options.retryMs}ms: ${e.message}`);
+      return (this.snap = { mtimeMs: st.mtimeMs, size: st.size, keys, byHash: this.index(keys), legacy: true, failedAt: this.options.clock() });
     }
   }
 
@@ -112,6 +128,7 @@ export class ApiKeyStore {
 
   /** Mint a key. Returns its public view plus the plaintext `key` — the only time it is ever available. */
   public create(uid: string, email: string, label: string, opts: CreateApiKeyOptions = {}): ApiKeyView & { key: string } {
+    this.assertWritable();
     const { role, expiresAt, actor } = opts;
     if (role !== undefined) {
       if (typeof role !== 'string' || !role) throw new Error('role must be a non-empty string');
@@ -135,14 +152,21 @@ export class ApiKeyStore {
     return { ...view(entry), key };
   }
 
-  public delete(id: string, callerUid: string, isOwner: boolean, actor?: string): 'ok' | 'not_found' | 'forbidden' {
+  /** `actor` = the caller's principal id (`req.user.principal.id`), for the audit. */
+  public delete(id: string, callerUid: string, isOwner: boolean, actor: string): 'ok' | 'not_found' | 'forbidden' {
+    this.assertWritable();
     const keys = this.read().keys;
     const k = keys.find(x => x.id === id);
     if (!k) return 'not_found';
     if (k.uid !== callerUid && !isOwner) return 'forbidden';
     this.write(keys.filter(x => x !== k));
-    security()?.record({ type: 'key.revoke', principal: actor ?? `user:${callerUid}`, target: `apikey:${id}`, meta: { uid: k.uid } });
+    security()?.record({ type: 'key.revoke', principal: actor, target: `apikey:${id}`, meta: { uid: k.uid } });
     return 'ok';
+  }
+
+  /** PASSIVE standby shares DATA_DIR: it must never write the key file (nor migrate it as a side effect of a write). */
+  private assertWritable(): void {
+    if (!this.active()) throw new ApiKeyStoreError('API keys are read-only on a PASSIVE standby — use the active instance', 409);
   }
 
   /** Keys visible to the caller: an owner sees every key, anyone else only their own. Never hash or plaintext. */
@@ -165,7 +189,7 @@ let store: ApiKeyStore | undefined;
 export const apiKeyStore = (): ApiKeyStore => (store ??= new ApiKeyStore());
 
 export const createApiKey = (uid: string, email: string, label: string, opts?: CreateApiKeyOptions) => apiKeyStore().create(uid, email, label, opts);
-export const deleteApiKey = (id: string, callerUid: string, isOwner: boolean, actor?: string) => apiKeyStore().delete(id, callerUid, isOwner, actor);
+export const deleteApiKey = (id: string, callerUid: string, isOwner: boolean, actor: string) => apiKeyStore().delete(id, callerUid, isOwner, actor);
 export const listApiKeys = (caller: { uid: string; isOwner: boolean }) => apiKeyStore().list(caller);
 export const validateApiKey = (key: string) => apiKeyStore().validate(key);
 

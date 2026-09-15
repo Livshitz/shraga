@@ -29,6 +29,21 @@ beforeAll(() => { root = mkdtempSync(path.join(tmpdir(), 'sec-runtime-')); proce
 afterAll(() => { rmSync(root, { recursive: true, force: true }); if (prevOwners === undefined) delete process.env.OWNERS; else process.env.OWNERS = prevOwners; });
 afterEach(() => __resetSecurityForTest());
 
+describe('API-key principal role = creator role capped by the key role', () => {
+  test('guest key from an owner → guest; operator key from a member → member; no role → creator', async () => {
+    const { apiKeyPrincipal } = await import('../../api-keys.ts');
+    const { resolvePrincipal } = await import('../runtime.ts');
+    const rt = tmpRuntime();
+    rt.policy.save({ ...rt.policy.current, bindings: [{ match: { kind: 'user', emailIn: ['mem@sec-runtime.test'] }, role: 'member' }] });
+    const key = (email: string, role?: string) => apiKeyPrincipal({ id: `k-${email}-${role}`, uid: email, email, ...(role ? { role } : {}) });
+    expect(rt.decide(key(OWNER, 'guest')).role).toBe('guest');
+    expect(resolvePrincipal(rt.policy, key('mem@sec-runtime.test', 'operator')).role).toBe('member');
+    expect(resolvePrincipal(rt.policy, key('mem@sec-runtime.test', 'guest')).role).toBe('guest');
+    expect(resolvePrincipal(rt.policy, key('mem@sec-runtime.test')).role).toBe('member');
+    expect(resolvePrincipal(rt.policy, key(OWNER)).role).toBe('owner');
+  });
+});
+
 describe('SecurityRuntime.decide', () => {
   test('owner resolves to owner/full (no wouldDeny); an internal principal falls to the default role (wouldDeny)', () => {
     const rt = tmpRuntime();

@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -91,6 +91,38 @@ describe('plaintext → hashed migration', () => {
     expect(readFileSync(p, 'utf8')).not.toContain(K2);
     expect(readFileSync(`${p}.bak`, 'utf8')).toBe(raw);
   });
+
+  test('PASSIVE: create and delete refuse (409) and never touch the legacy file', () => {
+    const { p, raw } = fixture();
+    const store = new ApiKeyStore({ path: p, log: quiet, isActive: () => false });
+    for (const op of [() => store.create('u', 'e@x.test', 'new'), () => store.delete('k1', 'u1', true, 'user:o@x.test')]) {
+      let err: any;
+      try { op(); } catch (e) { err = e; }
+      expect(err?.status).toBe(409);
+    }
+    expect(readFileSync(p, 'utf8')).toBe(raw);
+    expect(existsSync(`${p}.bak`)).toBe(false);
+    expect(store.validate(K1)?.id).toBe('k1');
+  });
+
+  test('failed migration backs off: no retry (or log) until the file changes or retryMs passes', () => {
+    const { p } = fixture();
+    const dir = path.dirname(p);
+    let now = 1_800_000_000_000, errs = 0;
+    const store = new ApiKeyStore({ path: p, clock: () => now, log: { info() {}, warn() {}, error() { errs++; } } });
+    chmodSync(dir, 0o555); // .bak/tmp can't be created ⇒ migration fails
+    try {
+      for (let i = 0; i < 5; i++) expect(store.validate(K1)?.id).toBe('k1');
+      expect(errs).toBe(1);
+      chmodSync(dir, 0o755);
+      store.validate(K1);
+      expect(readFileSync(p, 'utf8')).toContain(K1); // still backing off: writable now, but not retried
+      now += 60_000;
+      expect(store.validate(K1)?.id).toBe('k1');
+      expect(readFileSync(p, 'utf8')).not.toContain(K1); // retried after retryMs and succeeded
+      expect(errs).toBe(1);
+    } finally { chmodSync(dir, 0o755); }
+  });
 });
 
 describe('create / expiry / role', () => {
@@ -106,7 +138,7 @@ describe('create / expiry / role', () => {
     expect(readFileSync(p, 'utf8')).not.toContain(created.key);
     expect(store.validate(created.key)?.id).toBe(created.id);
 
-    expect(store.delete(created.id, 'someone-else', false)).toBe('forbidden');
+    expect(store.delete(created.id, 'someone-else', false, 'user:else@x.test')).toBe('forbidden');
     expect(store.delete(created.id, 'u9', false, 'user:u9@x.test')).toBe('ok');
     expect(store.validate(created.key)).toBeNull();
     const recs = rt.audit.query({ limit: 100, type: ['key.create', 'key.revoke'] }).items.filter(r => r.target === `apikey:${created.id}`);

@@ -56,7 +56,7 @@ import { initSecurity, security, admitTurn, requestIp } from './security/runtime
 import { writeDenial } from './security/guard.ts';
 import { requireOwner } from './security/owner-only.ts';
 import { lookupIdempotent, rememberIdempotent } from './idempotency.ts';
-import { createApiKey, deleteApiKey, listApiKeys } from './api-keys.ts';
+import { apiKeyRouter } from './api-key-routes.ts';
 import { addUnread, markRead as markUnread, getUnreads } from './unread.ts';
 
 import { loadShragaConfig, getPublicOrigin } from './shraga-config.ts';
@@ -929,22 +929,7 @@ app.post('/api/push/unregister', requireAuth, (req, res) => {
 });
 
 // ── API Keys ──────────────────────────────────────────────────────────────────
-app.get('/api/api-keys', requireAuth, (req, res) => {
-  res.json({ keys: listApiKeys((req as any).user as import('./auth.ts').AuthUser) });
-});
-app.post('/api/api-keys', requireAuth, (req, res) => {
-  const user = (req as any).user as import('./auth.ts').AuthUser;
-  const { label } = req.body as { label?: string };
-  const key = createApiKey(user.uid, user.email, label || 'Unnamed');
-  res.json(key);
-});
-app.delete('/api/api-keys/:id', requireAuth, (req: express.Request<{ id: string }>, res) => {
-  const user = (req as any).user as import('./auth.ts').AuthUser;
-  const ok = deleteApiKey(req.params.id, user.uid, user.isOwner);
-  if (ok === 'not_found') return void res.status(404).json({ error: 'Key not found' });
-  if (ok === 'forbidden') return void res.status(403).json({ error: 'Cannot delete another user\'s key' });
-  res.json({ ok: true });
-});
+app.use(apiKeyRouter({ base: '/api/api-keys', gate: [requireAuth] }));
 
 // ── MCP Server ────────────────────────────────────────────────────────────────
 mountMcpServer(app, { runChatTurn });
