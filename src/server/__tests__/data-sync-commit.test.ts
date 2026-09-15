@@ -92,6 +92,9 @@ function harness(opts: { askClaude: (p?: string, m?: string, ac?: AbortControlle
   ds.askClaude = opts.askClaude;
   ds.guardMassDeletions = async () => false;
   ds.rebuildLog = async () => [];
+  // flush() anchors the commit message on DATA_DIR/audit's head. DATA_DIR is one temp dir per test PROCESS (setup.ts
+  // preload), so any sibling file that appends to the default audit dir would otherwise leak `audit-head:` in here.
+  ds.auditHead = () => undefined;
   ds.pending.add('CLAUDE.md');
   return { ds, calls };
 }

@@ -42,8 +42,8 @@ describe('planted month entries', () => {
       expect(a.failures).toBeGreaterThan(failures);
       expect(alerts).toEqual([{ dir: auditDir, file: '2026-02.jsonl', kind }]);
       expect(errors.some(e => e.includes('2026-02.jsonl') && e.includes('not a regular file'))).toBe(true);
-      expect(a.verify()).toEqual({ ok: false, lines: 2, brokenAt: { file: '2026-02.jsonl', line: 0, reason: 'not-regular-file' } });
-      expect(a.verify('2026-02.jsonl')).toEqual({ ok: false, lines: 0, brokenAt: { file: '2026-02.jsonl', line: 0, reason: 'not-regular-file' } });
+      expect(a.verify()).toEqual({ ok: false, lines: 2, brokenAt: { file: '2026-02.jsonl', line: 0, reason: 'not-regular-file' }, planted: ['2026-02.jsonl'] });
+      expect(a.verify('2026-02.jsonl')).toEqual({ ok: false, lines: 0, brokenAt: { file: '2026-02.jsonl', line: 0, reason: 'not-regular-file' }, planted: ['2026-02.jsonl'] });
       expect(a.query({ limit: 10 }).items.map(r => r.hash)[0]).toBe(janHead); // viewer not blinded
       expect(readAuditHead(auditDir)).toBe(janHead);
 
@@ -54,6 +54,20 @@ describe('planted month entries', () => {
       expect(alerts.length).toBe(2); // once per process
     });
   }
+
+  test('a planted OLD month does not mask a real hash break in a later file — both are reported', () => {
+    const auditDir = path.join(dir, 'audit');
+    now = Date.parse('2026-09-15T00:00:00Z');
+    const a = mk();
+    for (let i = 0; i < 3; i++) a.append({ type: 'turn.start', principal: `u${i}` });
+    const f = path.join(auditDir, '2026-09.jsonl');
+    writeFileSync(f, readFileSync(f, 'utf8').replace('"u1"', '"ATTACKER"'));
+    mkdirSync(path.join(auditDir, '2000-01.jsonl'));
+    __resetAuditHeadsForTest();
+    expect(mk().verify()).toEqual({ ok: false, lines: 2, brokenAt: { file: '2026-09.jsonl', line: 2, reason: 'hash' }, planted: ['2000-01.jsonl'] });
+    writeFileSync(f, readFileSync(f, 'utf8').replace('"ATTACKER"', '"u1"')); // chain restored: only the planted entry remains
+    expect(mk().verify()).toEqual({ ok: false, lines: 3, brokenAt: { file: '2000-01.jsonl', line: 0, reason: 'not-regular-file' }, planted: ['2000-01.jsonl'] });
+  });
 
   test('onAnomaly returning false (standby) is asked again; accepted once, never again', () => {
     const auditDir = path.join(dir, 'audit');
