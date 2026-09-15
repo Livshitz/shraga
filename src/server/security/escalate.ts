@@ -48,7 +48,8 @@ export class EscalationsOptions {
   };
 }
 
-interface Window { pending: EscalationRequest[]; dropped: number; timer: { cancel(): void } }
+/** `senders`: every principal held in the window, listed or dropped (the digest header counts them). */
+interface Window { pending: EscalationRequest[]; dropped: number; senders: Set<string>; timer: { cancel(): void } }
 interface GlobalWindow extends Window { sent: number }
 
 const clip = (s: string | undefined, n: number) => { const t = (s ?? '').trim(); return t.length > n ? `${t.slice(0, n)}…` : t; };
@@ -75,10 +76,12 @@ export class Escalations {
     if (w) status = this.hold(w, req);
     else if ((this.global?.sent ?? 0) >= this.options.globalMax) status = this.hold(this.globalWindow(), req);
     else {
-      this.globalWindow().sent++;
+      const g = this.globalWindow();
+      g.sent++;
       this.open(req.principal.id);
-      // `sent` only once the notice was handed off; a failed one waits in the digest instead.
-      status = (await this.send([req], 0)) ? 'sent' : this.hold(this.windows.get(req.principal.id) ?? this.globalWindow(), req);
+      // `sent` only once the notice was handed off; a failed one frees its global slot and waits in the digest instead.
+      if (await this.send([req], 0)) status = 'sent';
+      else { g.sent--; status = this.hold(this.windows.get(req.principal.id) ?? this.globalWindow(), req); }
     }
     this.audit(req, status);
     return status;
@@ -93,18 +96,19 @@ export class Escalations {
   }
 
   private hold(w: Window, req: EscalationRequest): EscalationStatus {
+    w.senders.add(req.principal.id);
     if (w.pending.length < this.options.maxPending) { w.pending.push(req); return 'batched'; }
     w.dropped++;
     return 'dropped';
   }
 
   private globalWindow(): GlobalWindow {
-    return (this.global ??= { pending: [], dropped: 0, sent: 0, timer: this.options.setTimer(() => void this.flushGlobal(), this.options.globalWindowMs) });
+    return (this.global ??= { pending: [], dropped: 0, senders: new Set(), sent: 0, timer: this.options.setTimer(() => void this.flushGlobal(), this.options.globalWindowMs) });
   }
 
   private open(key: string): void {
     const timer = this.options.setTimer(() => void this.flush(key, true), this.options.cooldownMs);
-    this.windows.set(key, { pending: [], dropped: 0, timer });
+    this.windows.set(key, { pending: [], dropped: 0, senders: new Set(), timer });
   }
 
   private async flush(key: string, reopen: boolean): Promise<boolean> {
@@ -118,16 +122,18 @@ export class Escalations {
   private async flushGlobal(): Promise<boolean> {
     const g = this.global;
     this.global = undefined;
-    return g?.pending.length ? this.send(g.pending, g.dropped, true) : false;
+    return g?.pending.length ? this.send(g.pending, g.dropped, g.senders.size) : false;
   }
 
-  private async send(reqs: EscalationRequest[], dropped: number, global = false): Promise<boolean> {
-    try { await this.options.notify(this.format(reqs, dropped, global)); return true; }
+  /** `senders` set = a global digest (lists who sent each item). */
+  private async send(reqs: EscalationRequest[], dropped: number, senders?: number): Promise<boolean> {
+    try { await this.options.notify(this.format(reqs, dropped, senders)); return true; }
     catch (e: any) { console.error(`[escalate] owner notice failed: ${e?.message ?? e}`); return false; }
   }
 
-  private format(reqs: EscalationRequest[], dropped: number, global: boolean): string {
+  private format(reqs: EscalationRequest[], dropped: number, senders?: number): string {
     const { excerptChars, summaryChars, sessionUrl, cooldownMs, globalWindowMs } = this.options;
+    const global = senders !== undefined;
     const who = (r: EscalationRequest) => `${oneLine(r.principal.id)} (role ${oneLine(r.role)})`;
     const item = (r: EscalationRequest) => {
       const link = sessionUrl(r.sessionId);
@@ -141,7 +147,7 @@ export class Escalations {
     const first = reqs[0];
     if (!global && reqs.length === 1 && !dropped) return `:rotating_light: Escalation from ${who(first)}\n${item(first)}\n\n${footer}`;
     const head = global
-      ? `${reqs.length + dropped} escalations from ${new Set(reqs.map(r => r.principal.id)).size}+ senders while immediate notices were capped (${this.options.globalMax} per ${Math.round(globalWindowMs / 60_000)} min)`
+      ? `${reqs.length + dropped} escalations from ${senders} sender${senders === 1 ? '' : 's'} while immediate notices were capped (${this.options.globalMax} per ${Math.round(globalWindowMs / 60_000)} min)`
       : `${reqs.length} escalations from ${who(first)} in the last ${Math.round(cooldownMs / 60_000)} min`;
     return `:rotating_light: ${head}${more}\n\n${reqs.map(item).join('\n\n')}\n\n${footer}`;
   }
@@ -161,10 +167,13 @@ export function __setEscalationsForTest(e: Escalations | undefined): void { curr
 /** Shutdown: deliver batched digests (they live in memory only). No-op when nothing ever escalated. */
 export function flushEscalations(): Promise<number> { return current ? current.flushAll() : Promise.resolve(0); }
 
-/** What the model tells the sender: a delivery claim only when the notice was actually handed off. */
+/** What the model tells the sender: a delivery claim only when the notice was handed off; a digest promise only when the
+ *  request is listed in one. A dropped request is only COUNTED in the digest ("+N more not shown"). */
 export const escalateReply = (status: EscalationStatus) => status === 'sent'
   ? 'Escalated: the owners have been notified.'
-  : 'Queued for the owners: this request will reach them in their next digest. Do not tell the sender they were already notified.';
+  : status === 'batched'
+    ? 'Queued for the owners: this request will reach them in their next digest. Do not tell the sender they were already notified.'
+    : 'Owners are receiving many requests right now: this one is counted in their next summary, but its details are not included. Do not tell the sender they were notified or that the owners have their request; suggest they try again later if it is urgent.';
 
 /** In-process MCP server exposing `escalate` for one turn. */
 export function escalateMcpServer(ctx: { principal: Principal; role: () => string; sessionId?: string; channel: string; excerpt?: string }) {
