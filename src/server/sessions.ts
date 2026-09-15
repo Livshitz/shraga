@@ -4,6 +4,7 @@ import path from 'node:path';
 import { homedir } from 'node:os';
 import { DATA_DIR, dataPath } from './paths.ts';
 import type { Directives } from './directives.ts';
+import type { ClaudeAccountRef } from './claude-account.ts';
 
 const SESSIONS_PATH = dataPath('sessions.json');
 
@@ -41,6 +42,9 @@ export interface SessionMeta {
   /** Engine that actually ran the last turn — ground truth beside `lastModel`, so the UI can report
    *  what executed instead of inferring the engine from the model id's shape. */
   lastEngine?: string;
+  /** Claude login the last turn ran on (claude-code engine, subscription auth only). `personal` = the
+   *  requester's own routed login (claude-account.ts), false = the box's shared login. Never a token. */
+  lastAccount?: ClaudeAccountRef;
   forkedFrom?: string;
 }
 
@@ -350,6 +354,7 @@ export function setSessionDirectives(sessionId: string, directives: NonNullable<
 // appendMessage stamps assistant messages from this map so every channel records it.
 const liveModels = new Map<string, string>();
 const liveEngines = new Map<string, string>();
+const liveAccounts = new Map<string, string>();
 
 /** Last resolved model for a session (live map first, then persisted lastModel). */
 export function getSessionModel(sessionId: string): string | undefined {
@@ -358,15 +363,22 @@ export function getSessionModel(sessionId: string): string | undefined {
 
 /** Record the runtime ground truth for a turn. `engine` is the engine that actually ran it — the
  *  pair is what the header reports, so neither half may be inferred from the other. */
-export function setSessionModel(sessionId: string, model: string, engine?: string): void {
-  if (liveModels.get(sessionId) === model && (!engine || liveEngines.get(sessionId) === engine)) return;
+export function setSessionModel(sessionId: string, model: string, engine?: string, account?: ClaudeAccountRef): void {
+  // An engine-tagged record describes a whole turn, so its account is part of it: a turn that ran
+  // on no Claude login (API key, another engine) CLEARS the previous turn's account.
+  const accountKey = account ? JSON.stringify(account) : '';
+  if (liveModels.get(sessionId) === model && (!engine || (liveEngines.get(sessionId) === engine && (liveAccounts.get(sessionId) ?? '') === accountKey))) return;
   liveModels.set(sessionId, model);
-  if (engine) liveEngines.set(sessionId, engine);
+  if (engine) { liveEngines.set(sessionId, engine); liveAccounts.set(sessionId, accountKey); }
   const sessions = loadIndex();
   const s = sessions.find((s) => s.sessionId === sessionId);
-  if (s && (s.lastModel !== model || (engine && s.lastEngine !== engine))) {
+  const accountChanged = !!engine && JSON.stringify(s?.lastAccount ?? '') !== JSON.stringify(account ?? '');
+  if (s && (s.lastModel !== model || (engine && s.lastEngine !== engine) || accountChanged)) {
     s.lastModel = model;
-    if (engine) s.lastEngine = engine;
+    if (engine) {
+      s.lastEngine = engine;
+      if (account) s.lastAccount = account; else delete s.lastAccount;
+    }
     saveIndex(sessions);
   }
 }

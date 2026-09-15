@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { summarizeText } from './summarize.ts';
 import { dataSync } from './data-sync.ts';
 import type { McpConfig } from './mcp.ts';
+import type { ClaudeAccountRef } from './claude-account.ts';
 import { loadConversation, saveConversation, appendMessage, getSession, setSessionDirectives, addTriggeredSkills, upsertSession, type ConvMessage, type ConvBlock } from './sessions.ts';
 import { createTurnAccumulator, type TurnStreamHooks } from './turn-stream.ts';
 import {
@@ -84,7 +85,7 @@ export type WsEvent =
   | { type: 'question_request'; id: string; questions: AskQuestion[] }
   | { type: 'thinking_delta'; text: string }
   | { type: 'done'; sessionId: string; stopReason?: 'end_turn' | 'max_turns_reached' | (string & {}); builtinHandled?: boolean }
-  | { type: 'model_resolved'; sessionId: string; model: string; engine: string }
+  | { type: 'model_resolved'; sessionId: string; model: string; engine: string; account?: ClaudeAccountRef }
   | { type: 'error'; message: string }
   | { type: 'stats'; sample: { t: number; cpu: number; mem: number; load: number; disk: number; diskUsedBytes?: number; diskTotalBytes?: number } };
 // Add-on engines/features emit their OWN events (e.g. a duplex voice brain's `duplex_*`) through the

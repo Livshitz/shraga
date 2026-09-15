@@ -9,7 +9,7 @@ import { randomUUID } from '@/lib/utils';
 import { ChatView } from '@/components/ChatView';
 import { MessageInput, type MessageInputHandle } from '@/components/MessageInput';
 import { ArtifactPanel } from '@/components/ArtifactPanel';
-import { ConversationHeader } from '@/components/ConversationHeader';
+import { ConversationHeader, type RunAccount } from '@/components/ConversationHeader';
 
 interface SessionDirectives {
   model?: string;
@@ -46,6 +46,8 @@ export function ConversationPane({ nodeId, sessionId }: { nodeId: string; sessio
   // Engine that ACTUALLY ran the last turn — always set/cleared together with sessionLastModel, since
   // the pair is the runtime ground truth the header reports (neither half may be inferred).
   const [sessionLastEngine, setSessionLastEngine] = useState<string | undefined>();
+  // Claude login that last turn ran on — set/cleared with the pair above (absent = not a login run / unknown).
+  const [sessionLastAccount, setSessionLastAccount] = useState<RunAccount | undefined>();
   const [multiParticipant, setMultiParticipant] = useState(false);
 
   const artifacts = useArtifacts(currentSessionId, ws.getToken, ws.token);
@@ -69,10 +71,11 @@ export function ConversationPane({ nodeId, sessionId }: { nodeId: string; sessio
       } else if (event.type === 'directives') {
         // Optimistic-then-confirm pill: drop stale ground-truth so the pill shows the just-requested
         // model. Untagged event — gate on this pane being mid-turn so idle panes don't flicker.
-        if (busyRef.current) { setSessionLastModel(undefined); setSessionLastEngine(undefined); }
+        if (busyRef.current) { setSessionLastModel(undefined); setSessionLastEngine(undefined); setSessionLastAccount(undefined); }
       } else if (event.type === 'model_resolved' && event.sessionId === currentSessionIdRef.current) {
         setSessionLastModel(event.model);
         setSessionLastEngine(event.engine);
+        setSessionLastAccount(event.account);
       }
     },
     [ws, nodeId, artifacts],
@@ -118,6 +121,7 @@ export function ConversationPane({ nodeId, sessionId }: { nodeId: string; sessio
       setSessionScheduleId(undefined);
       setSessionLastModel(undefined);
       setSessionLastEngine(undefined);
+      setSessionLastAccount(undefined);
       return;
     }
     apiFetch(`/api/sessions/${currentSessionId}/meta`, ws.getToken)
@@ -127,6 +131,7 @@ export function ConversationPane({ nodeId, sessionId }: { nodeId: string; sessio
         setSessionScheduleId(meta.scheduleId);
         setSessionLastModel(meta.lastModel);
         setSessionLastEngine(meta.lastEngine);
+        setSessionLastAccount(meta.lastAccount);
         if (meta.runStatus === 'running') conv.setBusy(true);
       })
       .catch(() => {});
@@ -228,6 +233,7 @@ export function ConversationPane({ nodeId, sessionId }: { nodeId: string; sessio
         sessionDirectives={sessionDirectives}
         sessionLastModel={sessionLastModel}
         sessionLastEngine={sessionLastEngine}
+        sessionLastAccount={sessionLastAccount}
         sessionScheduleId={sessionScheduleId}
         artifactCount={artifacts.artifacts.length}
         getToken={ws.getToken}

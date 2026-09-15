@@ -8,6 +8,7 @@ import { statSync } from 'node:fs';
 import path from 'node:path';
 import * as contacts from './contacts.ts';
 import { WORKSPACE_DIR } from './workspace.ts';
+import { claudeUsageFor, type ClaudeLoginIdentity } from './claude-usage.ts';
 
 export function claudeAccountDir(
   userEmail?: string,
@@ -19,6 +20,14 @@ export function claudeAccountDir(
   if (!contact?.id) return null;
   const dir = path.join(workspaceDir, 'users', contact.id, '.claude');
   try { return statSync(dir).isDirectory() ? dir : null; } catch { return null; }
+}
+
+/** The login a run on `dir` (null = the box default) is signed in as, for provenance. Never a token. */
+export interface ClaudeAccountRef extends ClaudeLoginIdentity { personal: boolean }
+
+export async function claudeAccountRef(dir: string | null): Promise<ClaudeAccountRef | undefined> {
+  const id = await claudeUsageFor(dir).identity();
+  return id ? { ...id, personal: !!dir } : undefined;
 }
 
 /** Route a child env to `dir`: strip inherited credentials so neither the box's API key nor its token can win. */
