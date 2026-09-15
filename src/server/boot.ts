@@ -70,6 +70,7 @@ import { claudeAccountDir } from './claude-account.ts';
 import { ClaudeLogin, ClaudeLoginError } from './claude-login.ts';
 import { getAll as getAllContacts } from './contacts.ts';
 import { artifactsRouter } from './artifacts/artifacts.routes.ts';
+import { ownerRouter } from './security/owner-routes.ts';
 import { handleArtifactToolUse } from './artifacts/artifacts.handler.ts';
 import { registerEngine } from './engine/index.ts';
 import { subscribeEvent } from './events/bus.ts';
@@ -865,6 +866,7 @@ app.get('/api/data-sync/log', requireAuth, async (_req, res) => {
 });
 
 app.use(artifactsRouter);
+app.use(ownerRouter);
 
 // Runtime feature flags for the client (env-gated, never persisted to agent-config.json).
 // ── Auth mode + local login (PUBLIC — no requireAuth) ────────────────────────

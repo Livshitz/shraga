@@ -371,4 +371,13 @@ export class Policy {
   public tokensValidAfter(principalId: string): number | undefined {
     return this.compiled.file.tokensValidAfter[principalId];
   }
+
+  /** Set `tokensValidAfter[principalId]` (epoch seconds) through save(). Refuses in fail-closed mode: saving then
+   *  would overwrite the broken-but-fixable file on disk with the owners-only fallback. */
+  public setTokensValidAfter(principalId: string, epochSec: number): void {
+    if (!this._valid) throw new Error('policy is invalid (fail-closed) — fix policy.json before revoking');
+    const next = this.current;
+    next.tokensValidAfter = { ...next.tokensValidAfter, [principalId]: epochSec };
+    this.save(next);
+  }
 }

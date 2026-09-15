@@ -57,6 +57,10 @@ const GATED: [string, string, unknown?][] = [
   ['POST', '/api/skills/gate-probe/duplicate', { newName: 'gate-probe-2' }],
   ['POST', '/api/skills/gate-probe/rename', { newName: 'gate-probe-3' }],
   ['PUT', '/api/skills-defaults', []],
+  ['POST', '/api/owner/tokens/revoke', { principalId: 'user:x@y.test' }],
+  ['GET', '/api/owner/api-keys'],
+  ['POST', '/api/owner/api-keys', { label: 'x', role: 'member' }],
+  ['DELETE', '/api/owner/api-keys/nope'],
 ];
 
 describe('owner-gated admin routes', () => {
@@ -149,6 +153,45 @@ describe('MCP OAuth consent requires an interactive login', () => {
 
       const denies = sec.audit.query({ limit: 100, type: 'auth.deny' }).items.filter(r => r.target === 'oauth:consent');
       expect(denies.map(r => r.reason).sort()).toEqual(['non-interactive:apikey', 'non-interactive:internal']);
+    } finally { sec.options.isActive = prevActive; }
+  });
+});
+
+describe('owner routes (/api/owner/*) for an owner', () => {
+  test('api keys: create (expiry) → authenticates → listed without secret → revoke → 401', async () => {
+    const created = await (await call(ownerTok, 'POST', '/api/owner/api-keys', { label: 'owner-probe', expiresAt: Date.now() + 60_000 })).json();
+    expect(created.key).toMatch(/^uck_/);
+    expect((await call(created.key, 'GET', '/api/config')).status).toBe(200);
+    const list = (await (await call(ownerTok, 'GET', '/api/owner/api-keys')).json()).keys as Record<string, unknown>[];
+    const row = list.find(k => k.id === created.id)!;
+    expect(row).toMatchObject({ label: 'owner-probe', expiresAt: created.expiresAt });
+    expect(JSON.stringify(list)).not.toContain(created.key);
+    expect((await call(ownerTok, 'DELETE', `/api/owner/api-keys/${created.id}`)).status).toBe(200);
+    expect((await call(created.key, 'GET', '/api/config')).status).toBe(401);
+    expect((await call(ownerTok, 'POST', '/api/owner/api-keys', { role: 'owner' })).status).toBe(400);
+  });
+
+  test('token revoke: refused while PASSIVE; once active, the revoked user\'s old token 401s and a fresh login works', async () => {
+    const passive = await call(ownerTok, 'POST', '/api/owner/tokens/revoke', { principalId: `user:${BOB}` });
+    expect(passive.status).toBe(409);
+    expect((await call(ownerTok, 'POST', '/api/owner/tokens/revoke', { principalId: 'nope' })).status).toBe(400);
+
+    const sec = (await import('../runtime.ts')).security()!;
+    const prevActive = sec.options.isActive;
+    sec.options.isActive = () => true;
+    try {
+      sec.activate(); // loads/migrates the policy as the active instance would
+      expect(sec.policy.valid).toBe(true);
+      expect((await call(ownerTok, 'POST', '/api/owner/api-keys', { label: 'member', role: 'member' })).status).toBe(200);
+      expect((await call(bobTok, 'GET', '/api/config')).status).toBe(200);
+      await Bun.sleep(1100); // 1s granularity
+      const r = await call(ownerTok, 'POST', '/api/owner/tokens/revoke', { principalId: `user:${BOB}` });
+      expect(r.status).toBe(200);
+      expect((await r.json()).principalId).toBe(`user:${BOB}`);
+      expect((await call(bobTok, 'GET', '/api/config')).status).toBe(401);
+      const { localLogin } = await import('../../auth.ts');
+      expect((await call(localLogin(BOB, 'pw-bob')!, 'GET', '/api/config')).status).toBe(200);
+      expect((await call(ownerTok, 'GET', '/api/config')).status).toBe(200);
     } finally { sec.options.isActive = prevActive; }
   });
 });

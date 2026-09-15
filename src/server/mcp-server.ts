@@ -12,9 +12,9 @@ import { getAllSessions, loadConversation, isSessionLocked } from './sessions.ts
 import * as scheduler from './scheduler/index.ts';
 import { buildReport } from './downtime.ts';
 import { getAgentConfig, MAX_TURNS_NOTICE } from './claude.ts';
-import { validateApiKey } from './api-keys.ts';
+import { apiKeyPrincipal, validateApiKey } from './api-keys.ts';
 import { verifyMcpToken } from './auth.ts';
-import { fromApiKey, fromAuthUser, fromInternal, type Principal } from './security/principal.ts';
+import { fromAuthUser, fromInternal, type Principal } from './security/principal.ts';
 import { security, admitTurn, requestIp } from './security/runtime.ts';
 import { makeProgressEmitter } from './mcp-progress.ts';
 import { lookupIdempotent, rememberIdempotent } from './idempotency.ts';
@@ -449,7 +449,7 @@ export function mountMcpServer(app: Application, deps: McpServerDeps) {
     }
     if (!caller && authHeader?.startsWith('uck_')) {
       const k = validateApiKey(authHeader);
-      if (k) { caller = { uid: k.uid, email: k.email, principal: fromApiKey(k) }; via = 'mcp:apikey'; }
+      if (k) { caller = { uid: k.uid, email: k.email, principal: apiKeyPrincipal(k) }; via = 'mcp:apikey'; }
     }
     if (!caller && authHeader?.startsWith('mcp_')) {
       const id = verifyMcpToken(authHeader);
