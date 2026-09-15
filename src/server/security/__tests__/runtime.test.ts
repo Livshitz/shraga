@@ -40,7 +40,9 @@ describe('API-key principal role = creator role capped by the key role', () => {
     expect(resolvePrincipal(rt.policy, key('mem@sec-runtime.test', 'operator')).role).toBe('member');
     expect(resolvePrincipal(rt.policy, key('mem@sec-runtime.test', 'guest')).role).toBe('guest');
     expect(resolvePrincipal(rt.policy, key('mem@sec-runtime.test')).role).toBe('member');
-    expect(resolvePrincipal(rt.policy, key(OWNER)).role).toBe('owner');
+    expect(resolvePrincipal(rt.policy, key(OWNER)).role).toBe('operator'); // never owner: capped at the top role below it
+    expect(resolvePrincipal(rt.policy, key(OWNER, 'operator')).role).toBe('operator');
+    expect(resolvePrincipal(rt.policy, key(OWNER, 'ghost')).role).toBe(rt.policy.current.default);
   });
 });
 

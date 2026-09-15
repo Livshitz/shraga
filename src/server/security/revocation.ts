@@ -13,7 +13,9 @@ import { security } from './runtime.ts';
 /** Canonical id for a revocable principal (`user:` / `internal:` — the kinds a token verifier checks), built by the
  *  same principal builders the verifiers use (emails lowercased). Other kinds ⇒ null: nothing would ever check them. */
 export function revocablePrincipalId(input: string): string | null {
-  const m = /^(user|internal):(\S+)$/.exec(String(input ?? '').trim());
+  const s = String(input ?? '').trim();
+  if (/[\p{Cc}\p{Cf}\p{Z}]/u.test(s)) return null; // invisible/control/space chars (e.g. U+200B) would never match a verifier's id
+  const m = /^(user|internal):(\S+)$/.exec(s);
   if (!m) return null;
   return m[1] === 'user' ? fromAuthUser({ uid: m[2], email: m[2] }).id : fromInternal({ uid: m[2] }).id;
 }

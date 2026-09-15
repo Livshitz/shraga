@@ -107,6 +107,7 @@ describe('tokensValidAfter', () => {
     expect(revocablePrincipalId('user:FbUidCase')).toBe('user:FbUidCase'); // a bare uid is case-sensitive
     expect(revocablePrincipalId('internal:Uid1')).toBe('internal:Uid1');
     for (const bad of ['apikey:abc', 'email:a@b.test', 'slack:U1', 'nope', 'user:']) expect(revocablePrincipalId(bad)).toBeNull();
+    for (const bad of [`user:${M}​`, `user:⁠${M}`, `user:Mi xed@x.test`, `internal:u`, `user:Mi﻿xed@x.test`]) expect(revocablePrincipalId(bad)).toBeNull();
 
     const tok = signMcpToken('uid-mixed', M.toLowerCase(), 'refresh');
     expect(verifyMcpToken(tok)?.uid).toBe('uid-mixed');

@@ -7,19 +7,20 @@
 // Writes are gated on `isActive` (a PASSIVE standby shares DATA_DIR and must not append to data/audit, nor let the
 // Policy migrate/save/mark or judge tamper; `activate()` re-loads the policy on promotion), and noisy events are
 // deduped per key per window, so a busy client isn't one line per request.
-import { Policy, type PolicyOptions, type Resolved, type TamperReason } from './policy.ts';
+import { OWNER_ROLE, Policy, type PolicyOptions, type Resolved, type TamperReason } from './policy.ts';
 import { Audit, type AuditEvent, type AuditOptions } from './audit.ts';
 import { Guard, type GuardOptions, type TurnAdmission } from './guard.ts';
 import { fromAuthUser, type Principal } from './principal.ts';
 
-/** principal → role. An API key acts for its creator: effective role = the creator's resolved role, CAPPED by the
- *  key's `attrs.role` when set (lower rank wins — a key never exceeds its creator). */
+/** principal → role. An API key acts for its creator: effective role = min(creator's resolved role, the key's
+ *  `attrs.role` when set, the highest role below owner) — a key never exceeds its creator and is never owner. */
 export function resolvePrincipal(policy: Policy, p: Principal): Resolved {
   if (p.kind !== 'apikey') return policy.resolve(p);
-  const creator = policy.resolve(fromAuthUser({ uid: String(p.attrs.uid ?? ''), email: p.email }));
-  if (typeof p.attrs.role !== 'string') return creator;
+  let r = policy.resolve(fromAuthUser({ uid: String(p.attrs.uid ?? ''), email: p.email }));
+  if (r.role === OWNER_ROLE) r = policy.belowOwner();
+  if (typeof p.attrs.role !== 'string') return r;
   const cap = policy.effective(Infinity, p.attrs.role); // the named role (unknown ⇒ the policy default)
-  return cap.rank < creator.rank ? cap : creator;
+  return cap.rank < r.rank ? cap : r;
 }
 
 export interface Decision {

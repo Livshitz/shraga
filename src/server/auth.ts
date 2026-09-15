@@ -174,7 +174,11 @@ export interface AuthUser {
   principal: Principal;
 }
 
-const authUser = (uid: string, email: string, principal: Principal): AuthUser => ({ uid, email, isOwner: isOwnerEmail(email), principal });
+// Owner comes only from an interactive login, or a server-minted scoped internal token acting for one. An API key
+// never acts as owner, whatever its creator's email or role cap.
+const authUser = (uid: string, email: string, principal: Principal): AuthUser => ({
+  uid, email, principal, isOwner: (principal.kind === 'user' || principal.kind === 'internal') && isOwnerEmail(email),
+});
 const internalUser = (t: { uid: string; email: string }) => authUser(t.uid, t.email, fromInternal(t));
 const apiKeyUser = (k: { id: string; uid: string; email: string; role?: string }) => authUser(k.uid, k.email, apiKeyPrincipal(k));
 

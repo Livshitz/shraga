@@ -18,7 +18,9 @@ A key acts for its creator. Optional `role` caps it (effective role = the lower 
 - `DELETE /api/api-keys/:id` — delete a key (its creator or an owner). Takes effect immediately.
 - Owner only: `GET|POST /api/owner/api-keys`, `DELETE /api/owner/api-keys/:id` — same, but POST also takes `role` and `expiresAt`.
 
-**Revoking sessions/tokens** (owner only): `POST /api/owner/tokens/revoke` with `{ "principalId": "user:<email|uid>" }` or `"internal:<uid>"` invalidates every login, MCP OAuth token/code and internal token issued to that principal before now. It does not touch API keys — delete the key instead.
+**Revoking sessions/tokens** (owner only): `POST /api/owner/tokens/revoke` with `{ "principalId": "user:<email|uid>" }` or `"internal:<uid>"` invalidates every login, MCP OAuth token/code and scoped internal token issued to that principal before now. It does not touch API keys — delete the key instead — nor the legacy shared `INTERNAL_API_TOKEN` (`internal:agent-internal` is refused; rotate the env var).
+
+An API key never acts as owner: owner-only routes answer 403 for any key (even an owner's), its role is capped below owner, and creating keys requires an interactive login.
 
 **Generating a key via curl** (from an agent session):
 ```bash
