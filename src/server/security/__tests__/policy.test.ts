@@ -255,3 +255,78 @@ describe('migration', () => {
     expect(pol.resolve(fromAuthUser({ uid: 'a', email: 'a@x.com' })).role).toBe('anonymous');
   });
 });
+
+describe('PASSIVE standby (shares DATA_DIR — must never write)', () => {
+  const sec = () => path.join(dir, 'security');
+  const writeRaw = (p: PolicyFile) => { mkdirSync(sec(), { recursive: true }); writeFileSync(path.join(sec(), 'policy.json'), JSON.stringify(p)); };
+
+  test('missing file: no migration, no marker, no dir; fail closed in memory; save() refuses with a logged error', () => {
+    writeFileSync(path.join(dir, 'whitelist.json'), JSON.stringify(['a@x.com']));
+    const errors: string[] = [];
+    const pol = mk({ isActive: () => false, log: { ...quiet, error: (m: string) => errors.push(m) } });
+    expect(pol.valid).toBe(false);
+    expect(pol.resolve(fromAuthUser({ uid: 'a', email: 'a@x.com' })).role).toBe('anonymous');
+    expect(pol.resolve(fromAuthUser({ uid: 'b', email: 'boss@owner.com' })).role).toBe('owner');
+    expect(existsSync(sec())).toBe(false);
+    expect(() => pol.save(seeded())).toThrow(/PASSIVE/);
+    expect(errors.join()).toMatch(/save refused/);
+    expect(existsSync(sec())).toBe(false);
+  });
+
+  test('existing file loads (no marker written); the active twin saving it is NOT tamper while passive', () => {
+    writeRaw(seeded());
+    const tampers: any[] = [];
+    const pol = mk({ isActive: () => false, onTamper: (t) => tampers.push(t) });
+    expect(pol.valid).toBe(true);
+    expect(pol.resolve(fromAuthUser({ uid: 'u', email: 'op@7chairs.org' })).role).toBe('operator');
+    expect(existsSync(path.join(sec(), '.migrated'))).toBe(false);
+    const next = seeded(); next.default = 'guest';
+    writeRaw(next); // the active instance's save() — foreign provenance from this process's view
+    expect(pol.reload()).toBe(false);
+    unlinkSync(pol.options.path);
+    expect(pol.reload()).toBe(false);
+    expect(tampers).toHaveLength(0);
+  });
+
+  test('watcher events while passive are ignored (no tamper); after activate() the watcher is live', async () => {
+    let active = false;
+    const tampers: any[] = [];
+    const errors: string[] = [];
+    const pol = mk({ isActive: () => active, watch: true, onTamper: (t) => tampers.push(t), log: { ...quiet, error: (m: string) => errors.push(m) } });
+    try {
+      writeRaw(seeded()); // the active twin migrates/saves — dir did not exist when the standby booted
+      await Bun.sleep(400);
+      expect(tampers).toHaveLength(0);
+      active = true; pol.activate();
+      const evil = seeded(); evil.default = 'operator';
+      writeRaw(evil);
+      for (let i = 0; i < 40 && !tampers.length; i++) await Bun.sleep(50);
+      expect(tampers.map(t => t.reason)).toContain('hash-mismatch');
+      expect(errors.join()).not.toMatch(/watch failed/);
+    } finally { pol.close(); }
+  });
+
+  test('activate(): migrates if still missing, and trusts disk as at boot', () => {
+    writeFileSync(path.join(dir, 'whitelist.json'), JSON.stringify(['a@x.com']));
+    let active = false;
+    const tampers: any[] = [];
+    const pol = mk({ isActive: () => active, onTamper: (t) => tampers.push(t) });
+    active = true; pol.activate();
+    expect(existsSync(pol.options.path)).toBe(true);
+    expect(existsSync(path.join(sec(), '.migrated'))).toBe(true);
+    expect(pol.valid).toBe(true);
+    expect(pol.resolve(fromAuthUser({ uid: 'a', email: 'a@x.com' })).role).toBe('operator');
+
+    // A standby that booted on an older file, then the active twin saved a newer one: promotion loads the newer one.
+    rmSync(sec(), { recursive: true, force: true });
+    writeRaw(seeded());
+    active = false;
+    const standby = mk({ isActive: () => active, onTamper: (t) => tampers.push(t) });
+    const next = seeded(); next.bindings.unshift({ match: { kind: 'user', emailIn: ['new@x.com'] }, role: 'member' });
+    writeRaw(next);
+    active = true; standby.activate();
+    expect(standby.resolve(fromAuthUser({ uid: 'n', email: 'new@x.com' })).role).toBe('member');
+    expect(standby.reload()).toBe(true); // disk content is now the trusted provenance
+    expect(tampers).toHaveLength(0);
+  });
+});

@@ -5,6 +5,9 @@
 // The chain is ONE chain across months and restarts: on construct the last hash is recovered by reading the
 // newest file backwards from its end (never the whole file). The first-ever line carries GENESIS_HASH.
 // Head state is shared per resolved dir within the process, so several Audit instances on one dir append to one chain.
+// Across PROCESSES (blue-green flip: promoted instance + the old one's drain lines) the head self-syncs: each append
+// first stats its target file, and if it isn't the file/size we last left, re-runs tail recovery before linking.
+// Not a lock: two processes appending in the same instant can still fork (verify() reports it).
 //
 // Crash safety: a partial last line (crash mid-write, failed append) is sealed with '\n' on recovery and after a
 // failed append, so the next record starts on its own line and links to the last GOOD hash. verify() still reports
@@ -18,7 +21,7 @@
 // deleting the newest file(s) or tail lines leaves a valid shorter chain. Neither is detectable without an external
 // head anchor; the OS append-only flag (`chattr +a`) + offsite copy (tamper-protection step) are the mitigation.
 import { createHash } from 'node:crypto';
-import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync } from 'node:fs';
+import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { dataPath } from '../paths.ts';
 
@@ -146,8 +149,19 @@ const realDir = (dir: string): string => {
 };
 
 /** Chain head per real dir, shared by every Audit instance in the process. */
-interface Head { lastHash: string; lastMonth: string; healthy: boolean }
+interface Head {
+  lastHash: string; lastMonth: string; healthy: boolean;
+  /** The file and its size right after our last append/recovery. Anything else on disk = another process wrote. */
+  lastWrite: { file: string; size: number } | null;
+}
+/** Size of `file` (0 if missing or no file). */
+const sizeOf = (file: string): number => {
+  if (!file) return 0;
+  try { return statSync(file).size; } catch (e: any) { if (e.code === 'ENOENT') return 0; throw e; }
+};
 const heads = new Map<string, Head>();
+/** Test-only: forget shared heads, so the next Audit on a dir gets its own state (simulates another process). */
+export function __resetAuditHeadsForTest(): void { heads.clear(); }
 
 export class AuditOptions {
   /** Directory holding YYYY-MM.jsonl files. */
@@ -167,7 +181,7 @@ export class Audit {
   public constructor(options?: Partial<AuditOptions>) {
     this.options = { ...new AuditOptions(), ...options };
     const key = realDir(this.options.dir);
-    this.state = heads.get(key) ?? { lastHash: GENESIS_HASH, lastMonth: '', healthy: true };
+    this.state = heads.get(key) ?? { lastHash: GENESIS_HASH, lastMonth: '', healthy: true, lastWrite: null };
     heads.set(key, this.state);
     this.recover();
   }
@@ -193,17 +207,21 @@ export class Audit {
     try {
       const files = this.files();
       let hash = GENESIS_HASH;
-      if (files.length && sealTail(path.join(this.options.dir, files[files.length - 1]))) {
-        this.options.log.warn(`[audit] sealed partial last line in ${files[files.length - 1]}`);
-      }
+      const newest = files.length ? path.join(this.options.dir, files[files.length - 1]) : '';
+      if (newest && sealTail(newest)) this.options.log.warn(`[audit] sealed partial last line in ${files[files.length - 1]}`);
+      // Size first, tail read bounded by it: a line another process appends meanwhile shows up as a size mismatch
+      // on our next append (→ recover again) instead of being absorbed unseen.
+      const size = sizeOf(newest);
       found: for (const f of [...files].reverse()) {
-        for (const { line } of reverseLines(path.join(this.options.dir, f))) {
+        const fp = path.join(this.options.dir, f);
+        for (const { line } of reverseLines(fp, fp === newest ? size : undefined)) {
           const r = parse(line);
           if (r) { hash = r.hash; break found; }
           this.options.log.warn(`[audit] skipping unparseable tail line in ${f}`);
         }
       }
       s.lastHash = hash; s.lastMonth = files.length ? files[files.length - 1].slice(0, 7) : ''; s.healthy = true;
+      s.lastWrite = { file: newest, size };
     } catch (e: any) {
       s.healthy = false;
       this.options.log.error(`[audit] chain recovery failed (${this.options.dir}), appends disabled until it succeeds: ${e.message}`);
@@ -250,7 +268,17 @@ export class Audit {
       if (!s.healthy) this.recover();
       if (!s.healthy) throw new Error('audit dir unreadable; chain head unknown');
       const now = new Date(this.options.clock());
-      const month = [now.toISOString().slice(0, 7), s.lastMonth].sort()[1];
+      const monthNow = () => [now.toISOString().slice(0, 7), s.lastMonth].sort()[1];
+      let month = monthNow();
+      file = path.join(this.options.dir, `${month}.jsonl`);
+      let size = sizeOf(file);
+      // Self-sync: the target isn't the file/size we last left it at → another process appended or rotated
+      // (blue-green flip: the promoted instance and the old one's drain lines). Re-read the tail before linking.
+      if (!s.lastWrite || s.lastWrite.file !== file || s.lastWrite.size !== size) {
+        this.recover();
+        if (!s.healthy) throw new Error('audit dir unreadable; chain head unknown');
+        month = monthNow(); file = path.join(this.options.dir, `${month}.jsonl`); size = sizeOf(file);
+      }
       const base = { ts: now.toISOString(), type: event.type } as Omit<AuditRecord, 'hash'>; // prevHash set last, for line readability
       const opt = { principal: this.str(event.principal), role: this.str(event.role), sessionId: this.str(event.sessionId), target: this.str(event.target), reason: this.str(event.reason), meta: this.sanitize(event.meta) };
       for (const [k, v] of Object.entries(opt)) if (v !== undefined) (base as any)[k] = v;
@@ -258,8 +286,10 @@ export class Audit {
       const rec: AuditRecord = { ...base, hash: hashOf(base) };
       mkdirSync(this.options.dir, { recursive: true });
       file = path.join(this.options.dir, `${month}.jsonl`);
-      appendFileSync(file, `${JSON.stringify(rec)}\n`, { mode: 0o600 });
+      const line = `${JSON.stringify(rec)}\n`;
+      appendFileSync(file, line, { mode: 0o600 });
       s.lastHash = rec.hash; s.lastMonth = month;
+      s.lastWrite = { file, size: size + Buffer.byteLength(line) }; // expected, not re-stat'd: a racing writer must still mismatch
       return rec;
     } catch (e: any) {
       this._failures++;

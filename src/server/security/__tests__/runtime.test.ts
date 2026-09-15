@@ -1,8 +1,9 @@
 import { describe, test, expect, beforeAll, afterAll, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { SecurityRuntime, initSecurity, __resetSecurityForTest } from '../runtime.ts';
+import { defaultPolicy } from '../policy.ts';
 import { fromAuthUser, fromInternal, fromSlack } from '../principal.ts';
 import type { AuditRecord } from '../audit.ts';
 
@@ -53,6 +54,23 @@ describe('SecurityRuntime.decide', () => {
     rt.decide(fromAuthUser({ uid: 'o', email: OWNER }));
     rt.authDeny('http', 'missing-token', '1.2.3.4');
     expect(all(rt)).toHaveLength(0);
+  });
+
+  test('PASSIVE: policy writes nothing (no migration/marker), save refuses; activate() migrates and resolves', () => {
+    let active = false;
+    const notices: string[] = [];
+    const rt = tmpRuntime({ isActive: () => active, notify: (t: string) => notices.push(t), log: { info() {}, warn() {}, error() {} } });
+    const secDir = path.dirname(rt.policy.options.path);
+    expect(existsSync(secDir)).toBe(false);
+    expect(rt.policy.valid).toBe(false);
+    expect(rt.decide(fromAuthUser({ uid: 'o', email: OWNER })).role).toBe('owner');
+    expect(() => rt.policy.save(defaultPolicy())).toThrow(/PASSIVE/);
+    expect(existsSync(secDir)).toBe(false);
+    active = true; rt.activate();
+    expect(existsSync(rt.policy.options.path)).toBe(true);
+    expect(existsSync(path.join(secDir, '.migrated'))).toBe(true);
+    expect(rt.policy.valid).toBe(true);
+    expect(notices).toHaveLength(0);
   });
 
   test('policy tamper → policy.tamper audit + owner notice', () => {

@@ -41,6 +41,11 @@ const PERMISSION_MODES = [
 
 interface SessionDirectives { engine?: string; model?: string; turns?: number; thinking?: string }
 
+/** True if any field of `next` differs from `prev` (value-wise; key order irrelevant). */
+const changedFrom = (prev: AgentConfig, next: AgentConfig) =>
+  [...new Set([...Object.keys(prev), ...Object.keys(next)])]
+    .some((k) => JSON.stringify((prev as any)[k]) !== JSON.stringify((next as any)[k]));
+
 interface Props {
   getToken: () => Promise<string | null>;
   onSaved?: (config: AgentConfig) => void;
@@ -62,15 +67,22 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
   // Save scope for the runtime knobs (engine/model/turns/thinking): this conversation, or the
   // global default every channel without its own pin uses — Slack, email, scheduler included.
   const [applyGlobally, setApplyGlobally] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Global config is owner-only (PUT /api/config 403s otherwise); a session's own runtime knobs are not.
+  const [isOwner, setIsOwner] = useState<boolean>();
+  const canGlobal = isOwner === true;
+  const canRuntime = canGlobal || !!sessionId;
 
   useEffect(() => {
     if (!open) return;
     setApplyGlobally(false); // scope is a per-open decision, never a sticky one
+    setError(null);
     getToken().then((token) => {
       if (!token) return;
       fetch('/api/config', { headers: { Authorization: `Bearer ${token}` } })
         .then((r) => r.json())
-        .then((global: AgentConfig) => {
+        .then(({ isOwner: owner, ...global }: AgentConfig & { isOwner?: boolean }) => {
+          setIsOwner(!!owner);
           globalRef.current = global;
           // For an active session, the runtime knobs reflect the session's own directives
           // (falling back to the global default when the session hasn't overridden them).
@@ -87,8 +99,17 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
     });
   }, [open, getToken, sessionId, sessionDirectives]);
 
+  /** Throws the server's error message on a non-2xx, so save() surfaces it instead of closing. */
+  const send = async (url: string, body: unknown, auth: Record<string, string>) => {
+    const res = await fetch(url, { method: 'PUT', headers: auth, body: JSON.stringify(body) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  };
+
   const save = async () => {
     setSaving(true);
+    setError(null);
     const token = await getToken();
     const auth = { Authorization: `Bearer ${token ?? ''}`, 'Content-Type': 'application/json' };
     try {
@@ -99,21 +120,26 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
         const runtime: SessionDirectives = applyGlobally
           ? { engine: '', model: '', turns: null, thinking: '' } as any // '' / null = clear the pin
           : { engine: config.engine, model: config.model, turns: config.maxTurns, thinking: config.thinking };
-        const r = await fetch(`/api/sessions/${sessionId}/directives`, { method: 'PUT', headers: auth, body: JSON.stringify(runtime) })
-          .then((res) => res.json()).catch((e) => { console.warn('[config] directives save failed', e); return null; });
+        const r = await send(`/api/sessions/${sessionId}/directives`, runtime, auth);
         if (r?.directives) onDirectivesSaved?.(r.directives);
         const global: AgentConfig = applyGlobally ? config : {
           ...config,
           engine: globalRef.current.engine, model: globalRef.current.model,
           maxTurns: globalRef.current.maxTurns, thinking: globalRef.current.thinking,
         };
-        await fetch('/api/config', { method: 'PUT', headers: auth, body: JSON.stringify(global) });
-        onSaved?.(global);
+        // A session-only save with no global field changed has nothing to persist globally.
+        if (changedFrom(globalRef.current, global)) {
+          await send('/api/config', global, auth);
+          onSaved?.(global);
+        }
       } else {
-        await fetch('/api/config', { method: 'PUT', headers: auth, body: JSON.stringify(config) });
+        await send('/api/config', config, auth);
         onSaved?.(config);
       }
       setOpen(false);
+    } catch (e: any) {
+      console.warn('[config] save failed', e);
+      setError(e.message || 'Save failed');
     } finally {
       setSaving(false);
     }
@@ -171,16 +197,19 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
                 Engine, Model, Max Turns & Thinking apply to{' '}
                 <strong>{applyGlobally ? 'every conversation' : 'this conversation'}</strong>. Other settings are always global defaults.
               </p>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" checked={applyGlobally} onChange={(e) => setApplyGlobally(e.target.checked)} />
-                <span>Apply globally — also the default for Slack, email &amp; scheduled runs</span>
-              </label>
+              {canGlobal && (
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked={applyGlobally} onChange={(e) => setApplyGlobally(e.target.checked)} />
+                  <span>Apply globally — also the default for Slack, email &amp; scheduled runs</span>
+                </label>
+              )}
             </div>
           )}
           {multiEngine && (
             <div>
               <label className="text-sm font-medium mb-1.5 block">Engine</label>
               <select
+                disabled={!canRuntime}
                 value={config.engine ?? ''}
                 onChange={(e) => {
                   const engine = e.target.value || undefined;
@@ -200,6 +229,7 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
           <div>
             <label className="text-sm font-medium mb-1.5 block">Model</label>
             <select
+              disabled={!canRuntime}
               value={config.model ?? ''}
               onChange={(e) => setConfig((c) => ({ ...c, model: e.target.value || undefined }))}
               className={selectClass}
@@ -227,6 +257,7 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
           <div>
             <label className="text-sm font-medium mb-1.5 block">Permission Mode</label>
             <select
+              disabled={!canGlobal}
               value={config.permissionMode ?? 'acceptEdits'}
               onChange={(e) => setConfig((c) => ({ ...c, permissionMode: e.target.value }))}
               className={selectClass}
@@ -243,6 +274,7 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
               type="number"
               min={1}
               max={200}
+              disabled={!canRuntime}
               value={config.maxTurns ?? 50}
               onChange={(e) => setConfig((c) => ({ ...c, maxTurns: Number(e.target.value) || 50 }))}
             />
@@ -251,6 +283,7 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
           <div>
             <label className="text-sm font-medium mb-1.5 block">Thinking</label>
             <select
+              disabled={!canRuntime}
               value={config.thinking ?? ''}
               onChange={(e) => setConfig((c) => ({ ...c, thinking: (e.target.value || undefined) as AgentConfig['thinking'] }))}
               className={selectClass}
@@ -265,6 +298,7 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
           <div>
             <label className="text-sm font-medium mb-1.5 block">Effort</label>
             <select
+              disabled={!canGlobal}
               value={config.effort ?? ''}
               onChange={(e) => setConfig((c) => ({ ...c, effort: (e.target.value || undefined) as AgentConfig['effort'] }))}
               className={selectClass}
@@ -281,6 +315,7 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
             <label className="text-sm font-medium mb-1.5 block">Allowed Tools</label>
             <Input
               placeholder="Read, Edit, Bash, WebSearch, Glob, LS"
+              disabled={!canGlobal}
               value={(config.allowedTools ?? []).join(', ')}
               onChange={(e) => setConfig((c) => ({
                 ...c,
@@ -298,6 +333,7 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
             <button
               type="button"
               role="switch"
+              disabled={!canGlobal}
               aria-checked={config.skillDiscovery !== false}
               onClick={() => setConfig((c) => ({ ...c, skillDiscovery: c.skillDiscovery === false ? true : false }))}
               className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${config.skillDiscovery !== false ? 'bg-primary' : 'bg-muted'}`}
@@ -310,6 +346,7 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
             <label className="text-sm font-medium mb-1.5 block">System Prompt (optional)</label>
             <Textarea
               placeholder="Additional instructions appended to Claude's system prompt…"
+              disabled={!canGlobal}
               value={config.systemPrompt ?? ''}
               onChange={(e) => setConfig((c) => ({ ...c, systemPrompt: e.target.value || undefined }))}
               rows={4}
@@ -317,10 +354,18 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
           </div>
         </DialogBody>
 
-        <DialogFooter>
-          <Button onClick={save} disabled={saving}>
-            {saving ? 'Saving…' : 'Save Configuration'}
-          </Button>
+        <DialogFooter className="flex-col items-stretch gap-2">
+          {error && <p className="text-sm text-destructive">{error}</p>}
+          {isOwner === false && (
+            <p className="text-xs text-muted-foreground">
+              {sessionId ? 'Only an owner can change the global defaults — runtime knobs apply to this conversation.' : 'Read-only — only an owner can change the agent config.'}
+            </p>
+          )}
+          {canRuntime && (
+            <Button onClick={save} disabled={saving}>
+              {saving ? 'Saving…' : 'Save Configuration'}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

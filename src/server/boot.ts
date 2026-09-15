@@ -117,6 +117,8 @@ export async function bootServer(__reg: BootRegistrations = {}): Promise<ServerH
 const PASSIVE_FLAG = process.env.SHRAGA_PASSIVE ?? process.env.UNCLAW_PASSIVE;
 const PASSIVE = PASSIVE_FLAG === '1' || PASSIVE_FLAG === 'true';
 if (PASSIVE) console.log('[server] PASSIVE mode — schedulers, consumers and background writers disabled');
+// Flipped by activateConsumers() (blue-green promotion). Declared up here: initSecurity reads it synchronously.
+let activated = !PASSIVE;
 
 // Local-only prep (git config, gitignore, untracking). The NETWORK half — fetch/merge — is
 // deliberately NOT awaited here; it runs via dataSync.syncOnBoot() AFTER listen(). See syncOnBoot().
@@ -129,7 +131,7 @@ function bootDataSync(): void {
 }
 await loadShragaConfig();
 // Process-wide policy + audit (shadow mode: decide + audit, never deny). Audit writes only on the
-// active instance — a PASSIVE standby shares DATA_DIR. `activated` is read lazily (declared below).
+// active instance — a PASSIVE standby shares DATA_DIR. `activated` is declared above.
 initSecurity({ isActive: () => !PASSIVE || activated });
 // Programmatic engines register through the same seam an overlay uses — BEFORE initEngines() so
 // getAvailableEngines() includes them and a directive can resolve to one immediately.
@@ -447,14 +449,15 @@ app.put('/api/mcps', requireAuth, requireOwner('Only an owner can change MCP ser
   res.json({ ok: true });
 });
 
-app.get('/api/config', requireAuth, (_req, res) => {
+app.get('/api/config', requireAuth, (req, res) => {
   // `claudeAuthSource` is derived server state (not persisted config) — the spread always overrides
   // any stale value, so it can never round-trip into agent-config.json even if a client echoes it back.
-  res.json({ ...getAgentConfig(), claudeAuthSource: getClaudeAuthSource() });
+  // `isOwner` is the same kind of derived field: the client hides owner-only controls on it (PUT strips it).
+  res.json({ ...getAgentConfig(), isOwner: !!(req as any).user?.isOwner, claudeAuthSource: getClaudeAuthSource() });
 });
 
 app.put('/api/config', requireAuth, requireOwner('Only an owner can change the agent config'), (req, res) => {
-  const { claudeAuthSource: _drop, ...config } = (req.body ?? {}) as AgentConfig & { claudeAuthSource?: string };
+  const { claudeAuthSource: _drop, isOwner: _dropOwner, ...config } = (req.body ?? {}) as AgentConfig & { claudeAuthSource?: string; isOwner?: boolean };
   saveAgentConfig(config);
   res.json({ ok: true });
 });
@@ -1393,10 +1396,10 @@ registerSpaCatchAll(app, distPath);
 // ── Runtime promotion (blue-green flip) ──────────────────────────────────────
 // A passive instance can be promoted to active once traffic has been flipped to it:
 // starts every consumer/writer that passive boot skipped. One-way; idempotent-guarded.
-let activated = !PASSIVE;
 async function activateConsumers() {
   activated = true;
   console.log('[server] ACTIVATING — starting consumers and background writers');
+  security()?.activate(); // passive Policy never wrote; now re-load from disk as trusted (migrates if still missing)
   await dataSync.init();
   bootDataSync();
   syncVendorRepos().catch(err => console.warn('[vendor-sync] error:', (err as Error).message));
