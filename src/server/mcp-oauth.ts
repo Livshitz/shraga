@@ -14,12 +14,13 @@
 import type { Express, Request, Response, NextFunction } from 'express';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { randomBytes, createHash } from 'node:crypto';
-import { requireAuth, signMcpToken, verifyMcpToken, type AuthUser } from './auth.ts';
+import { MCP_TOKEN_TTL, requireAuth, signMcpToken, verifyMcpToken, type AuthUser } from './auth.ts';
 import { dataPath } from './paths.ts';
 import { security } from './security/runtime.ts';
 
-const ACCESS_TTL = 3600; // 1h
-const REFRESH_TTL = 60 * 60 * 24 * 30; // 30d
+// Shared with auth.ts: a legacy token's implied issued-at is exp - TTL, so the TTLs must be the ones signed with.
+const ACCESS_TTL = MCP_TOKEN_TTL.access; // 1h
+const REFRESH_TTL = MCP_TOKEN_TTL.refresh; // 30d
 const CODE_TTL_MS = 60_000; // 1min
 
 const CLIENTS_PATH = () => dataPath('oauth-clients.json');
