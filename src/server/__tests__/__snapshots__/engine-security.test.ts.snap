@@ -1,0 +1,95 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`flag OFF: spawn config is today's matches the pre-enforcement snapshot 1`] = `
+{
+  "allowedTools": [
+    "Read",
+    "Edit",
+    "Bash",
+    "WebSearch",
+    "Glob",
+    "LS",
+    "ToolSearch",
+  ],
+  "canUseTool": {
+    "bash": "allow",
+    "bashPrintenv": "deny",
+    "mcp": "allow",
+    "read": "allow",
+    "readEnv": "deny",
+    "write": "allow",
+  },
+  "disallowedTools": [
+    "Skill",
+  ],
+  "envDropped": [],
+  "envInjected": {
+    "BASH_DEFAULT_TIMEOUT_MS": "60000",
+    "BASH_MAX_TIMEOUT_MS": "600000",
+    "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+    "INTERNAL_API_TOKEN": "<signed:u-sec:sec@x.test>",
+    "SHRAGA_SESSION_ID": "eng-sec-fixed",
+    "SHRAGA_USER_EMAIL": "sec@x.test",
+    "SHRAGA_USER_UID": "u-sec",
+    "UNCLAW_SESSION_ID": "eng-sec-fixed",
+    "UNCLAW_USER_EMAIL": "sec@x.test",
+    "UNCLAW_USER_UID": "u-sec",
+  },
+  "extraArgKeys": [
+    "mcp-config",
+  ],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": 1,
+        "matcher": "Bash",
+      },
+      {
+        "hooks": 1,
+        "matcher": "mcp__mcp-slack-use__post_slack_.*",
+      },
+      {
+        "hooks": 1,
+        "matcher": "mcp__mcp-firebase-(?:prod|lab)__get_db.*",
+      },
+    ],
+  },
+  "includePartialMessages": true,
+  "keys": [
+    "abortController",
+    "agents",
+    "allowedTools",
+    "canUseTool",
+    "cwd",
+    "disallowedTools",
+    "env",
+    "extraArgs",
+    "hooks",
+    "includePartialMessages",
+    "maxTurns",
+    "model",
+    "permissionMode",
+    "settingSources",
+    "skills",
+    "spawnClaudeCodeProcess",
+    "systemPrompt",
+    "tools",
+  ],
+  "maxTurns": 50,
+  "mcpFileServers": [
+    "mcp-notion",
+    "mcp-slack-use",
+  ],
+  "mcpServers": undefined,
+  "model": "claude-sonnet-5",
+  "permissionMode": "default",
+  "settingSources": [
+    "project",
+  ],
+  "systemPromptSha": "187b9dd327b085cc",
+  "tools": {
+    "preset": "claude_code",
+    "type": "preset",
+  },
+}
+`;
