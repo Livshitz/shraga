@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { DataSync, extractCommitSubject, fallbackCommitMessage, isChurnPath, withTimeout } from '../data-sync.ts';
 
+test('data git ignores the guard blocks file (live per-instance state, a pull must not overwrite it)', () => {
+  expect((DataSync as unknown as { GITIGNORE_ENTRIES: string[] }).GITIGNORE_ENTRIES).toContain('security/blocks.json');
+});
+
 describe('extractCommitSubject', () => {
   test('fence-only reply yields nothing (prod commit 1f6c20a was literally "```")', () => {
     expect(extractCommitSubject('```')).toBe('');

@@ -1867,12 +1867,21 @@ function handleConnection(ws: WebSocket, session: WsSession) {
         session.steerPending.set(steerSid, steerText);
         ac.abort();
       } else {
-        ac.abort();
-        appendMessage(steerSid, { id: crypto.randomUUID(), role: 'user', blocks: [{ type: 'text', text: steerText }], channel: 'web', senderName: session.email.split('@')[0] });
-        console.log(`[ws] External steer takeover for ${steerSid.slice(0, 8)}`);
-        session.busySessions.add(steerSid);
-        session.lastSessionId = steerSid;
-        runStream(ws, session, steerSid, steerText, undefined, getMcpConfig(session.uid), true);
+        // A takeover starts a NEW turn on this connection — same guard as a normal WS turn, checked BEFORE the abort
+        // so a denied steer leaves the running turn alone.
+        const admission = admitTurn(session.principal ?? fromInternal({ uid: session.uid, email: session.email, lane: 'ws-unresolved' }), { ip: session.ip, channel: 'ws' });
+        if (!admission.ok) {
+          return send(ws, { type: 'error', sessionId: steerSid, reason: admission.reason, retryAfter: admission.retryAfter,
+            message: admission.status === 403 ? 'Access blocked' : `Too many requests — try again in ${admission.retryAfter ?? 60}s` });
+        }
+        try {
+          ac.abort();
+          appendMessage(steerSid, { id: crypto.randomUUID(), role: 'user', blocks: [{ type: 'text', text: steerText }], channel: 'web', senderName: session.email.split('@')[0] });
+          console.log(`[ws] External steer takeover for ${steerSid.slice(0, 8)}`);
+          session.busySessions.add(steerSid);
+          session.lastSessionId = steerSid;
+          await runStream(ws, session, steerSid, steerText, undefined, getMcpConfig(session.uid), true);
+        } finally { admission.release(); }
       }
       return;
     }

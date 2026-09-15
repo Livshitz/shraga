@@ -217,6 +217,8 @@ common ones:
 | `DATA_DIR` | `./data` | Where state lives |
 | `AUTH_PROVIDER` | `local` | `local` (username/password) or `firebase` |
 | `OWNERS` | *(unset)* | Comma-separated list of admin emails |
+| `SECURITY_ENFORCE` | *(unset)* | `true` = the guard (blocklist, rate limits, auto-block, turn ceiling) denies; unset = shadow (audit only) |
+| `TRUSTED_PROXIES` | *(unset)* | IPs/CIDRs whose `X-Forwarded-For` is trusted. Set `127.0.0.1,::1` when Caddy/cloudflared on the same host is the only ingress; otherwise every client shares the proxy IP |
 
 ### The config file (`data/shraga.config.ts`)
 

@@ -23,6 +23,7 @@ let app: ShragaInstance;
 let base: string;
 let ownerTok: string, bobTok: string;
 let engineRuns = 0;
+let slowAborted = false;
 
 beforeAll(async () => {
   process.env.OWNERS = OWNER;
@@ -34,6 +35,16 @@ beforeAll(async () => {
   registerEngine({
     name: 'guard-probe-engine',
     async *stream() { engineRuns++; yield { type: 'text_delta', text: 'hi' }; yield { type: 'done', sessionId: 's' }; },
+    getModels: () => [],
+  } as unknown as Parameters<typeof registerEngine>[0]);
+  // Holds its session lock until aborted (or 5s) — the "external" run a WS steer takes over.
+  registerEngine({
+    name: 'guard-slow-engine',
+    async *stream(o: { abortController?: AbortController }) {
+      const sig = o.abortController?.signal;
+      await new Promise<void>(r => { const t = setTimeout(r, 5_000); sig?.addEventListener('abort', () => { slowAborted = true; clearTimeout(t); r(); }); });
+      yield { type: 'done', sessionId: 's' };
+    },
     getModels: () => [],
   } as unknown as Parameters<typeof registerEngine>[0]);
   const { createShraga } = await import('../../../index.ts');
@@ -71,6 +82,52 @@ describe('POST /api/chat guard', () => {
     expect(ok.status).toBe(200);
     expect((await ok.json()).text).toBe('hi');
     expect(engineRuns).toBe(before + 1);
+  });
+
+  test('enforce: WS steer takeover of an external run goes through the same admission', async () => {
+    process.env.SECURITY_ENFORCE = 'true';
+    const { isSessionLocked } = await import('../../sessions.ts');
+    const until = async (cond: () => boolean) => { for (let i = 0; i < 100 && !cond(); i++) await new Promise(r => setTimeout(r, 20)); return cond(); };
+    const hold = async (sid: string) => {
+      slowAborted = false;
+      const r = await fetch(`${base}/api/chat`, { method: 'POST', headers: { authorization: `Bearer ${ownerTok}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: '[engine:guard-slow-engine] hold', sessionId: sid }) });
+      expect(r.status).toBe(200);
+      expect(await until(() => isSessionLocked(sid))).toBe(true);
+    };
+    const steer = async (tok: string, sid: string) => {
+      const ws = new WebSocket(`${base.replace('http', 'ws')}/ws`);
+      const msgs: any[] = [];
+      ws.onmessage = e => msgs.push(JSON.parse(String(e.data)));
+      await new Promise(r => { ws.onopen = r; });
+      ws.send(JSON.stringify({ type: 'auth', token: tok }));
+      expect(await until(() => msgs.some(m => m.type === 'auth_ok'))).toBe(true);
+      ws.send(JSON.stringify({ type: 'steer', sessionId: sid, text: '[engine:guard-probe-engine] take over' }));
+      return { ws, msgs };
+    };
+
+    // Denied principal: error with the guard reason, the external run is NOT aborted, no engine run.
+    const sidA = `steer-deny-${Date.now()}`;
+    await hold(sidA);
+    const before = engineRuns;
+    const bob = await steer(bobTok, sidA);
+    expect(await until(() => bob.msgs.some(m => m.type === 'error'))).toBe(true);
+    expect(bob.msgs.find(m => m.type === 'error')).toMatchObject({ sessionId: sidA, reason: 'rate-zero' });
+    await new Promise(r => setTimeout(r, 200));
+    expect(slowAborted).toBe(false);
+    expect(isSessionLocked(sidA)).toBe(true);
+    expect(engineRuns).toBe(before);
+    bob.ws.close();
+    (await import('../../sessions.ts')).getSessionAbortController(sidA)?.abort(); // don't leave the held run for stop() to drain
+    expect(await until(() => !isSessionLocked(sidA))).toBe(true);
+
+    // Admitted principal: the takeover still aborts the external run and runs the new turn.
+    const sidB = `steer-ok-${Date.now()}`;
+    await hold(sidB);
+    const owner = await steer(ownerTok, sidB);
+    expect(await until(() => engineRuns === before + 1)).toBe(true);
+    expect(slowAborted).toBe(true);
+    owner.ws.close();
   });
 
   test('shadow: the same non-owner is admitted and the turn runs', async () => {
