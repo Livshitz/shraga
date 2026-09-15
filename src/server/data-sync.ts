@@ -213,30 +213,27 @@ export class DataSync {
     } catch (err) {
       console.error(`${TAG} Boot sync FAILED — serving stale data until the next pull:`, (err as Error).message);
     }
-    // Defer heavy sync I/O (reads all tracked files + execSync) to avoid blocking
-    // WS connections and page loads during startup.
+    // Defer the post-boot scans (both async, but they still read/spawn a lot) past startup
+    // traffic — WS connections and page loads.
     setTimeout(() => {
       this.scanForConflictMarkers()
         .catch(err => console.warn(`${TAG} Post-init conflict scan failed:`, (err as Error).message))
-        // execSync inside the audit blocks too — keep it off the scan's tick so the two
-        // never add up into one long freeze.
-        .then(() => new Promise<void>(r => setImmediate(r)))
         .then(() => this.runIntegrityAudit())
         .catch(err => console.warn(`${TAG} Post-init integrity audit failed:`, (err as Error).message));
     }, 60_000);
   }
 
-  /** Compare HEAD against HEAD~1 to catch regressions. Notifies owner — never auto-reverts. */
-  private runIntegrityAudit(): void {
+  /** Compare HEAD against HEAD~1 to catch regressions. Notifies owner — never auto-reverts.
+   *  Must stay async: the old execSync-per-file audit froze the event loop ~5 min on prod. */
+  private async runIntegrityAudit(): Promise<void> {
     try {
-      const { audit } = require('./integrity-audit.ts');
+      const { audit } = await import('./integrity-audit.ts');
       // Churn paths are exempt for the same reason the shrink guard exempts them: a per-run worker
        // log is written by one leg, rewritten by the next, and truncated whenever a run is killed
       // mid-write. "invalid-json" on one of those is the normal end of an interrupted run, not
       // corruption of shared data — and since the file stays in HEAD, the audit re-reported it on
       // every sync. The audit exists to catch contacts.json being gutted.
-      const issues = (audit('HEAD~1') as { kind: string; file: string; detail: string }[])
-        .filter(i => !isChurnPath(i.file));
+      const issues = (await audit('HEAD~1', DATA_DIR)).filter(i => !isChurnPath(i.file));
       if (issues.length) {
         console.warn(`${TAG} ⚠️ DATA INTEGRITY: ${issues.length} issue(s) detected after sync:`);
         for (const { kind, file, detail } of issues) {

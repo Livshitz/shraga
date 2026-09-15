@@ -4,6 +4,12 @@
 //      MCP_EXTRA_HEADERS — optional JSON object of extra headers sent with every request,
 //      for servers that need a second credential beyond the bearer token (e.g. an
 //      upstream app behind a proxy that gates its own admin ops on its own header).
+//      MCP_BRIDGE_TIMEOUT_MS — per-request bound for protocol calls (initialize, tools/list…), default 60s.
+//      MCP_BRIDGE_TOOL_TIMEOUT_MS — bound for tools/call, default 30min (a sync post_chat turn has no
+//      server-side wall clock). Without a bound, a frozen server hung the client forever on "connecting…".
+const envMs = (v: string | undefined, fallback: number) => (Number(v) > 0 ? Number(v) : fallback);
+const REQUEST_TIMEOUT_MS = envMs(process.env.MCP_BRIDGE_TIMEOUT_MS, 60_000);
+const TOOL_TIMEOUT_MS = envMs(process.env.MCP_BRIDGE_TOOL_TIMEOUT_MS, 30 * 60_000);
 const baseUrl = (process.env.SHRAGA_URL || process.env.MCP_URL || process.env.UNCLAW_URL || 'http://localhost:3033').replace(/\/$/, '');
 const mcpPath = process.env.SHRAGA_MCP_PATH || process.env.MCP_PATH || '/mcp';
 const apiKey = process.env.SHRAGA_API_KEY || process.env.MCP_API_KEY || process.env.UNCLAW_API_KEY;
@@ -33,11 +39,23 @@ async function sendMessage(message: any): Promise<void> {
   if (sessionId) headers['mcp-session-id'] = sessionId;
   Object.assign(headers, extraHeaders);
 
-  const res = await fetch(`${baseUrl}${mcpPath}`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(message),
-  });
+  const limit = message?.method === 'tools/call' ? TOOL_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+  // The signal also bounds the body read below, not just the headers.
+  const signal = AbortSignal.timeout(limit);
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch(`${baseUrl}${mcpPath}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(message),
+      signal,
+    });
+    text = res.status === 204 ? '' : await res.text();
+  } catch (e: any) {
+    if (signal.aborted) throw new Error(`no response from ${baseUrl} for ${message?.method ?? 'message'} within ${limit}ms`);
+    throw e;
+  }
 
   // Capture session ID from server on initialize
   const newSession = res.headers.get('mcp-session-id');
@@ -49,7 +67,6 @@ async function sendMessage(message: any): Promise<void> {
 
   if (contentType.includes('text/event-stream')) {
     // SSE: parse and forward each data line
-    const text = await res.text();
     for (const line of text.split('\n')) {
       if (line.startsWith('data: ')) {
         const data = line.slice(6).trim();
@@ -58,9 +75,8 @@ async function sendMessage(message: any): Promise<void> {
         }
       }
     }
-  } else {
-    const body = await res.text();
-    if (body) process.stdout.write(body + '\n');
+  } else if (text) {
+    process.stdout.write(text + '\n');
   }
 }
 
