@@ -51,9 +51,9 @@ export function fromApiKey(k: { id?: string; uid: string; email?: string | null 
   return make('apikey', k.id ?? k.uid, true, k.email, { uid: k.uid });
 }
 
-/** Scoped internal token (agent subprocess acting for a user). */
-export function fromInternal(t: { uid: string; email?: string | null }): Principal {
-  return make('internal', t.uid, true, t.email, { uid: t.uid });
+/** Scoped internal token (agent subprocess acting for a user), or a no-human run (`lane`: wake, scheduler, retry…). */
+export function fromInternal(t: { uid: string; email?: string | null; lane?: string }): Principal {
+  return make('internal', t.uid, true, t.email, { uid: t.uid, ...(t.lane ? { lane: t.lane } : {}) });
 }
 
 export function anonymous(attrs: Record<string, unknown> = {}): Principal {

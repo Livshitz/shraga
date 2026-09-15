@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll } from 'bun:test';
+import { fromInternal } from '../security/principal.ts';
 
 /**
  * Skill triggers are authored as natural phrases, but a real brief inserts words into them.
@@ -90,7 +91,7 @@ registerEngine({
 
 async function directivesFor(prompt: string) {
   seen = undefined;
-  for await (const _ of streamChat({ prompt: `[engine:trigger-probe] ${prompt}`, uid: 'u1', userEmail: 'e@x.com' })) { /* drain */ }
+  for await (const _ of streamChat({ prompt: `[engine:trigger-probe] ${prompt}`, uid: 'u1', userEmail: 'e@x.com', principal: fromInternal({ uid: 'u1' }) })) { /* drain */ }
   return seen;
 }
 

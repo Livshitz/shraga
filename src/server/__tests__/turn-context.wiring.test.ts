@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach } from 'bun:test';
+import { fromInternal } from '../security/principal.ts';
 import { tmpdir } from 'node:os';
 
 /**
@@ -38,6 +39,7 @@ async function runTurn(prompt: string, turnHints?: Record<string, unknown>): Pro
     prompt: `[engine:wiring-probe-engine] ${prompt}`,
     sessionId: `wiring-${Math.random().toString(36).slice(2)}`,
     uid: 'u-wiring',
+    principal: fromInternal({ uid: 'u-wiring' }),
     userEmail: 'wiring@example.test',
     turnHints,
   })) { /* drain */ }

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { json } from 'itty-router';
 import { RouterWrapper, captureMcpProgress } from 'edge.libx.js/build/main.js';
 import type { Application, Request, Response } from 'express';
@@ -13,6 +14,8 @@ import { buildReport } from './downtime.ts';
 import { getAgentConfig, MAX_TURNS_NOTICE } from './claude.ts';
 import { validateApiKey } from './api-keys.ts';
 import { verifyMcpToken } from './auth.ts';
+import { fromApiKey, fromAuthUser, fromInternal, type Principal } from './security/principal.ts';
+import { security } from './security/runtime.ts';
 import { makeProgressEmitter } from './mcp-progress.ts';
 import { lookupIdempotent, rememberIdempotent } from './idempotency.ts';
 import type { WsEvent } from './claude.ts';
@@ -31,6 +34,7 @@ export type RunChatTurn = (
     userName?: string;
     abortController?: AbortController;
     context?: Record<string, string>;
+    principal: Principal;
   },
   hooks?: { onEvent?: (ev: WsEvent) => void },
 ) => Promise<RunChatTurnResult>;
@@ -39,9 +43,21 @@ export interface McpServerDeps {
   runChatTurn: RunChatTurn;
 }
 
-// Per-request caller identity, set by the /mcp Express handler before forwarding to MCP tool handlers.
-// Safe because Node is single-threaded and the handler awaits the full MCP response.
-let currentCaller: { uid: string; email: string } | null = null;
+export interface McpCaller { uid: string; email: string; principal: Principal }
+
+/** Identity of the legacy raw INTERNAL_API_TOKEN caller — unchanged effective identity, now an internal principal. */
+const LEGACY_INTERNAL_CALLER: McpCaller = {
+  uid: 'agent-internal', email: 'agent@internal',
+  principal: fromInternal({ uid: 'agent-internal', email: 'agent@internal', lane: 'mcp-legacy-token' }),
+};
+
+// Per-request caller identity. AsyncLocalStorage, not a module global: two concurrent /mcp requests
+// (a long sync post_chat + a second caller) used to overwrite — and then null — each other's caller.
+// The store is entered around the WHOLE /mcp handler, SSE pipe included.
+const mcpCallerStore = new AsyncLocalStorage<McpCaller>();
+
+/** The authenticated /mcp caller of the current request — valid anywhere in its async chain, across awaits. */
+export function currentMcpCaller(): McpCaller | undefined { return mcpCallerStore.getStore(); }
 
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -286,7 +302,7 @@ export function createShragaMcp(deps: McpServerDeps) {
       const { prompt, sessionId, sync = true, clientRequestId } = body as { prompt?: string; sessionId?: string; sync?: boolean; clientRequestId?: string };
       if (!prompt) return json({ error: 'prompt required' }, { status: 400 });
 
-      const caller = currentCaller || { uid: 'agent-internal', email: 'agent@internal' };
+      const caller = currentMcpCaller() ?? LEGACY_INTERNAL_CALLER;
       const idemKey = clientRequestId || str(req.headers?.get?.('idempotency-key'));
 
       // Idempotency: a retried submit with the same key reuses the session that first
@@ -301,7 +317,7 @@ export function createShragaMcp(deps: McpServerDeps) {
       // instead of double-submitting and creating duplicate sessions.
       const sid = sessionId || `api-${crypto.randomUUID()}`;
       if (idemKey) rememberIdempotent(caller.uid, idemKey, sid);
-      const turn = { prompt, sessionId: sid, uid: caller.uid, userEmail: caller.email, context: { source: 'mcp', user: caller.email } };
+      const turn = { prompt, sessionId: sid, uid: caller.uid, userEmail: caller.email, principal: caller.principal, context: { source: 'mcp', user: caller.email } };
 
       if (sync === false) {
         // Reject a duplicate before responding 'accepted' (lock is acquired inside the turn).
@@ -413,31 +429,37 @@ export function mountMcpServer(app: Application, deps: McpServerDeps) {
     const authHeader = req.headers.authorization?.replace('Bearer ', '');
     const internalToken = req.headers['x-internal-token'] as string | undefined;
 
-    let authed = false;
-    let caller: { uid: string; email: string } | null = null;
+    let caller: McpCaller | null = null;
+    let via = 'mcp';
     if (internalToken && process.env.INTERNAL_API_TOKEN) {
       const secret = process.env.INTERNAL_API_TOKEN;
-      authed = internalToken.length === secret.length &&
-        timingSafeEqual(Buffer.from(internalToken), Buffer.from(secret));
+      if (internalToken.length === secret.length && timingSafeEqual(Buffer.from(internalToken), Buffer.from(secret))) {
+        caller = LEGACY_INTERNAL_CALLER; via = 'mcp:internal';
+      }
     }
-    if (!authed && authHeader?.startsWith('uck_')) {
-      caller = validateApiKey(authHeader);
-      authed = !!caller;
+    if (!caller && authHeader?.startsWith('uck_')) {
+      const k = validateApiKey(authHeader);
+      if (k) { caller = { uid: k.uid, email: k.email, principal: fromApiKey(k) }; via = 'mcp:apikey'; }
     }
-    if (!authed && authHeader?.startsWith('mcp_')) {
+    if (!caller && authHeader?.startsWith('mcp_')) {
       const id = verifyMcpToken(authHeader);
-      if (id && id.kind === 'access') { caller = { uid: id.uid, email: id.email }; authed = true; }
+      if (id && id.kind === 'access') { caller = { uid: id.uid, email: id.email, principal: fromAuthUser(id) }; via = 'mcp:oauth'; }
     }
-    if (!authed) {
+    if (!caller) {
+      security()?.authDeny('mcp', authHeader || internalToken ? 'invalid-credential' : 'missing-credential', req.ip);
       // Point MCP clients (claude.ai et al.) at our OAuth discovery so they can run the auth handshake.
       const proto = (req.get('x-forwarded-proto') || req.protocol).split(',')[0];
       const base = `${proto}://${req.get('host')}`;
       res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"`);
       return void res.status(401).json({ error: 'Unauthorized — provide API key or complete OAuth' });
     }
-    currentCaller = caller;
+    security()?.authAllow(caller.principal, via);
+    return mcpCallerStore.run(caller, () => bridge(req, res));
+  });
 
-    // Bridge Express Request → Web API Request → MCPAdapter.httpHandler → Express Response.
+  // Bridge Express Request → Web API Request → MCPAdapter.httpHandler → Express Response. Runs inside
+  // the caller's AsyncLocalStorage context (entered above), which the tool handlers read.
+  async function bridge(req: Request, res: Response): Promise<void> {
     const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
     const webReq = new globalThis.Request(url, {
       method: req.method,
@@ -454,8 +476,8 @@ export function mountMcpServer(app: Application, deps: McpServerDeps) {
       res.status(webRes.status);
       webRes.headers.forEach((val, key) => res.setHeader(key, val));
       // For a Streamable-HTTP SSE response (progress streaming), pipe the body so frames flush
-      // as the agent emits them. currentCaller stays set until the pipe completes (the tool
-      // handler reads it inside the stream). Otherwise buffer the single JSON response.
+      // as the agent emits them. The caller context spans the pipe (the tool handler reads it inside
+      // the stream). Otherwise buffer the single JSON response.
       if (webRes.body && (webRes.headers.get('content-type') || '').includes('text/event-stream')) {
         (res as any).flushHeaders?.();
         const reader = webRes.body.getReader();
@@ -473,10 +495,8 @@ export function mountMcpServer(app: Application, deps: McpServerDeps) {
       console.error('[mcp-server] handler error:', e);
       if (!res.headersSent) res.status(500).json({ error: 'MCP handler error' });
       else res.end();
-    } finally {
-      currentCaller = null;
     }
-  });
+  }
 
   console.log('[mcp-server] MCP endpoint mounted at /mcp');
 }

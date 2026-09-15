@@ -51,6 +51,9 @@ import { startEventDispatcher } from './events/dispatcher.ts';
 import { seedOperators } from './contacts.ts';
 import { dataSync } from './data-sync.ts';
 import { mountMcpServer } from './mcp-server.ts';
+import { fromInternal, type Principal } from './security/principal.ts';
+import { initSecurity, security } from './security/runtime.ts';
+import { requireOwner } from './security/owner-only.ts';
 import { lookupIdempotent, rememberIdempotent } from './idempotency.ts';
 import { createApiKey, deleteApiKey, listApiKeys } from './api-keys.ts';
 import { addUnread, markRead as markUnread, getUnreads } from './unread.ts';
@@ -125,6 +128,9 @@ function bootDataSync(): void {
   dataSync.syncOnBoot().catch(err => console.error('[data-sync] boot sync error:', (err as Error).message));
 }
 await loadShragaConfig();
+// Process-wide policy + audit (shadow mode: decide + audit, never deny). Audit writes only on the
+// active instance — a PASSIVE standby shares DATA_DIR. `activated` is read lazily (declared below).
+initSecurity({ isActive: () => !PASSIVE || activated });
 // Programmatic engines register through the same seam an overlay uses — BEFORE initEngines() so
 // getAvailableEngines() includes them and a directive can resolve to one immediately.
 for (const e of __reg.engines ?? []) registerEngine(e);
@@ -426,7 +432,8 @@ app.get('/api/mcps', requireAuth, (req, res) => {
   res.json(entries);
 });
 
-app.put('/api/mcps', requireAuth, (req, res) => {
+// Owner-only: an MCP entry can carry a stdio `command` the server spawns.
+app.put('/api/mcps', requireAuth, requireOwner('Only an owner can change MCP servers'), (req, res) => {
   const user = (req as any).user;
   const globalNames = new Set(Object.keys(getGlobalMcpConfig()));
   const incoming = req.body as McpConfig;
@@ -446,7 +453,7 @@ app.get('/api/config', requireAuth, (_req, res) => {
   res.json({ ...getAgentConfig(), claudeAuthSource: getClaudeAuthSource() });
 });
 
-app.put('/api/config', requireAuth, (req, res) => {
+app.put('/api/config', requireAuth, requireOwner('Only an owner can change the agent config'), (req, res) => {
   const { claudeAuthSource: _drop, ...config } = (req.body ?? {}) as AgentConfig & { claudeAuthSource?: string };
   saveAgentConfig(config);
   res.json({ ok: true });
@@ -472,7 +479,7 @@ app.get('/api/skills/:name', requireAuth, (req, res) => {
   res.json(skill);
 });
 
-app.put('/api/skills/:name', requireAuth, (req, res) => {
+app.put('/api/skills/:name', requireAuth, requireOwner('Only an owner can change skills'), (req, res) => {
   try {
     const { content } = req.body as { content: string };
     saveSkill(String(req.params.name), content ?? '');
@@ -480,14 +487,14 @@ app.put('/api/skills/:name', requireAuth, (req, res) => {
   } catch (e: any) { res.status(400).json({ error: e.message }); }
 });
 
-app.delete('/api/skills/:name', requireAuth, (req, res) => {
+app.delete('/api/skills/:name', requireAuth, requireOwner('Only an owner can change skills'), (req, res) => {
   try {
     deleteSkill(String(req.params.name));
     res.json({ ok: true });
   } catch (e: any) { res.status(400).json({ error: e.message }); }
 });
 
-app.post('/api/skills/:name/duplicate', requireAuth, (req, res) => {
+app.post('/api/skills/:name/duplicate', requireAuth, requireOwner('Only an owner can change skills'), (req, res) => {
   try {
     const { newName } = req.body as { newName: string };
     const skill = duplicateSkill(String(req.params.name), newName);
@@ -495,7 +502,7 @@ app.post('/api/skills/:name/duplicate', requireAuth, (req, res) => {
   } catch (e: any) { res.status(400).json({ error: e.message }); }
 });
 
-app.post('/api/skills/:name/rename', requireAuth, (req, res) => {
+app.post('/api/skills/:name/rename', requireAuth, requireOwner('Only an owner can change skills'), (req, res) => {
   try {
     const { newName } = req.body as { newName: string };
     renameSkill(String(req.params.name), newName);
@@ -507,7 +514,7 @@ app.get('/api/skills-defaults', requireAuth, (_req, res) => {
   res.json(getDefaultSkills());
 });
 
-app.put('/api/skills-defaults', requireAuth, (req, res) => {
+app.put('/api/skills-defaults', requireAuth, requireOwner('Only an owner can change skills'), (req, res) => {
   setDefaultSkills(req.body);
   res.json({ ok: true });
 });
@@ -669,6 +676,7 @@ async function runChatTurn(
     userName?: string;
     abortController?: AbortController;
     context?: Record<string, string>;
+    principal: Principal;
   },
   hooks?: { onEvent?: (ev: WsEvent) => void },
 ): Promise<RunChatTurnResult> {
@@ -695,6 +703,7 @@ async function runChatTurn(
 
   try {
     const blocks = await consumeStream(streamChat({
+      principal: opts.principal,
       prompt,
       sessionId: sid,
       uid,
@@ -756,6 +765,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     sessionId: sid,
     uid: user.uid,
     userEmail: user.email,
+    principal: user.principal,
     abortController: apiAbortController,
     context: { source: 'api', user: user.email },
   });
@@ -905,7 +915,7 @@ app.post('/api/push/unregister', requireAuth, (req, res) => {
 
 // ── API Keys ──────────────────────────────────────────────────────────────────
 app.get('/api/api-keys', requireAuth, (req, res) => {
-  res.json({ keys: listApiKeys() });
+  res.json({ keys: listApiKeys((req as any).user as import('./auth.ts').AuthUser) });
 });
 app.post('/api/api-keys', requireAuth, (req, res) => {
   const user = (req as any).user as import('./auth.ts').AuthUser;
@@ -953,6 +963,8 @@ const wss = new WebSocketServer({ noServer: true });
 interface WsSession {
   uid: string;
   email: string;
+  /** Set on ws auth; undefined until then. */
+  principal?: Principal;
   busySessions: Set<string>;
   autoApprove: boolean;
   abortControllers: Map<string, AbortController>;
@@ -1325,7 +1337,7 @@ initPolls({
       // NOTHING until it ended — and an add-on engine's subagent events were dropped outright — so a
       // turn that dispatched a worker was indistinguishable from one that only claimed to.
       return await consumeStream(
-        streamChat({ prompt, sessionId, uid, userEmail, mcpServers: getMcpConfig(uid), abortController, onPermissionRequest: async () => ({ allow: true }) }),
+        streamChat({ principal: fromInternal({ uid, email: userEmail, lane: 'wake' }), prompt, sessionId, uid, userEmail, mcpServers: getMcpConfig(uid), abortController, onPermissionRequest: async () => ({ allow: true }) }),
         undefined,
         {
           maxResultChars: STREAMED_RESULT_MAX,
@@ -1550,6 +1562,7 @@ async function runStream(ws: WebSocket, session: WsSession, sid: string, promptT
   try {
     let eventCount = 0;
     for await (const event of streamChat({
+      principal: session.principal ?? fromInternal({ uid: session.uid, email: session.email, lane: 'ws-unresolved' }),
       prompt: promptText,
       attachments,
       sessionId: sid,
@@ -1748,6 +1761,8 @@ function handleConnection(ws: WebSocket, session: WsSession) {
         const user = await verifyBearer(msg.token); // pluggable (local|firebase), not firebase-only
         session.uid = user.uid;
         session.email = user.email;
+        session.principal = user.principal;
+        security()?.authAllow(user.principal, 'ws:bearer');
         session.autoApprove = getAutoApprove(user.uid);
         console.log(`[ws] Authenticated: ${user.email} (${user.uid}) autoApprove=${session.autoApprove}`);
         send(ws, { type: 'auth_ok', uid: user.uid, email: user.email, buildId: SERVER_BUILD_ID });
@@ -1763,6 +1778,7 @@ function handleConnection(ws: WebSocket, session: WsSession) {
           }
         }
       } catch (err: any) {
+        security()?.authDeny('ws:bearer', 'invalid-bearer');
         console.error(`[ws] Auth failed:`, err.message);
         send(ws, { type: 'auth_error', message: err.message });
         ws.close();
@@ -2000,6 +2016,8 @@ async function retryWebSession(session: SessionMeta, prompt: string) {
     ];
     registerLivePartial(sid, collectPartial);
     for await (const ev of streamChat({
+      // Recovery of an interrupted web turn: no live human, the session's owner marked internal.
+      principal: fromInternal({ uid: session.uid, email: session.userEmail, lane: 'web-retry' }),
       prompt,
       sessionId: sid,
       uid: session.uid,

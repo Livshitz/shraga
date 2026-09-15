@@ -25,6 +25,8 @@ import { getUserContextBlock } from './user-context.ts';
 import { collectTurnContext } from './turn-context.ts';
 import { DATA_DIR, dataPath } from './paths.ts';
 import * as contacts from './contacts.ts';
+import type { Principal } from './security/principal.ts';
+import { security } from './security/runtime.ts';
 import { resolveAndGetEngine, ModelUnavailableError } from './engine/index.ts';
 
 const CONFIG_PATH = dataPath('agent-config.json');
@@ -197,7 +199,10 @@ function applyCompactMarkers(conv: ConvMessage[]): ConvMessage[] {
 
 export interface AttachmentMeta { url: string; name: string; mimeType: string; path: string }
 
-export async function* streamChat(opts: {
+export interface StreamChatOpts {
+  /** Who this turn runs for. Required so every channel is enumerated by the compiler. Shadow mode:
+   *  resolved + audited (turn.start/turn.end), not yet enforced. */
+  principal: Principal;
   prompt: string;
   attachments?: AttachmentMeta[];
   images?: string[];
@@ -217,7 +222,39 @@ export async function* streamChat(opts: {
    * where an add-on's contributor reads its own keys. */
   turnHints?: Record<string, unknown>;
   context?: Record<string, string>;
-}): AsyncGenerator<WsEvent> {
+}
+
+/** Run one agent turn. Shadow-mode security wrapper: resolves the principal's role/profile and audits
+ *  turn.start / turn.end around the unchanged turn. Auditing can never alter or break the turn. */
+export async function* streamChat(opts: StreamChatOpts): AsyncGenerator<WsEvent> {
+  const sec = security();
+  if (!sec) { yield* runTurn(opts); return; }
+  const { principal, sessionId } = opts;
+  let role: string | undefined;
+  try {
+    const d = sec.decide(principal, sessionId);
+    role = d.role;
+    sec.record({ type: 'turn.start', principal: principal.id, role, sessionId, meta: { kind: principal.kind, lane: principal.attrs.lane, source: opts.context?.source, profile: d.profile, rank: d.rank, wouldDeny: d.wouldDeny } });
+  } catch (e: any) { console.error('[security] turn.start audit failed:', e.message); }
+  const started = Date.now();
+  let outcome = 'closed';
+  try {
+    for await (const ev of runTurn(opts)) {
+      if (ev.type === 'done') outcome = 'done';
+      else if (ev.type === 'error') outcome = 'error';
+      yield ev;
+    }
+    if (outcome === 'closed') outcome = 'done';
+  } catch (e) {
+    outcome = 'threw';
+    throw e;
+  } finally {
+    try { sec.record({ type: 'turn.end', principal: principal.id, role, sessionId, reason: outcome, meta: { ms: Date.now() - started } }); }
+    catch (e: any) { console.error('[security] turn.end audit failed:', e.message); }
+  }
+}
+
+async function* runTurn(opts: StreamChatOpts): AsyncGenerator<WsEvent> {
   const config = getAgentConfig();
   const { prompt: cleanPrompt, directives: parsed, unresolvedModel } = parseDirectives(opts.prompt);
 

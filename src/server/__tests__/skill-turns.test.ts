@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll } from 'bun:test';
+import { fromInternal } from '../security/principal.ts';
 import type { AgentEngine } from '../engine/types.ts';
 import type { Directives } from '../directives.ts';
 
@@ -32,7 +33,7 @@ const probe: AgentEngine = {
 
 async function run(prompt: string, sessionId?: string): Promise<Directives> {
   seen = undefined;
-  for await (const _ of streamChat({ prompt: `[engine:turns-probe] ${prompt}`, uid: 'u1', userEmail: 'e@x.com', sessionId })) { /* drain */ }
+  for await (const _ of streamChat({ prompt: `[engine:turns-probe] ${prompt}`, uid: 'u1', userEmail: 'e@x.com', sessionId, principal: fromInternal({ uid: 'u1' }) })) { /* drain */ }
   return seen!;
 }
 

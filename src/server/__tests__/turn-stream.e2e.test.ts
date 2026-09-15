@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll } from 'bun:test';
+import { fromInternal } from '../security/principal.ts';
 import type { AgentEngine } from '../engine/types.ts';
 
 /**
@@ -38,7 +39,7 @@ describe('a turn that dispatches a worker, on the background-job / api lane', ()
   beforeAll(async () => {
     registerEngine(dispatcher);
     blocks = await consumeStream(
-      streamChat({ prompt: '[engine:dispatch-probe] send off an opus worker', uid: 'u1', userEmail: 'e@x.com' }),
+      streamChat({ prompt: '[engine:dispatch-probe] send off an opus worker', uid: 'u1', userEmail: 'e@x.com', principal: fromInternal({ uid: 'u1' }) }),
       undefined,
       {
         maxResultChars: 2000,

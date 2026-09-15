@@ -1,4 +1,5 @@
 import { describe, test, expect } from 'bun:test';
+import { fromInternal } from '../security/principal.ts';
 
 /**
  * The provider/billing invariant, driven through the REAL consumer surface (`streamChat`), not through
@@ -40,6 +41,7 @@ async function runTurn(prompt: string): Promise<WsEvent[]> {
     prompt,
     sessionId: `billing-${Math.random().toString(36).slice(2)}`,
     uid: 'u-billing',
+    principal: fromInternal({ uid: 'u-billing' }),
     userEmail: 'billing@example.test',
   })) events.push(ev);
   return events;

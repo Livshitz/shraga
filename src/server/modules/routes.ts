@@ -3,13 +3,9 @@
 import type { Express, RequestHandler, Request, Response } from 'express';
 import { loadState, listAvailableModules, installModule, enableModule, disableModule, setModuleConfig, uninstallModule, readManifest, readModuleReadme } from './service.ts';
 import { dataPath } from '../paths.ts';
+import { ownerOnly as ownerGate } from '../security/owner-only.ts';
 
-function ownerOnly(req: Request, res: Response): boolean {
-  const user = (req as any).user;
-  if (user?.isOwner) return true;
-  res.status(403).json({ error: 'Only an owner can manage modules' });
-  return false;
-}
+const ownerOnly = (req: Request, res: Response): boolean => ownerGate(req, res, 'Only an owner can manage modules');
 
 export function registerModuleRoutes(app: Express, requireAuth: RequestHandler): void {
   app.get('/api/modules', requireAuth, (_req, res) => {
