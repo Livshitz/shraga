@@ -12,16 +12,25 @@ const cfgDir = mkdtempSync(path.join(tmpdir(), 'resume-engine-'));
 const realSdk = { ...(await import('@anthropic-ai/claude-agent-sdk')) };
 let active = false;
 const calls: { prompt: string; resume?: string }[] = [];
-let scripts: ((o: any) => AsyncGenerator<any>)[] = [];
+/** `io.first` is the prompt's user message, `io.input` the rest of the streaming input (open while the turn runs). */
+let scripts: ((o: any, io: { first: any; input: AsyncIterator<any> }) => AsyncGenerator<any>)[] = [];
 
 mock.module('@anthropic-ai/claude-agent-sdk', () => ({
   ...realSdk,
   query: (args: any) => {
     if (!active) return (realSdk.query as any)(args);
-    calls.push({ prompt: args.prompt, resume: args.options.resume });
     const s = scripts.shift();
     if (!s) throw new Error('unexpected extra query() call');
-    return s(args.options);
+    const call = { prompt: '', resume: args.options.resume as string | undefined };
+    calls.push(call);
+    // The prompt is streaming input held open for the turn: read only its first (user) message.
+    return (async function* () {
+      const input = args.prompt[Symbol.asyncIterator]();
+      const { value } = await input.next();
+      const c = value.message.content;
+      call.prompt = typeof c === 'string' ? c : c.findLast((x: any) => x.type === 'text').text;
+      yield* s(args.options, { first: value, input });
+    })();
   },
 }));
 
@@ -245,4 +254,56 @@ describe('takeover while the previous CLI is alive (issue 4)', () => {
     expect(calls[3].resume).toBe('cc-t2');
     ClaudeCodeEngine.cliExitWaitMs = savedWait;
   }, 15_000);
+});
+
+describe('background tasks and resumed sessions', () => {
+  const text = (id: string, t: string) => ({ type: 'stream_event', session_id: id, event: { type: 'content_block_delta', delta: { type: 'text_delta', text: t } } });
+  const result = (id: string, turns: number, t: string, uuid?: string) =>
+    ({ type: 'result', subtype: 'success', session_id: id, num_turns: turns, result: t, usage: {}, ...(uuid ? { user_message_uuids: [uuid], user_message_uuid: uuid } : {}) });
+
+  test('a bg task outstanding at result keeps the input open, and the follow-up turn on its notification ends the turn', async () => {
+    reset();
+    const sid = newSid(); const conv: ConvMessage[] = [];
+    let inputOpenAtResult: boolean | undefined;
+    let inputEnd: Promise<boolean> | undefined;
+    scripts = [async function* (_o, { first, input }) {
+      yield init('cc-bg');
+      yield { type: 'system', subtype: 'task_started', task_id: 'bg1', session_id: 'cc-bg' };
+      yield text('cc-bg', 'started');
+      yield result('cc-bg', 2, 'started', first.uuid);
+      // Closing the input is what makes the CLI exit and kill the job: it must still be open here.
+      inputEnd = input.next().then((r) => !!r.done);
+      inputOpenAtResult = await Promise.race([inputEnd.then(() => false), new Promise<boolean>((r) => setTimeout(() => r(true), 50))]);
+      yield { type: 'system', subtype: 'task_notification', task_id: 'bg1', status: 'completed', session_id: 'cc-bg' };
+      yield text('cc-bg', 'done-marker-42');
+      yield result('cc-bg', 2, 'done-marker-42');
+    }];
+    const events = await turn(sid, conv, ALICE, 'run it in the background');
+    expect(inputOpenAtResult).toBe(true);
+    expect(events.filter((e) => e.type === 'text_delta').map((e) => e.text).join('')).toBe('started\n\ndone-marker-42');
+    expect(events.filter((e) => e.type === 'done')).toHaveLength(1);
+    expect(events.at(-1).type).toBe('done');
+    expect(await inputEnd).toBe(true); // released once the turn ended
+  });
+
+  test("a resumed session's stale zero-turn result does not end the turn before the user's prompt is answered", async () => {
+    reset();
+    const sid = newSid(); const conv: ConvMessage[] = [];
+    scripts = [ok('cc-st')];
+    await turn(sid, conv, ALICE, 'hi');
+    transcript('cc-st');
+    scripts = [async function* (_o, { first }) {
+      yield { type: 'system', subtype: 'task_notification', task_id: 'old', status: 'stopped', session_id: 'cc-st' };
+      yield init('cc-st');
+      yield { ...result('cc-st', 0, ''), queued_turn_count: 0, result_index: 0 };
+      yield init('cc-st');
+      yield text('cc-st', 'the job was killed');
+      yield { ...result('cc-st', 2, 'the job was killed', first.uuid), result_index: 1 };
+    }];
+    const events = await turn(sid, conv, ALICE, "what's the status?");
+    expect(calls[1].resume).toBe('cc-st');
+    expect(events.filter((e) => e.type === 'text_delta').map((e) => e.text).join('')).toBe('the job was killed');
+    expect(events.at(-1)).toMatchObject({ type: 'done', stopReason: 'success' });
+    expect(logs.some((l) => l.includes('Skipping result of an earlier turn'))).toBe(true);
+  });
 });

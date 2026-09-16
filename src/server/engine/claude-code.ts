@@ -227,6 +227,10 @@ async function* buildAttachmentPrompt(text: string, attachments: { path: string;
   yield { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, session_id: sessionId };
 }
 
+async function* buildTextPrompt(text: string, sessionId: string): AsyncIterable<any> {
+  yield { type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null, session_id: sessionId };
+}
+
 async function* buildLegacyImagePrompt(text: string, images: string[], sessionId: string): AsyncIterable<any> {
   const content: any[] = images.map((dataUrl) => {
     const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
@@ -524,11 +528,22 @@ export class ClaudeCodeEngine implements AgentEngine {
     const sessionKey = opts.sessionId ?? crypto.randomUUID();
     const hasAttachments = opts.attachments && opts.attachments.length > 0;
     const hasLegacyImages = opts.images && opts.images.length > 0;
-    const prompt = hasAttachments
+    const source = hasAttachments
       ? buildAttachmentPrompt(fullPrompt, opts.attachments!, sessionKey)
       : hasLegacyImages
         ? buildLegacyImagePrompt(fullPrompt, opts.images!, sessionKey)
-        : fullPrompt;
+        : buildTextPrompt(fullPrompt, sessionKey);
+    // Streaming input, held open until the turn is over. A string prompt runs the CLI one-shot: it exits after
+    // the first result and kills `run_in_background` jobs ~5s later. Open, the job keeps running and its
+    // task_notification gets the model a follow-up turn, as interactive Claude Code does. The uuid is echoed on
+    // the result that answers THIS prompt (`user_message_uuids`), telling it apart from a resumed session's stale one.
+    const promptUuid = crypto.randomUUID();
+    let closeInput!: () => void;
+    const inputClosed = new Promise<void>((r) => { closeInput = r; });
+    const prompt = (async function* () {
+      for await (const msg of source) yield { ...msg, uuid: promptUuid };
+      await inputClosed;
+    })();
 
     const q = query({ prompt, options: options as any });
     // The CLI writes this prompt to the transcript before any output: from here a cancel can't un-deliver it.
@@ -546,6 +561,9 @@ export class ClaudeCodeEngine implements AgentEngine {
     const iter = q[Symbol.asyncIterator]();
     let pendingNext: Promise<IteratorResult<any>> | null = null;
     let waitingForBg = false;
+    // Has the result answering THIS prompt arrived? Later results are the model's follow-ups on bg-task completions.
+    let answered = false;
+    let turnBreak = false;
     let bgTimer: Promise<'__bgtimeout'> | null = null;
     let bgTimerHandle: ReturnType<typeof setTimeout> | null = null;
     let bgHeartbeat: ReturnType<typeof setInterval> | null = null;
@@ -622,7 +640,8 @@ export class ClaudeCodeEngine implements AgentEngine {
         if (m.type === 'system' && m.subtype === 'task_notification') {
           outstandingTasks.delete(m.task_id);
           console.log(`[claude] Background task ${m.status}: ${m.task_id} (${outstandingTasks.size} pending) (${elapsed()})`);
-          if (outstandingTasks.size === 0) { waitingForBg = false; clearBgTimer(); }
+          // Not the end of the turn: the CLI now runs a follow-up turn on the result, whose own result ends it
+          // (still bounded by the bg timer).
           continue;
         }
 
@@ -632,6 +651,15 @@ export class ClaudeCodeEngine implements AgentEngine {
         if (m.type === 'rate_limit_event') { claudeUsageFor(accountDir).observeRateLimit(m.rate_limit_info); continue; }
 
         if (m.type === 'result') {
+          // A resumed session first replays a pending task_notification as its own zero-turn result, before
+          // our prompt runs — ending on it drops the user's message. Skip any result that is not ours until
+          // ours arrives (older CLIs don't echo the uuid: then only a zero-turn result counts as stale).
+          const echoed = m.user_message_uuids ?? (m.user_message_uuid ? [m.user_message_uuid] : undefined);
+          if (!answered && !m.is_error && (echoed ? !echoed.includes(promptUuid) : !m.num_turns)) {
+            console.log(`[claude] Skipping result of an earlier turn: turns=${m.num_turns ?? 0} result_index=${m.result_index ?? '?'} (${elapsed()})`);
+            continue;
+          }
+          answered = true;
           lastSessionId = m.session_id || lastSessionId;
           const sdkTurns = m.num_turns ?? 0;
           const raw = m.subtype ?? 'unknown';
@@ -647,6 +675,7 @@ export class ClaudeCodeEngine implements AgentEngine {
               bgHeartbeat = setInterval(() => console.log(`[claude] Still holding for ${outstandingTasks.size} bg task(s): ${[...outstandingTasks].join(',')} (${elapsed()})`), BG_HEARTBEAT_MS);
               bgHeartbeat.unref?.();
             }
+            turnBreak = textDeltaCount > 0;
             continue;
           }
           // The SDK reports `subtype: 'success'` even when the API call failed (e.g. an org spend
@@ -687,6 +716,7 @@ export class ClaudeCodeEngine implements AgentEngine {
           if (event?.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
             textDeltaCount++;
             sawOutput = true;
+            if (turnBreak) { turnBreak = false; yield { type: 'text_delta', text: '\n\n' }; }
             yield { type: 'text_delta', text: event.delta.text };
           }
           if (event?.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
@@ -802,6 +832,7 @@ export class ClaudeCodeEngine implements AgentEngine {
       return;
     } finally {
       clearBgTimer();
+      closeInput();
       // The CLI has read the file by now (it loads MCP config at startup); holding it any longer just
       // widens the window in which the credentials sit on disk.
       mcpConfigFile?.cleanup();
