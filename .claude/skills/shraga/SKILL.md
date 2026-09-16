@@ -157,6 +157,14 @@ it. Slack context/thread history only ingests authors ranked ≥ the invoker.
 session link and excerpt — per-principal cooldown with digest batching, plus a global cap. The owner opens
 the link and continues as themselves; the escalated session never upgrades.
 
+### Sharing files (`share_file`)
+In-process tool `mcp__shraga-share__share_file` (`src/server/share-file.ts`), attached to full-access turns
+only (every turn when `SECURITY_ENFORCE` is off; `*`-tools profiles when on). It copies a file from the data
+dir / workspace / tmp into `<data>/uploads/shared/<random-hex>-<name>` (served public, no auth) and returns
+`<publicOrigin>/uploads/shared/…`. Refuses secrets, dotfiles/hidden dirs, server-owned data, and paths outside
+those roots (by realpath). No public origin ⇒ error telling the agent to attach the file. The agent must never
+build share URLs by hand.
+
 ### Untrusted replies
 A turn's prompt carries roster/skill/workspace context, so a channel that mails the model's text back to an
 unverified sender is a disclosure path. `allowUntrustedReplies` (agent-config.json, owner-only, **default off**;

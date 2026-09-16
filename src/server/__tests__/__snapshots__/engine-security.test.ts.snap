@@ -10,6 +10,7 @@ exports[`flag OFF: spawn config is today's matches the pre-enforcement snapshot 
     "Glob",
     "LS",
     "ToolSearch",
+    "mcp__shraga-share__share_file",
   ],
   "canUseTool": {
     "bash": "allow",
@@ -71,6 +72,7 @@ exports[`flag OFF: spawn config is today's matches the pre-enforcement snapshot 
     "hooks",
     "includePartialMessages",
     "maxTurns",
+    "mcpServers",
     "model",
     "permissionMode",
     "settingSources",
@@ -84,7 +86,9 @@ exports[`flag OFF: spawn config is today's matches the pre-enforcement snapshot 
     "mcp-notion",
     "mcp-slack-use",
   ],
-  "mcpServers": undefined,
+  "mcpServers": {
+    "shraga-share": "sdk",
+  },
   "model": "claude-sonnet-5",
   "permissionMode": "default",
   "settingSources": [

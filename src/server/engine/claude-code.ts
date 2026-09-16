@@ -23,8 +23,9 @@ import { APP_ROOT } from '../paths.ts';
 import { writeMcpConfigFile } from './mcp-config-file.ts';
 import { claudeUsageFor } from '../claude-usage.ts';
 import { claudeAccountDir, applyClaudeAccount, claudeAccountRef, type ClaudeAccountRef } from '../claude-account.ts';
-import { buildAgentEnv, builtinTools, filterMcpServers, allowsEscalate, allowsInternalToken, SENSITIVE_PATH_PATTERNS } from '../security/enforce.ts';
+import { buildAgentEnv, builtinTools, filterMcpServers, allowsEscalate, allowsInternalToken, allowsShare, SHARE_TOOL_ID, SENSITIVE_PATH_PATTERNS } from '../security/enforce.ts';
 import { escalateMcpServer } from '../security/escalate.ts';
+import { shareMcpServer } from '../share-file.ts';
 const IMMUTABLE_SYSTEM_PROMPT = readFileSync(path.resolve(import.meta.dirname, '../../../defaults/system-prompt.md'), 'utf-8');
 const DEFAULT_USER_PROMPT = `You are a helpful assistant with access to MCP tools.`;
 const DEFAULT_ALLOWED_TOOLS = ['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch'];
@@ -516,6 +517,12 @@ export class ClaudeCodeEngine implements AgentEngine {
         channel: [principal.kind, principal.attrs.lane, opts.context?.source].filter(Boolean).join(':'),
       });
       options['mcpServers'] = { [server.name]: server };
+    }
+    // `share_file` (in-process, like escalate): full-access turns only — flag OFF every turn is full.
+    if (!eff || allowsShare(eff.profile)) {
+      const server = shareMcpServer();
+      options['mcpServers'] = { ...(options['mcpServers'] as object | undefined), [server.name]: server };
+      options['allowedTools'] = [...allowedTools, SHARE_TOOL_ID];
     }
 
     const mcpNames = mcpServers ? Object.keys(mcpServers) : [];
