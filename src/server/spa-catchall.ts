@@ -34,7 +34,10 @@ export function registerSpaCatchAll(app: express.Express, distPath: string): voi
     }
   }
   const handler: express.RequestHandler = (req, res, next) => {
-    if (isNonPagePath(req.path)) return next();
+    // A request carrying Authorization is a machine client (browsers never send it on a navigation),
+    // so an unknown path must 404 for it — not answer 200 with HTML that a fetcher stores as the file
+    // it asked for (live 2026-09-16: the media pod ingested the shell as a .png).
+    if (isNonPagePath(req.path) || req.headers.authorization) return next();
     // Serve the shell with the runtime web-config injected (cached). This is the SINGLE HTML-page
     // path — `/` falls through here too (express.static is mounted with `index: false`).
     res.type('html').send(getSpaShell(indexHtml));

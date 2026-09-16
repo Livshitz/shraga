@@ -23,11 +23,11 @@ function buildApp() {
   return app;
 }
 
-async function req(app: express.Express, url: string): Promise<{ status: number; body: string }> {
+async function req(app: express.Express, url: string, headers: Record<string, string> = {}): Promise<{ status: number; body: string }> {
   const server = app.listen(0);
   const port = (server.address() as import('net').AddressInfo).port;
   try {
-    const r = await fetch(`http://127.0.0.1:${port}${url}`);
+    const r = await fetch(`http://127.0.0.1:${port}${url}`, { headers });
     return { status: r.status, body: await r.text() };
   } finally {
     server.close();
@@ -42,6 +42,13 @@ describe('registerSpaCatchAll', () => {
       expect(r.status).toBe(200);
       expect(r.body).toContain(INDEX_MARKER);
     }
+  });
+
+  it('a bearer-authenticated machine fetch of an unknown path gets a 404, not the shell', async () => {
+    const r = await req(buildApp(), '/opt/shraga/shared/cache/img.png', { Authorization: 'Bearer k' });
+    expect(r.status).toBe(404);
+    expect(r.body).not.toContain(INDEX_MARKER);
+    expect((await req(buildApp(), '/session/abc')).body).toContain(INDEX_MARKER); // browsers unaffected
   });
 
   it('lets unmatched /api/* fall through to a real 404 (not the SPA shell)', async () => {

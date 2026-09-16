@@ -14,9 +14,12 @@
 //   POST {gateway}/media/publish_url  { file, expiresHours? }              → { url }    (link to the original bytes)
 //   POST {gateway}/media/cancel       { jobId }                            (called when a job outlives our wait)
 // Every response may carry `ok: false` + `error`.
+// POD-COPY SIDECAR: a box file pulled FROM the gateway may sit next to `<file>.pod.json` = { podFile, sha256 }.
+// When the sha still matches, share_file links the gateway's own copy instead of re-uploading the bytes it
+// already holds; a stale sidecar or a failed link (file evicted on the pod) falls back to the normal ingest.
 // share_file only hands out a gateway link a human can open: a private/tailnet link is refused (see isPublicUrl).
 import { randomUUID } from 'node:crypto';
-import { linkSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import { linkSync, copyFileSync, mkdirSync, rmSync, createReadStream, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { getOffload, type OffloadSettings } from './shraga-config.ts';
 
@@ -149,6 +152,17 @@ export class OffloadGateway {
     // Refuse before moving any bytes when the gateway says its links are private.
     const base = await this.publicBase();
     if (base && !isPublicUrl(base)) throw new OffloadPrivateLinkError(base);
+    const pod = await podCopy(src);
+    if (pod) {
+      try {
+        const url = await this.link(pod, mediaKind(name));
+        if (!isPublicUrl(url)) throw new OffloadPrivateLinkError(url);
+        return url;
+      } catch (e) {
+        if (e instanceof OffloadPrivateLinkError) throw e;
+        console.warn(`[offload] linking the pod copy ${pod} failed, re-uploading instead: ${(e as Error).message}`);
+      }
+    }
     const id = `offload-${randomUUID()}`;
     const dir = path.join(dataDir, 'uploads', id);
     mkdirSync(dir, { recursive: true });
@@ -162,6 +176,22 @@ export class OffloadGateway {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+}
+
+/** The gateway-side path recorded in `<src>.pod.json`, when that sidecar exists and its sha256 still matches `src`. */
+export async function podCopy(src: string): Promise<string | undefined> {
+  const sidecar = `${src}.pod.json`;
+  if (!existsSync(sidecar)) return undefined;
+  try {
+    const { podFile, sha256 } = JSON.parse(readFileSync(sidecar, 'utf8')) as { podFile?: string; sha256?: string };
+    if (!podFile || !sha256) return undefined;
+    const hasher = new Bun.CryptoHasher('sha256');
+    for await (const chunk of createReadStream(src)) hasher.update(chunk as Uint8Array);
+    return hasher.digest('hex') === sha256 ? podFile : undefined; // a file edited since the pull is not the pod copy
+  } catch (e) {
+    console.warn(`[offload] ignoring unreadable ${sidecar}: ${(e as Error).message}`);
+    return undefined;
   }
 }
 
