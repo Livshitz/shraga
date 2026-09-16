@@ -32,10 +32,11 @@ export function mediaKind(file: string): MediaKind | undefined {
   return VIDEO_EXT.has(ext) ? 'video' : AUDIO_EXT.has(ext) ? 'audio' : IMAGE_EXT.has(ext) ? 'image' : undefined;
 }
 
-/** Whether share_file must hand this file to the gateway instead of publishing it from the box. Size is the only
- *  criterion: a small file (media included) is served from the box's own public origin, which every recipient can open. */
-export function shouldOffloadShare(bytes: number, cfg: OffloadSettings | undefined): boolean {
-  return !!cfg && bytes > cfg.maxLocalFileMB * 1024 * 1024;
+/** Whether share_file should hand this file to the gateway instead of publishing it from the box: media (a pod link
+ *  keeps big bytes off a low-resource disk), files over the cap, or anything when the box has no public origin.
+ *  A gateway refusal for a non-public link falls back to the box for files within the cap (see share-file.ts). */
+export function shouldOffloadShare(file: string, bytes: number, cfg: OffloadSettings | undefined, hasOrigin = true): boolean {
+  return !!cfg && (bytes > cfg.maxLocalFileMB * 1024 * 1024 || !!mediaKind(file) || !hasOrigin);
 }
 
 /** Whether a link is reachable by an arbitrary recipient (a Slack teammate, an external) — not loopback, a private
@@ -181,7 +182,7 @@ export function buildOffloadContextBlock(cfg = getOffload()): string {
     `This box is LOW-RESOURCE. Heavy work runs on an external pod behind the gateway ${cfg.gateway} (use its MCP tools).`,
     `- Generation, rendering, encoding/transcoding, large downloads, and any file over ${cfg.maxLocalFileMB}MB go through the gateway tools — never locally.`,
     '- Never run local ffmpeg encodes or remotion renders, and never hand-start media servers (mcp-video/mcp-audio) here; such Bash commands are refused. ffprobe and analysis are fine.',
-    `- To share a file with people, use share_file. Files up to ${cfg.maxLocalFileMB}MB (media included) get a link from this box. Larger files go through the pod, but ONLY when the pod has a public link origin; otherwise share_file refuses — then send the file as a Slack/email attachment or ask an operator. Never hand people a gateway/pod link yourself (e.g. from its preview tool) unless it is a public https URL — tailnet/private links do not open for them.`,
+    `- To share a file with people, use share_file. Media and files over ${cfg.maxLocalFileMB}MB are linked from the pod when it has a public link origin; small non-media files get a link from this box. If share_file refuses — then send the file as a Slack/email attachment or ask an operator. Never hand people a gateway/pod link yourself (e.g. from its preview tool) unless it is a public https URL — tailnet/private links do not open for them.`,
     '</offload>',
   ].join('\n');
 }

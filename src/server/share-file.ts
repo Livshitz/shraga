@@ -76,12 +76,14 @@ export class FileSharer {
     const safe = (name || path.basename(src)).normalize('NFKD').replace(/[^\w.-]+/g, '-').replace(/^[.-]+/, '').slice(-100) || 'file';
     // Low-resource box: large files never land in uploads/shared — the gateway ingests and links them, but only a
     // link the recipient can open is returned (a tailnet-only pod link is refused, not handed out).
-    if (shouldOffloadShare(bytes, offload)) {
+    if (shouldOffloadShare(src, bytes, offload, !!origin)) {
       try {
         return { ok: true, url: await this.o.gateway(offload!).share(src, this.o.dataDir, safe, bytes), path: src, bytes, offloaded: true };
       } catch (e) {
-        if (e instanceof OffloadPrivateLinkError) { console.warn(`[share] offload gateway link is not public (${e.link}); refusing`); return { ok: false, error: e.message }; }
-        throw e;
+        if (!(e instanceof OffloadPrivateLinkError)) throw e;
+        const fallback = !!origin && bytes <= offload!.maxLocalFileMB * 1024 * 1024;
+        console.warn(`[share] offload gateway link is not public (${e.link}); ${fallback ? 'falling back to this box' : 'refusing'}`);
+        if (!fallback) return { ok: false, error: e.message };
       }
     }
     if (!origin) return { ok: false, error: 'This deployment has no public origin, so no share link can be made for this file. Send it as an attachment instead (e.g. Slack file upload).' };

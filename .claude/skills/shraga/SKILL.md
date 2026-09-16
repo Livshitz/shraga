@@ -176,9 +176,9 @@ only (every turn when `SECURITY_ENFORCE` is off; `*`-tools profiles when on). It
 (only) into `<data>/uploads/shared/<random-hex>-<name>` (served public, no auth) and returns
 `<publicOrigin>/uploads/shared/…`. Refuses secrets/key names, dotfiles/hidden dirs, hardlinked files, >500MB, and paths outside
 the workspace (by realpath). `/uploads/shared` is served nosniff + CSP sandbox; non-media downloads as attachment. No public origin ⇒ error telling the agent to attach the file. With `offload` configured,
-files over `maxLocalFileMB` are not copied to `uploads/shared`: they are briefly staged under `uploads/offload-<uuid>/`
-for the gateway to ingest, then linked from the gateway if that link is public, else refused (see Deployment config).
-Files at or under the cap (media included) use the normal `uploads/shared` path. The agent must never
+media, files over `maxLocalFileMB`, and anything when there is no public origin are not copied to `uploads/shared`: they are briefly staged under `uploads/offload-<uuid>/`
+for the gateway to ingest, then linked from the gateway if that link is public, else (within the cap, with a public origin) fall back to `uploads/shared`, or are refused.
+Small non-media files use the normal `uploads/shared` path. The agent must never
 build share URLs by hand.
 
 ### Untrusted replies
