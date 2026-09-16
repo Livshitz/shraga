@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { X } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import type { OwnerCall } from '@/hooks/useOwner';
 
@@ -59,6 +60,47 @@ export function CsvInput({ value, onChange, placeholder }: { value: string[] | u
   return (
     <Input className={inputCls} value={text} placeholder={placeholder} onChange={(e) => setText(e.target.value)}
       onBlur={() => onChange(text.split(',').map((s) => s.trim()).filter(Boolean))} />
+  );
+}
+
+export const isEmail = (s: string) => /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(s);
+
+/** One chip per value — add with Enter/comma/paste (splits on , ; whitespace), × to remove. Lowercased + de-duplicated;
+ *  values failing `validate` are kept but flagged red so a typo is visible instead of silently never matching. */
+export function ChipInput({ value, onChange, placeholder, validate }: { value: string[] | undefined; onChange: (v: string[]) => void; placeholder?: string; validate?: (s: string) => boolean }) {
+  const items = value ?? [];
+  const [text, setText] = useState('');
+  const add = (raw: string) => {
+    const next = [...items];
+    for (const s of raw.split(/[\s,;]+/).map((x) => x.trim().toLowerCase()).filter(Boolean)) if (!next.includes(s)) next.push(s);
+    if (next.length !== items.length) onChange(next);
+    setText('');
+  };
+  const bad = validate ? items.filter((s) => !validate(s)).length : 0;
+  return (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center gap-1 rounded-md border bg-background px-1.5 py-1 min-h-8">
+        {items.map((s) => {
+          const ok = !validate || validate(s);
+          return (
+            <span key={s} title={ok ? s : `Not a valid email: ${s}`}
+              className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[11px] font-mono ${ok ? 'bg-muted' : 'bg-destructive/15 text-destructive ring-1 ring-destructive/50'}`}>
+              {s}
+              <button type="button" className="opacity-60 hover:opacity-100" title={`Remove ${s}`} onClick={() => onChange(items.filter((x) => x !== s))}><X className="w-3 h-3" /></button>
+            </span>
+          );
+        })}
+        <input className="flex-1 min-w-32 bg-transparent text-xs outline-none px-1" value={text} placeholder={items.length ? 'add…' : placeholder}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if ((e.key === 'Enter' || e.key === ',' || e.key === ';') && text.trim()) { e.preventDefault(); add(text); }
+            else if (e.key === 'Backspace' && !text && items.length) onChange(items.slice(0, -1));
+          }}
+          onPaste={(e) => { e.preventDefault(); add(text + ' ' + e.clipboardData.getData('text')); }}
+          onBlur={() => text.trim() && add(text)} />
+      </div>
+      <p className="text-[10px] text-muted-foreground">{items.length} {items.length === 1 ? 'entry' : 'entries'}{bad > 0 && <span className="text-destructive"> · {bad} invalid</span>}</p>
+    </div>
   );
 }
 

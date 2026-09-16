@@ -3,7 +3,7 @@ import { ArrowDown, ArrowUp, FlaskConical, Loader2, Plus, Trash2 } from 'lucide-
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { usePolicyDraft } from './RolesTab';
-import { CsvInput, ErrorBox, iconBtn, inputCls, KINDS, selectCls, useAction, type Match, type OwnerCall, type Policy, type PolicyDoc, type SavePolicy } from './shared';
+import { ChipInput, ErrorBox, isEmail, iconBtn, inputCls, KINDS, selectCls, useAction, type Match, type OwnerCall, type Policy, type PolicyDoc, type SavePolicy } from './shared';
 
 const KNOWN = new Set(['kind', 'id', 'emailIn', 'domain', 'verified']);
 
@@ -52,8 +52,8 @@ export function BindingsTab({ doc, save, call, onDirty }: { doc: PolicyDoc; save
                 </select>
                 <Input className={`${inputCls} w-40`} placeholder="domain" value={b.match.domain ?? ''} onChange={(e) => setMatch(i, 'domain', e.target.value.trim())} />
                 <Input className={`${inputCls} w-48`} placeholder="id (e.g. slack:U123)" value={b.match.id ?? ''} onChange={(e) => setMatch(i, 'id', e.target.value.trim())} />
-                <div className="flex-1 min-w-48"><CsvInput value={b.match.emailIn} onChange={(v) => setMatch(i, 'emailIn', v)} placeholder="emails (comma-separated)" /></div>
               </div>
+              <ChipInput value={b.match.emailIn} onChange={(v) => setMatch(i, 'emailIn', v)} validate={isEmail} placeholder="emails — type or paste, Enter to add (empty = any email)" />
               {extra.length > 0 && <p className="text-[10px] font-mono text-muted-foreground">also matches: {JSON.stringify(Object.fromEntries(extra))}</p>}
             </div>
           );
