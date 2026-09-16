@@ -121,6 +121,27 @@ describe('owner-gated admin routes', () => {
     expect('isOwner' in onDisk).toBe(false);
   });
 
+  test('allowUntrustedReplies round-trips owner-only; a non-owner cannot flip it', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { dataPath } = await import('../../paths.ts');
+    const onDisk = () => JSON.parse(readFileSync(dataPath('agent-config.json'), 'utf8'));
+    const before = await (await call(ownerTok, 'GET', '/api/config')).json();
+    try {
+      expect((await call(ownerTok, 'PUT', '/api/config', { ...before, allowUntrustedReplies: true })).status).toBe(200);
+      expect(onDisk().allowUntrustedReplies).toBe(true);
+      expect((await (await call(ownerTok, 'GET', '/api/config')).json()).allowUntrustedReplies).toBe(true);
+
+      // A non-owner is refused, and the stored value is untouched.
+      expect((await call(bobTok, 'PUT', '/api/config', { ...before, allowUntrustedReplies: false })).status).toBe(403);
+      expect(onDisk().allowUntrustedReplies).toBe(true);
+
+      expect((await call(ownerTok, 'PUT', '/api/config', { ...before, allowUntrustedReplies: false })).status).toBe(200);
+      expect(onDisk().allowUntrustedReplies).toBe(false);
+    } finally {
+      await call(ownerTok, 'PUT', '/api/config', before);
+    }
+  });
+
   test('non-owner reads are unaffected', async () => {
     expect((await call(bobTok, 'GET', '/api/config')).status).toBe(200);
     expect((await call(bobTok, 'GET', '/api/skills')).status).toBe(200);

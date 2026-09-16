@@ -55,6 +55,19 @@ export interface AgentSettings {
   /** claude-code engine: resume the SDK session across turns instead of re-sending the history
    *  (prompt-cache savings). Default off; a session's `[resume:on|off]` directive wins. */
   sdkResume?: boolean;
+  /**
+   * Allow an AUTOMATIC outbound reply to a low-trust inbound principal — one whose resolved role ranks
+   * below `member` (guest, anonymous, an unverified sender). Default OFF.
+   *
+   * Off does NOT drop the message: the turn still runs and `escalate` still reaches owners. Only the
+   * automatic reply back to that sender is suppressed, because a turn's prompt carries roster/skill/
+   * workspace context and a channel that mails the model's text back to an unverified sender is a
+   * disclosure path. A human operator's own turns are never gated by this.
+   *
+   * Orthogonal to `SECURITY_ENFORCE`: this gates OUTBOUND REPLIES, not tools, so it applies whether or
+   * not enforcement is on (shadow mode included). Channels/add-ons ask `mayReplyTo(principal)`.
+   */
+  allowUntrustedReplies?: boolean;
 }
 
 export interface ShragaConfig {

@@ -155,6 +155,15 @@ it. Slack context/thread history only ingests authors ranked ≥ the invoker.
 session link and excerpt — per-principal cooldown with digest batching, plus a global cap. The owner opens
 the link and continues as themselves; the escalated session never upgrades.
 
+### Untrusted replies
+A turn's prompt carries roster/skill/workspace context, so a channel that mails the model's text back to an
+unverified sender is a disclosure path. `allowUntrustedReplies` (agent-config.json, owner-only, **default off**;
+Settings → "Reply to untrusted senders") gates the AUTOMATIC outbound reply to a principal resolving below
+`member` rank. Off, the turn still runs and `escalate` still reaches owners — only the reply is suppressed
+(audited `guard.limit`, reason `untrusted-reply`, once per turn). Channels/add-ons call
+`mayReplyTo(principal, { sessionId, channel })` (`runtime.ts`); no runtime or an invalid policy ⇒ no reply.
+Independent of `SECURITY_ENFORCE`: it gates outbound replies, not tools, so it applies in shadow mode too.
+
 ### Guard
 Before any LLM spend: blocklist (policy + auto-blocks) → rate buckets (per principal from the profile `rate`,
 per IP, per channel) → concurrent-turn ceiling for rank < 50. Repeated hits auto-block (TTL, persisted to

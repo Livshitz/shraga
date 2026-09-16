@@ -230,7 +230,9 @@ before setting `SECURITY_ENFORCE`): [`.claude/skills/shraga/SKILL.md` → Securi
 Beyond env vars, a typed config module in your data dir declares **global MCP servers**: the tools
 every user gets. (Per-user MCPs are added in the UI, and agent settings like model and engine live
 in `agent-config.json`, editable from the UI; `"sdkResume": true` there opts the claude-code engine into
-SDK session resume — see `defaults/skills/platform.md`.) Shraga seeds it from a template on first run and
+SDK session resume — see `defaults/skills/platform.md`; `"allowUntrustedReplies": true` lets the agent send an
+automatic reply to a sender resolving below `member` rank, default off — see Security model → Untrusted
+replies.) Shraga seeds it from a template on first run and
 gitignores it, so you just edit the seeded file:
 
 ```ts

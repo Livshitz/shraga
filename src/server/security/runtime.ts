@@ -7,7 +7,8 @@
 // Writes are gated on `isActive` (a PASSIVE standby shares DATA_DIR and must not append to data/audit, nor let the
 // Policy migrate/save/mark or judge tamper; `activate()` re-loads the policy on promotion), and noisy events are
 // deduped per key per window, so a busy client isn't one line per request.
-import { OWNER_ROLE, Policy, type PolicyOptions, type Resolved, type TamperReason } from './policy.ts';
+import { MEMBER_ROLE, OWNER_ROLE, Policy, type PolicyOptions, type Resolved, type TamperReason } from './policy.ts';
+import { getAgentConfig } from '../agent-config.ts';
 import { Audit, type AuditEvent, type AuditOptions } from './audit.ts';
 import { Guard, type GuardOptions, type TurnAdmission } from './guard.ts';
 import { fromAuthUser, type Principal } from './principal.ts';
@@ -163,6 +164,43 @@ export function security(): SecurityRuntime | undefined { return current; }
 export function admitTurn(principal: Principal, ctx?: { ip?: string; channel?: string }): TurnAdmission {
   try { return current ? current.admitTurn(principal, ctx) : { ok: true, release: () => {} }; }
   catch (e: any) { console.error(`[security] admitTurn threw — admitting: ${e?.message ?? e}`); return { ok: true, release: () => {} }; }
+}
+
+/**
+ * May the agent send an AUTOMATIC outbound reply to this inbound principal? For channels and add-ons
+ * (mail, chat) to call before handing the model's text back to the sender.
+ *
+ * `false` when `allowUntrustedReplies` is off (the default) and the principal resolves BELOW `member`
+ * rank — guest, anonymous, an unverified sender. Suppressing the reply does not drop the turn: it still
+ * runs, and `escalate` still reaches owners. A member/operator/owner is always replyable, and this never
+ * gates a human operator's own turns.
+ *
+ * Independent of `SECURITY_ENFORCE` — it gates outbound replies, not tools, so it applies in shadow mode too.
+ *
+ * FAILS CLOSED: no runtime, an invalid/fail-closed policy (no `member` role), or a throw ⇒ `false`.
+ * Pass `sessionId` so a suppression is audited once per turn rather than once per call.
+ */
+export function mayReplyTo(principal: Principal, ctx: { sessionId?: string; channel?: string } = {}): boolean {
+  try {
+    if (getAgentConfig().allowUntrustedReplies === true) return true;
+    const rt = current;
+    if (!rt || !rt.policy.valid) return false;
+    // A fail-closed policy keeps only owner+anonymous, and resolving an unknown role falls back to the
+    // DEFAULT role — whose rank would wrongly admit a guest. So require a real `member` role.
+    const member = rt.policy.effective(Infinity, MEMBER_ROLE);
+    if (member.role !== MEMBER_ROLE) return false;
+    const r = resolvePrincipal(rt.policy, principal);
+    if (r.rank >= member.rank) return true;
+    rt.record({
+      type: 'guard.limit', principal: principal.id, role: r.role, sessionId: ctx.sessionId,
+      target: ctx.channel ?? 'reply', reason: 'untrusted-reply',
+      meta: { kind: principal.kind, verified: principal.verified, rank: r.rank, memberRank: member.rank },
+    }, `reply.suppressed|${ctx.sessionId ?? principal.id}`);
+    return false;
+  } catch (e: any) {
+    console.error(`[security] mayReplyTo threw — suppressing the reply: ${e?.message ?? e}`);
+    return false;
+  }
 }
 
 /** Client IP of a request/upgrade, honoring TRUSTED_PROXIES. */
