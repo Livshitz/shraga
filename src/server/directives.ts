@@ -18,10 +18,8 @@ export interface ParsedPrompt {
   unresolvedModel?: string;
 }
 
-/** Model used when neither directives nor config specify one. Always passed
- * explicitly to the SDK — the CLI's own default silently drifts (it picked
- * Opus 4.7), which burns rate limits and budget. */
-export const DEFAULT_MODEL = 'claude-sonnet-5';
+// The default model lives in src/shared/models.ts so the client header names the same one.
+export { DEFAULT_MODEL } from '../shared/models';
 
 // Canonical model aliases + label. Vendored, pure, dependency-free (src/server/model-aliases.ts).
 // Re-exported here so the rest of shraga keeps importing model helpers from one place.

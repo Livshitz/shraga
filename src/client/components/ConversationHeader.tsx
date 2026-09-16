@@ -3,6 +3,10 @@ import { Copy, Check, Clock, GitFork, Layers } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ConfigPanel } from '@/components/ConfigPanel';
 import type { AgentConfig } from '@/lib/workspaceContext';
+// Same constants the server resolves a turn with — a client-local copy drifts and makes the
+// header name a model no turn would actually run (it still said `sonnet-4-6` after the default
+// moved to Sonnet 5).
+import { DEFAULT_MODEL, DEFAULT_CURSOR_MODEL } from '../../shared/models';
 
 interface SessionDirectives {
   model?: string;
@@ -45,7 +49,7 @@ export function deriveRuntimeBadges(input: {
   // anthropic models). So with no `lastEngine`, the engine stays unknown rather than guessed.
   const engine = provenance === 'ran' ? input.actualEngine! : provenance === 'pending' ? requestedEngine : undefined;
   const rawModel =
-    input.actualModel || input.requestedModel || (requestedEngine === 'cursor' ? 'cursor/composer-2.5' : 'sonnet-4-6');
+    input.actualModel || input.requestedModel || (requestedEngine === 'cursor' ? DEFAULT_CURSOR_MODEL : DEFAULT_MODEL);
 
   // A mismatch is a fact worth showing, not something to launder away: the last turn ran somewhere
   // other than where this session currently asks to run — which the ground-truth pill alone cannot
