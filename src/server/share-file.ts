@@ -6,7 +6,6 @@ import { mkdirSync, realpathSync, statSync } from 'node:fs';
 import { copyFile, stat, unlink } from 'node:fs/promises';
 import type { ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod/v4';
 import { DATA_DIR } from './paths.ts';
@@ -21,7 +20,7 @@ export class FileSharerOptions {
   dataDir: string = DATA_DIR;
   /** ALLOWLIST of dirs agents write deliverables to (resolved by realpath). Never the whole data dir: it holds tokens,
    *  config and other sessions' auth-protected uploads. */
-  roots: () => string[] = () => [WORKSPACE_DIR, tmpdir(), '/tmp'];
+  roots: () => string[] = () => [WORKSPACE_DIR]; // not tmp: other processes' task outputs/credentials live there
   /** Largest file that may be published. */
   maxBytes: number = MAX_SHARE_BYTES;
   origin: () => string = getPublicOrigin;
@@ -103,7 +102,7 @@ export function shareMcpServer(sharer = new FileSharer()) {
       SHARE_TOOL,
       'Publish a local file (video, image, PDF, …) and get a public link to send the user. The ONLY valid way to make a file link — never construct share URLs by hand. Anyone with the link can open it (no login).',
       {
-        file_path: z.string().min(1).describe('Absolute path of the file (under the workspace or tmp).'),
+        file_path: z.string().min(1).describe('Absolute path of the file (must be under the workspace; move deliverables there first).'),
         name: z.string().max(200).optional().describe('Download name, e.g. "ad-v2.mp4". Defaults to the file name.'),
       },
       async ({ file_path, name }) => {

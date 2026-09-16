@@ -71,9 +71,10 @@ describe('FileSharer', () => {
     expect(!r.ok && r.error).toMatch(re);
   });
 
-  test('default roots are an allowlist: workspace + tmp, never the whole data dir', () => {
+  test('default roots are an allowlist: workspace only, never tmp or the whole data dir', () => {
     const roots = new FileSharerOptions().roots();
-    expect(roots).toContain(WORKSPACE_DIR);
+    expect(roots).toEqual([WORKSPACE_DIR]);
+    expect(roots).not.toContain('/tmp');
     expect(roots).not.toContain(DATA_DIR);
     expect(new FileSharerOptions().maxBytes).toBe(500 * 1024 * 1024);
   });
