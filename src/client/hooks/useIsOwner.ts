@@ -8,7 +8,7 @@ export function useIsOwner(getToken: () => Promise<string | null>, enabled = tru
   const [isOwner, setIsOwner] = useState<boolean>();
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) { setIsOwner(undefined); return; }
     let alive = true;
     getToken().then((token) => {
       if (!token || !alive) return;

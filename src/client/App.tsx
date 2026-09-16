@@ -72,7 +72,7 @@ function AppInner() {
   const slots = useSlots();
   const { dark, toggle: toggleDark } = useDarkMode();
   const { user, token, getToken, loading, mode, needsSetup, loginLocal, registerLocal, logout } = useAuth();
-  const { isOwner, call: ownerCall } = useOwner(getToken);
+  const { isOwner, call: ownerCall } = useOwner(getToken, !!user); // re-checks once signed in — App mounts before the token exists
   const [sidebarOpen, _setSidebarOpen] = useState(() => localStorage.getItem('shraga:sidebarOpen') !== 'false');
   const setSidebarOpen = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
     _setSidebarOpen((prev) => {
