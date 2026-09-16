@@ -156,6 +156,8 @@ describe('tokensValidAfter', () => {
 
   test('Firebase: auth_time (not the refreshed iat) is checked against tokensValidAfter', async () => {
     const F = `fb-${tag}@x.test`;
+    // Firebase logins are gated on policy bindings (member+), so bind F to reach the revocation check.
+    rt.policy.save({ ...rt.policy.current, bindings: [...rt.policy.current.bindings, { match: { kind: 'user', emailIn: [F] }, role: 'member' }] });
     const at = revokeTokens(`user:${F}`);
     expect(tokenRevoked(`user:${F}`, firebaseIssuedAt({ auth_time: at - 100, iat: at + 100 }))).toBe(true);
     expect(tokenRevoked(`user:${F}`, firebaseIssuedAt({ auth_time: at, iat: at + 100 }))).toBe(false);

@@ -31,7 +31,11 @@ import {
   BookOpen,
   Blocks,
   SquarePen,
+  ShieldCheck,
 } from 'lucide-react';
+import { useOwner } from '@/hooks/useOwner';
+import { api } from '@/lib/api';
+import { OwnerConsole } from '@/components/owner/OwnerConsole';
 import { useDarkMode } from '@/hooks/useDarkMode';
 import { useUnread } from '@/hooks/useUnread';
 import { ToastStack } from '@/components/Toast';
@@ -68,6 +72,7 @@ function AppInner() {
   const slots = useSlots();
   const { dark, toggle: toggleDark } = useDarkMode();
   const { user, token, getToken, loading, mode, needsSetup, loginLocal, registerLocal, logout } = useAuth();
+  const { isOwner, call: ownerCall } = useOwner(getToken);
   const [sidebarOpen, _setSidebarOpen] = useState(() => localStorage.getItem('shraga:sidebarOpen') !== 'false');
   const setSidebarOpen = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
     _setSidebarOpen((prev) => {
@@ -229,6 +234,12 @@ function AppInner() {
   const { socket, connectionStatus, authError } = useAgentSocket(token, getToken, handleGlobalEvent);
 
   const { unreads, toasts, markRead, dismissToast, addToast, handleUnreadEvent } = useUnread(socket, activeSessionId);
+  // Owner Console → open any user's session: the meta fetch confirms access (owner view-only bypass) before selecting.
+  const openOwnerSession = useCallback(async (id: string) => {
+    await api(`/api/sessions/${encodeURIComponent(id)}/meta`, getToken);
+    openSession(id);
+    markRead(id);
+  }, [getToken, openSession, markRead]);
   unreadEventRef.current = handleUnreadEvent;
   markReadRef.current = markRead;
 
@@ -425,6 +436,17 @@ function AppInner() {
                 {dark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
               </Button>
               {slots.headerActions?.()}
+              {isOwner && (
+                <OwnerConsole
+                  call={ownerCall}
+                  onOpenSession={openOwnerSession}
+                  trigger={
+                    <Button variant="ghost" size="icon" className="h-8 w-8" title="Owner Console">
+                      <ShieldCheck className="w-4 h-4" />
+                    </Button>
+                  }
+                />
+              )}
               <McpManager getToken={getToken} />
               <SkillsManager getToken={getToken} onSkillsChange={setSkills} />
               <ModulesManager getToken={getToken} />
@@ -454,6 +476,17 @@ function AppInner() {
                     style={{ top: mobileMenuPos.top, right: mobileMenuPos.right }}
                   >
                     {slots.headerActions?.()}
+                    {isOwner && (
+                      <OwnerConsole
+                        call={ownerCall}
+                        onOpenSession={openOwnerSession}
+                        trigger={
+                          <button className="flex w-full items-center gap-2.5 rounded-md px-3 py-2.5 text-sm hover:bg-accent">
+                            <ShieldCheck className="w-3.5 h-3.5" /> Owner Console
+                          </button>
+                        }
+                      />
+                    )}
                     <McpManager
                       getToken={getToken}
                       trigger={

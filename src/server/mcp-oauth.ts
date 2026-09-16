@@ -14,9 +14,9 @@
 import type { Express, Request, Response, NextFunction } from 'express';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { randomBytes, createHash } from 'node:crypto';
-import { MCP_TOKEN_TTL, requireAuth, signMcpToken, verifyMcpToken, type AuthUser } from './auth.ts';
+import { AUTH_PROVIDER, MCP_TOKEN_TTL, requireAuth, signMcpToken, verifyMcpToken, type AuthUser } from './auth.ts';
 import { dataPath } from './paths.ts';
-import { security } from './security/runtime.ts';
+import { loginAllowed, security } from './security/runtime.ts';
 import { fromAuthUser } from './security/principal.ts';
 import { tokenRevoked } from './security/revocation.ts';
 
@@ -201,6 +201,11 @@ export function registerMcpOAuthRoutes(app: Express) {
     if (grant === 'refresh_token') {
       const id = b.refresh_token ? verifyMcpToken(b.refresh_token) : null;
       if (!id || id.kind !== 'refresh') return void res.status(400).json({ error: 'invalid_grant', error_description: 'invalid refresh_token' });
+      // Re-apply the Firebase login gate: a 30d refresh must not outlive the user's removal from the policy bindings.
+      if (AUTH_PROVIDER === 'firebase' && !loginAllowed(fromAuthUser(id))) {
+        security()?.authDeny('mcp:oauth-refresh', 'not-whitelisted', req.ip);
+        return void res.status(400).json({ error: 'invalid_grant', error_description: 'User not in whitelist — sign in again' });
+      }
       return void res.json({
         access_token: signMcpToken(id.uid, id.email, 'access', ACCESS_TTL),
         token_type: 'Bearer',
