@@ -23,8 +23,3 @@ export function lookupIdempotent(uid: string, key: string): string | null {
 export function rememberIdempotent(uid: string, key: string, sessionId: string): void {
   store.set(mapKey(uid, key), { sessionId, ts: Date.now() });
 }
-
-/** Drop every key bound to a deleted session, so a retry can't be answered with its id. */
-export function forgetIdempotentSession(sessionId: string): void {
-  for (const [k, e] of store) if (e.sessionId === sessionId) store.delete(k);
-}

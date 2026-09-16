@@ -8,7 +8,6 @@ import { requireAuth, type AuthUser } from '../auth.ts';
 import { apiKeyRouter } from '../api-key-routes.ts';
 import { apiKeyPrincipal } from '../api-keys.ts';
 import { getOwners } from '../owners.ts';
-import { deleteSession } from '../sessions.ts';
 import { canonical, type AuditEventType } from './audit.ts';
 import { matches, validatePolicy, type BindingMatch, type PolicyFile } from './policy.ts';
 import { anonymous, fromAuthUser, fromEmailSender, fromInternal, fromSlack, type Principal } from './principal.ts';
@@ -262,21 +261,8 @@ ownerRouter.delete('/api/owner/blocks', ...writeGate, (req, res) => {
   if (commit(req, res, sec, next, 'blocklist.remove')) res.json({ ok: true });
 });
 
-// ── Sessions ──────────────────────────────────────────────────────────────────
-
-/** Delete a conversation and every per-session store (see deleteSession). 409 while a turn runs. Audit keeps its records. */
-ownerRouter.delete('/api/owner/sessions/:id', ...writeGate, (req, res) => {
-  const sec = runtimeOr(res, true);
-  if (!sec) return;
-  const id = String(req.params.id), r = deleteSession(id);
-  if (!r.ok) {
-    const [status, error] = ({ invalid: [400, 'Invalid session id'], not_found: [404, 'No such session'], running: [409, 'A turn is running in this session — stop it first'] } as const)[r.reason];
-    return void res.status(status).json({ error });
-  }
-  const user = userOf(req);
-  sec.record({ type: 'session.delete', principal: user.principal.id, sessionId: id, meta: { ownerUid: user.uid, sessionUid: r.meta.uid } });
-  res.json({ ok: true });
-});
+// The console deliberately exposes no conversation-delete route: the audit log is append-only, and removing a
+// conversation is a manual, on-box operation. The `session.delete` audit type stays for those out-of-band removals.
 
 // ── Audit ─────────────────────────────────────────────────────────────────────
 

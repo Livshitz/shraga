@@ -189,10 +189,14 @@ Owner-only UI (sidebar) over [`owner-routes.ts`](../../../src/server/security/ow
 - `GET|PUT /api/owner/policy` (PUT needs `version` from GET; 409 if missing/stale), `POST /api/owner/policy/test`
 - `GET /api/owner/principals`, `GET|POST|DELETE /api/owner/blocks` (blocking an owner → 400)
 - `POST /api/owner/tokens/revoke`, `GET|POST /api/owner/api-keys`, `DELETE /api/owner/api-keys/:id`
-- `DELETE /api/owner/sessions/:id` (409 while a turn runs), `GET /api/owner/audit`, `/audit/verify`
+- `GET /api/owner/audit`, `GET /api/owner/audit/verify`
 
-**Who:** reads = interactive login or uncapped owner API key. **Writes** (policy, blocks, revoke, keys,
-session delete) = interactive login only. The agent's internal token is always refused here and on
+**No conversation delete.** The console deliberately offers no way to delete a conversation — the audit log is
+append-only, and removing a conversation is a manual, on-box operation. (`session.delete` remains a valid audit
+event type so such an out-of-band removal can still be recorded.)
+
+**Who:** reads = interactive login or uncapped owner API key. **Writes** (policy, blocks, revoke, keys)
+= interactive login only. The agent's internal token is always refused here and on
 `PUT /api/config`, `PUT /api/mcps` and skill mutations. Any write on a passive standby → 409.
 
 ### Tamper protection
