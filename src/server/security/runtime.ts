@@ -170,17 +170,31 @@ export function admitTurn(principal: Principal, ctx?: { ip?: string; channel?: s
  * May the agent send an AUTOMATIC outbound reply to this inbound principal? For channels and add-ons
  * (mail, chat) to call before handing the model's text back to the sender.
  *
- * `false` when `allowUntrustedReplies` is off (the default) and the principal resolves BELOW `member`
- * rank — guest, anonymous, an unverified sender. Suppressing the reply does not drop the turn: it still
- * runs, and `escalate` still reaches owners. A member/operator/owner is always replyable, and this never
- * gates a human operator's own turns.
+ * `false` when `allowUntrustedReplies` is off (the default) and the principal is either UNVERIFIED or
+ * resolves BELOW `member` rank — guest, anonymous, a spoofable sender. Suppressing the reply does not drop
+ * the turn: it still runs, and `escalate` still reaches owners. A verified member/operator/owner is always
+ * replyable, and this never gates a human operator's own turns.
+ *
+ * WHY `verified` and not rank alone: a binding on `domain`/`emailIn` matches the CLAIMED `From:`, which
+ * nothing has authenticated, so `{ match: { domain: 'x' }, role: 'member' }` would otherwise let a spoofer
+ * promote himself to member rank and earn an automatic reply. Kinds whose identity is proven by construction
+ * set `verified: true` in their builder — `fromAuthUser` (user), `fromApiKey` (apikey), `fromInternal`
+ * (internal, incl. the no-human lanes) and `fromSlack` (slack) — so requiring `verified` never silences a
+ * logged-in user, an API key, an internal lane or a signature-verified Slack sender. Only `fromEmailSender`
+ * with an unaligned DKIM/DMARC result, and `anonymous()`, carry `verified: false`.
  *
  * Independent of `SECURITY_ENFORCE` — it gates outbound replies, not tools, so it applies in shadow mode too.
  *
  * FAILS CLOSED: no runtime, an invalid/fail-closed policy (no `member` role), or a throw ⇒ `false`.
- * Pass `sessionId` so a suppression is audited once per turn rather than once per call.
+ *
+ * AUDIT DEDUPE — pass `turnId`: a value that changes per inbound MESSAGE (a Gmail `messageId`, a webhook
+ * delivery id…). Like `turn.start`, the row is once per turn because the discriminator is a per-turn
+ * IDENTITY, not a time window, so a sustained campaign down one thread produces one row per message while a
+ * turn retried internally still collapses to one. `sessionId` is a poor key on its own — a Gmail `sessionId`
+ * is per-THREAD and permanent, so every later suppression in that thread fell inside the dedupe window and
+ * vanished. Omitting `turnId` keeps the old (per-session) behavior for callers that have no per-message id.
  */
-export function mayReplyTo(principal: Principal, ctx: { sessionId?: string; channel?: string } = {}): boolean {
+export function mayReplyTo(principal: Principal, ctx: { sessionId?: string; turnId?: string; channel?: string } = {}): boolean {
   try {
     if (getAgentConfig().allowUntrustedReplies === true) return true;
     const rt = current;
@@ -190,12 +204,12 @@ export function mayReplyTo(principal: Principal, ctx: { sessionId?: string; chan
     const member = rt.policy.effective(Infinity, MEMBER_ROLE);
     if (member.role !== MEMBER_ROLE) return false;
     const r = resolvePrincipal(rt.policy, principal);
-    if (r.rank >= member.rank) return true;
+    if (principal.verified && r.rank >= member.rank) return true;
     rt.record({
       type: 'guard.limit', principal: principal.id, role: r.role, sessionId: ctx.sessionId,
       target: ctx.channel ?? 'reply', reason: 'untrusted-reply',
       meta: { kind: principal.kind, verified: principal.verified, rank: r.rank, memberRank: member.rank },
-    }, `reply.suppressed|${ctx.sessionId ?? principal.id}`);
+    }, `reply.suppressed|${ctx.turnId ?? ctx.sessionId ?? principal.id}`);
     return false;
   } catch (e: any) {
     console.error(`[security] mayReplyTo threw — suppressing the reply: ${e?.message ?? e}`);
