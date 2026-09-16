@@ -25,10 +25,12 @@ describe('offload config', () => {
     expect(buildOffloadContextBlock(CFG)).toContain(CFG.gateway);
     expect(offloadEnv(CFG)).toEqual({ SHRAGA_OFFLOAD: '1', SHRAGA_OFFLOAD_GATEWAY: CFG.gateway, SHRAGA_OFFLOAD_MAX_LOCAL_FILE_MB: '1' });
   });
-  test('share routing is by size only — small media stays on the box', () => {
-    expect(shouldOffloadShare(2 * 1024 * 1024, undefined)).toBe(false);
-    expect(shouldOffloadShare(10, CFG)).toBe(false);
-    expect(shouldOffloadShare(2 * 1024 * 1024, CFG)).toBe(true);
+  test('share routing: media, oversize, or no origin → gateway; small non-media stays on the box', () => {
+    expect(shouldOffloadShare('a.mp4', 2 * 1024 * 1024, undefined)).toBe(false);
+    expect(shouldOffloadShare('a.pdf', 10, CFG)).toBe(false);
+    expect(shouldOffloadShare('a.pdf', 2 * 1024 * 1024, CFG)).toBe(true);
+    expect(shouldOffloadShare('a.mp4', 10, CFG)).toBe(true);
+    expect(shouldOffloadShare('a.pdf', 10, CFG, false)).toBe(true);
   });
   test('prompt block tells the agent pod links must be public', () => {
     expect(buildOffloadContextBlock(CFG)).toContain('Slack/email attachment');
@@ -163,13 +165,23 @@ describe('share_file via offload gateway (stub)', () => {
     expect(calls).toEqual(['GET /media/health', 'POST /media/ingest', 'POST /media/publish_url']);
   });
 
-  test('small media stays on the box public path when offload is set', async () => {
+  test('small media goes to the gateway when its links are public', async () => {
     calls.length = 0;
     const src = path.join(work, 'clip.mp4'); writeFileSync(src, 'SMALLVIDEO');
     const r = await sharer({ ...CFG, gateway: gw }).share(src);
     if (!r.ok) throw new Error(r.error);
-    expect(r.url).toStartWith('https://agent.example.com/uploads/shared/');
-    expect(calls).toEqual([]);
+    expect(r.url).not.toStartWith('https://agent.example.com/uploads/shared/');
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
+  test('small media falls back to the box when the gateway link is not public', async () => {
+    calls.length = 0; publicBase = 'http://100.83.37.11:4700';
+    try {
+      const src = path.join(work, 'clip2.mp4'); writeFileSync(src, 'SMALLVIDEO');
+      const r = await sharer({ ...CFG, gateway: gw }).share(src);
+      if (!r.ok) throw new Error(r.error);
+      expect(r.url).toStartWith('https://agent.example.com/uploads/shared/');
+    } finally { publicBase = 'https://pod.test'; }
   });
 
   test('gateway advertises a tailnet publicBase → refused before any bytes move, no link', async () => {
