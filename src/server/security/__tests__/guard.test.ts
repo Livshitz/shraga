@@ -211,8 +211,14 @@ describe('bounds', () => {
     expect(inner.buckets.size).toBeLessThanOrEqual(1_000);
     expect(inner.hits.size).toBeLessThanOrEqual(1_000);
     expect(inner.blocks.size).toBeLessThanOrEqual(1_000);
-    expect(performance.now() - t0).toBeLessThan(60_000);
-  }, 90_000);
+    // The CLAIM under test is the three size bounds above; the timing assertion only guards against
+    // a pathological regression (an O(n^2) sweep). An absolute budget made it a flake: on a loaded
+    // shared runner this loop took 77s and 102s against a 60s wall, failing releases for a property
+    // nobody broke. Stretch it by the same knob CI already stretches the scheduler tests with
+    // (SCHED_TEST_SCALE=4), so the ratio is identical and only a real regression trips it.
+    const scale = Math.max(1, Number(process.env.SCHED_TEST_SCALE || 1));
+    expect(performance.now() - t0).toBeLessThan(60_000 * scale);
+  }, 90_000 * Math.max(1, Number(process.env.SCHED_TEST_SCALE || 1)));
 
   test('concurrency ceiling: release on throw, idempotent release, rank >= 50 bypasses', async () => {
     const { g } = mk({ limits: { maxConcurrentTurns: 1 } });
