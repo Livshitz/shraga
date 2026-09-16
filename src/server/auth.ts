@@ -31,7 +31,7 @@ import { dataPath } from './paths.ts';
 import { apiKeyPrincipal, validateApiKey } from './api-keys.ts';
 import { isOwnerEmail } from './owners.ts';
 import { fromAuthUser, fromInternal, type Principal } from './security/principal.ts';
-import { security } from './security/runtime.ts';
+import { loginAllowed, security } from './security/runtime.ts';
 import { firebaseIssuedAt, tokenRevoked } from './security/revocation.ts';
 
 // Issued-at (`iat`) + revocation: every token format below carries `iat` for NEW tokens, in a shape the pre-iat
@@ -154,17 +154,6 @@ export function verifyMcpToken(token: string): { uid: string; email: string; kin
   return { kind, uid, email };
 }
 
-const WHITELIST_PATH = dataPath('whitelist.json');
-
-function loadWhitelist(): string[] {
-  if (!existsSync(WHITELIST_PATH)) return [];
-  try {
-    return JSON.parse(readFileSync(WHITELIST_PATH, 'utf-8'));
-  } catch {
-    return [];
-  }
-}
-
 export interface AuthUser {
   uid: string;
   email: string;
@@ -195,12 +184,11 @@ export async function verifyToken(token: string): Promise<AuthUser> {
     if (msg.includes('aud')) throw new Error(`Token audience mismatch (expected ${projectId}). Please sign out and sign in again.`);
     throw new Error(msg);
   }
-  const whitelist = loadWhitelist();
-  if (whitelist.length > 0 && !whitelist.includes(payload.email)) {
-    throw new Error('User not in whitelist');
-  }
   const uid = payload.user_id || payload.sub;
   const principal = fromAuthUser({ uid, email: payload.email });
+  // Login gate = policy bindings (member rank+) or OWNERS; fails closed. The message keeps the word 'whitelist':
+  // the client (App.tsx, useAgentSocket, lib/ws) keys its permanent "not allowed" handling on it.
+  if (!loginAllowed(principal)) throw new Error('User not in whitelist — ask an owner to add a binding (Owner Console → Bindings)');
   // auth_time = sign-in time; the hourly-refreshed iat would outlive a revocation.
   if (tokenRevoked(principal.id, firebaseIssuedAt(payload))) throw new Error('Token revoked — sign in again');
   return authUser(uid, payload.email, principal);

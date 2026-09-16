@@ -9,6 +9,7 @@
 // deduped per key per window, so a busy client isn't one line per request.
 import { MEMBER_ROLE, OWNER_ROLE, Policy, type PolicyOptions, type Resolved, type TamperReason } from './policy.ts';
 import { getAgentConfig } from '../agent-config.ts';
+import { isOwnerEmail } from '../owners.ts';
 import { Audit, type AuditEvent, type AuditOptions } from './audit.ts';
 import { Guard, type GuardOptions, type TurnAdmission } from './guard.ts';
 import { fromAuthUser, type Principal } from './principal.ts';
@@ -166,6 +167,31 @@ export function admitTurn(principal: Principal, ctx?: { ip?: string; channel?: s
   catch (e: any) { console.error(`[security] admitTurn threw — admitting: ${e?.message ?? e}`); return { ok: true, release: () => {} }; }
 }
 
+/** `member` rank of a VALID policy, else undefined. A fail-closed policy keeps only owner+anonymous, and resolving an
+ *  unknown role falls back to the DEFAULT role — whose rank would wrongly admit a guest. So require a real `member` role. */
+function memberRankOf(rt: SecurityRuntime | undefined): number | undefined {
+  if (!rt || !rt.policy.valid) return undefined;
+  const member = rt.policy.effective(Infinity, MEMBER_ROLE);
+  return member.role === MEMBER_ROLE ? member.rank : undefined;
+}
+
+/**
+ * May this interactive login (a verified `user` principal) use the app? The Firebase login gate — it replaced
+ * `whitelist.json`. Allowed iff an OWNER (OWNERS env), or the policy resolves it at/above `member` rank.
+ * FAILS CLOSED for everyone else: no runtime yet (before boot's initSecurity), an invalid/fail-closed policy, or a throw
+ * ⇒ `false`. Owners are checked first and without the policy, so a broken policy can never lock them out.
+ */
+export function loginAllowed(principal: Principal): boolean {
+  if (principal.kind === 'user' && principal.verified && principal.email && isOwnerEmail(principal.email)) return true;
+  try {
+    const memberRank = memberRankOf(current);
+    return memberRank !== undefined && resolvePrincipal(current!.policy, principal).rank >= memberRank;
+  } catch (e: any) {
+    console.error(`[security] loginAllowed threw — denying: ${e?.message ?? e}`);
+    return false;
+  }
+}
+
 /**
  * May the agent send an AUTOMATIC outbound reply to this inbound principal? For channels and add-ons
  * (mail, chat) to call before handing the model's text back to the sender.
@@ -198,17 +224,14 @@ export function mayReplyTo(principal: Principal, ctx: { sessionId?: string; turn
   try {
     if (getAgentConfig().allowUntrustedReplies === true) return true;
     const rt = current;
-    if (!rt || !rt.policy.valid) return false;
-    // A fail-closed policy keeps only owner+anonymous, and resolving an unknown role falls back to the
-    // DEFAULT role — whose rank would wrongly admit a guest. So require a real `member` role.
-    const member = rt.policy.effective(Infinity, MEMBER_ROLE);
-    if (member.role !== MEMBER_ROLE) return false;
+    const memberRank = memberRankOf(rt);
+    if (!rt || memberRank === undefined) return false;
     const r = resolvePrincipal(rt.policy, principal);
-    if (principal.verified && r.rank >= member.rank) return true;
+    if (principal.verified && r.rank >= memberRank) return true;
     rt.record({
       type: 'guard.limit', principal: principal.id, role: r.role, sessionId: ctx.sessionId,
       target: ctx.channel ?? 'reply', reason: 'untrusted-reply',
-      meta: { kind: principal.kind, verified: principal.verified, rank: r.rank, memberRank: member.rank },
+      meta: { kind: principal.kind, verified: principal.verified, rank: r.rank, memberRank },
     }, `reply.suppressed|${ctx.turnId ?? ctx.sessionId ?? principal.id}`);
     return false;
   } catch (e: any) {

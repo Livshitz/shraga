@@ -98,8 +98,7 @@ Prefer a programmatic `createShraga().registerFeature(...)` embed when you own t
 
 - **`data/` layout** (flat files, no DB): conversations/sessions, `skills/`, `extensions/`,
   `shraga.config.ts`, uploads, `security/` + `audit/` (see Security model), and the legacy
-  `whitelist.json` (Firebase login allowlist + operator contacts seed; read once into the first
-  `policy.json`). All via `dataPath()`.
+  `whitelist.json` (operator contacts seed; read once into the first `policy.json` — no longer a login gate). All via `dataPath()`.
 - **`quarantine/`** — untrusted inbound content held for operator review; not synced, and neither writable nor
   readable by agent tools (see Tamper protection).
 - **Deployment config** — `DATA_DIR/shraga.config.ts` (canonical filename; `unclaw.config.ts` is a
@@ -136,6 +135,11 @@ Example policy: [`defaults/security/policy.example.json`](../../../defaults/secu
   of an owner. A Slack sender or email carrying an owner address is not owner.
 - **Bindings are first-match** in file order, on `kind` / `id` / `emailIn` / `domain` / `verified`; no match ⇒
   `default`. Slack senders and lanes with an email also match as that email's login would.
+- **Login gate (Firebase):** a login is admitted iff `OWNERS` or it resolves at/above `member` rank
+  (`loginAllowed`, `runtime.ts`; re-checked on MCP OAuth refresh); otherwise 403 `User not in whitelist`. Fails closed: invalid policy or no runtime ⇒
+  owners only. **Breaking (replaced `whitelist.json`):** an install with no whitelist used to admit every Firebase
+  user; with no binding it now admits owners only — add a `kind:user` + emails binding (member/operator) in
+  Owner Console → Bindings. Local auth is unaffected.
 - **API keys** act for their creator, re-resolved per request. A key `role` caps it: never above the creator,
   never owner. `expiresAt` retires it. Only an interactive login can mint a key.
 - **No-human principals:** built-in/module schedules and the legacy raw `INTERNAL_API_TOKEN` → `operator`.
