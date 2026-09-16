@@ -158,7 +158,7 @@ Example policy: [`defaults/security/policy.example.json`](../../../defaults/secu
 - **The file:** missing ⇒ generated once (legacy `whitelist.json` → operator binding, then
   `ShragaOptions.security.migrate`); invalid, or deleted after generation ⇒ fail closed (owners only). Only
   content the server wrote is hot-reloaded; any other edit is ignored, audited `policy.tamper`, owners alerted.
-  Change it through the Owner Console.
+  Change it through the Owner Console (Bindings: binding emails are edited as chips — invalid addresses flagged).
 
 ### Session taint floor
 A session's effective role is the lowest-ranked role that ever contributed to it. The gate re-reads it on
@@ -211,7 +211,7 @@ limits/blocks don't apply — set `127.0.0.1,::1` when that proxy is the only in
 - Removing a binding or an `OWNERS` entry applies on the next request (roles are never baked into tokens).
 
 ### Owner Console
-Owner-only UI (sidebar) over [`owner-routes.ts`](../../../src/server/security/owner-routes.ts):
+Owner-only UI (shield icon in the global top bar; mobile ⋮ menu) over [`owner-routes.ts`](../../../src/server/security/owner-routes.ts):
 - `GET|PUT /api/owner/policy` (PUT needs `version` from GET; 409 if missing/stale), `POST /api/owner/policy/test`
 - `GET /api/owner/principals`, `GET|POST|DELETE /api/owner/blocks` (blocking an owner → 400)
 - `POST /api/owner/tokens/revoke`, `GET|POST /api/owner/api-keys`, `DELETE /api/owner/api-keys/:id`
