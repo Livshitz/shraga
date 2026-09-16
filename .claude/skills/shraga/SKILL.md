@@ -163,10 +163,10 @@ the link and continues as themselves; the escalated session never upgrades.
 
 ### Sharing files (`share_file`)
 In-process tool `mcp__shraga-share__share_file` (`src/server/share-file.ts`), attached to full-access turns
-only (every turn when `SECURITY_ENFORCE` is off; `*`-tools profiles when on). It copies a file from the data
-dir / workspace / tmp into `<data>/uploads/shared/<random-hex>-<name>` (served public, no auth) and returns
-`<publicOrigin>/uploads/shared/…`. Refuses secrets, dotfiles/hidden dirs, server-owned data, and paths outside
-those roots (by realpath). No public origin ⇒ error telling the agent to attach the file. The agent must never
+only (every turn when `SECURITY_ENFORCE` is off; `*`-tools profiles when on). It copies a file from the workspace
+(only) into `<data>/uploads/shared/<random-hex>-<name>` (served public, no auth) and returns
+`<publicOrigin>/uploads/shared/…`. Refuses secrets/key names, dotfiles/hidden dirs, hardlinked files, >500MB, and paths outside
+the workspace (by realpath). `/uploads/shared` is served nosniff + CSP sandbox; non-media downloads as attachment. No public origin ⇒ error telling the agent to attach the file. The agent must never
 build share URLs by hand.
 
 ### Untrusted replies
