@@ -1,10 +1,10 @@
 name: Publish to npm
 
 # Publishes to public npm on every push to main.
-# The npm token is NOT stored per-repo — it's fetched at publish time from a scoped,
-# read-only secrets broker (single-key endpoint: returns ONLY this secret). The
-# endpoint URL and its credential live in GitHub secrets (NPM_TOKEN_URL,
-# NPM_BROKER_SECRET), never in this file, so it's safe in a public repo.
+# The npm token is NOT stored per-repo — it's fetched at publish time from the bodify
+# secrets store, the one place every repo of ours reads its publishing credential from.
+# Only the store's credential lives in a GitHub secret (BODIFY_API_KEY); no token and no
+# endpoint credential is written in this file, so it's safe in a public repo.
 on:
   push:
     branches: [main]
@@ -49,18 +49,30 @@ jobs:
           git commit -m "chore(release): v$(node -p "require('./package.json').version") [skip ci]"
           git tag -a "v$(node -p "require('./package.json').version")" -m "v$(node -p "require('./package.json').version")"
 
-      # Fetch the npm token from a scoped, read-only secrets broker. Endpoint + credential
-      # live in GitHub secrets — never in this file. Token is masked in logs, passed via env.
-      - name: Fetch npm token from secrets broker
+      # Fetch the npm token from the bodify secrets store at publish time — the SAME source every
+      # other repo of ours publishes from, so rotating the token in ONE place fixes them all. A
+      # per-repo NPM_TOKEN copy goes stale silently and every publish then dies on a 404 (npm
+      # returns 404, not 403, for a token that cannot see the package — it reads as "no such
+      # package"). The only GitHub secret this needs is BODIFY_API_KEY.
+      - name: Fetch npm token from bodify secrets store
         env:
-          TOKEN_URL: ${{ secrets.NPM_TOKEN_URL }}
-          APP_SECRET: ${{ secrets.NPM_BROKER_SECRET }}
+          BODIFY_API_KEY: ${{ secrets.BODIFY_API_KEY }}
         run: |
-          token=$(curl -sS -f -H "x-app-secret: $APP_SECRET" "$TOKEN_URL" | jq -r '.value')
+          token=$(curl -sS -f -H "Authorization: Bearer $BODIFY_API_KEY" \
+            "https://bodify.bod.ee/api/apps/9ddba0fb-03bc-4490-8577-5e094b5b6792/env/NPM_TOKEN?environment=prod" \
+            | jq -r '.value')
           if [ -z "$token" ] || [ "$token" = "null" ]; then
-            echo "::error::Failed to fetch npm token from secrets broker"; exit 1
+            echo "::error::Failed to fetch NPM_TOKEN from the bodify secrets store"; exit 1
           fi
+          # Load-bearing: without the mask the token can be echoed into a public run log.
           echo "::add-mask::$token"
+          # Fail loudly HERE on a dead token, rather than letting npm report it as a 404 on the
+          # package — the misreading that cost a release cycle.
+          who=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
+            https://registry.npmjs.org/-/whoami)
+          if [ "$who" != "200" ]; then
+            echo "::error::NPM_TOKEN in bodify is not valid (npm whoami -> HTTP $who). Rotate it there."; exit 1
+          fi
           echo "NODE_AUTH_TOKEN=$token" >> "$GITHUB_ENV"
 
       - name: Publish
