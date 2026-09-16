@@ -271,7 +271,8 @@ describe('taint floor', () => {
     const PROTECTED = ['audit/2026-09.jsonl', 'audit', 'Audit/2026-09.jsonl', 'conversations/s1.jsonl', 'sessions/s1/artifacts/_index.json',
       'sessions.json', 'security/policy.json', 'security/.migrated', 'api-keys.json', 'api-keys.json.bak', 'oauth-clients.json',
       'mcps/u1.json', '.internal-token', '.mcp-oauth-secret', '.local-auth-secret', 'users.json',
-      '.git/config', '.git/hooks/pre-commit', '.git', '.gitignore']; // data-sync repo: core.fsmonitor/hooks = code exec
+      '.git/config', '.git/hooks/pre-commit', '.git', '.gitignore', // data-sync repo: core.fsmonitor/hooks = code exec
+      'quarantine', 'quarantine/inbound/m1.json']; // untrusted inbound text held for operator review
     const WRITERS: [string, string][] = [['Write', 'file_path'], ['Edit', 'file_path'], ['MultiEdit', 'file_path'], ['NotebookEdit', 'notebook_path']];
     const UNPROTECTED = ['workspace/notes.md', 'skills/x.md', 'audit-notes.md', 'schedules.json', 'contacts.json',
       'workspace/proj/.gitignore', 'workspace/proj/.git/config', '.github/workflows/x.yml', '.gitignore-notes.md'];

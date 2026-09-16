@@ -811,6 +811,7 @@ export class DataSync {
     // blocks.json (guard auto-blocks); policy.json + .migrated (the Owner Console writes them; a pulled change trips
     // the policy provenance/tamper check). Blue-green shares one DATA_DIR on one host, so nothing needs to cross hosts.
     'security/',
+    'quarantine/', // untrusted inbound content held for operator review — never synced
   ];
 
   /** Write or refresh .gitignore, appending any canonical entries it's missing (idempotent). */

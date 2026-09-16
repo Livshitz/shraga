@@ -100,6 +100,7 @@ Prefer a programmatic `createShraga().registerFeature(...)` embed when you own t
   `shraga.config.ts`, uploads, `security/` + `audit/` (see Security model), and the legacy
   `whitelist.json` (Firebase login allowlist + operator contacts seed; read once into the first
   `policy.json`). All via `dataPath()`.
+- **`quarantine/`** — untrusted inbound content held for operator review; not synced, not agent-writable.
 - **Deployment config** — `DATA_DIR/shraga.config.ts` (canonical filename; `unclaw.config.ts` is a
   legacy fallback), seeded from `defaults/shraga.config.ts`. Typed `ShragaConfig` in
   [`src/server/shraga-config.ts`](../../../src/server/shraga-config.ts); today it declares global
@@ -202,8 +203,8 @@ event type so such an out-of-band removal can still be recorded.)
 ### Tamper protection
 - **Guaranteed, every profile, flag on or off:** agent file tools (Write/Edit/MultiEdit/NotebookEdit) can't
   write server-owned data — `audit/`, `conversations/`, `sessions/`, `sessions.json`, `security/`,
-  `api-keys.json(.bak)`, `oauth-clients.json`, `mcps/`, server secret files, data-sync's `.git/` and
-  `.gitignore` (`PROTECTED_DATA_WRITE`, realpath-resolved).
+  `api-keys.json(.bak)`, `oauth-clients.json`, `mcps/`, server secret files, `quarantine/`, data-sync's
+  `.git/` and `.gitignore` (`PROTECTED_DATA_WRITE`, realpath-resolved).
 - **Guaranteed for restricted profiles:** no secret-file reads (no Bash/Grep, path-checked file tools, no
   `/proc`/`/sys`, Glob inside the workspace).
 - **Best-effort for full profiles (owner/operator):** they have Bash, which can read secrets and write data.
