@@ -130,6 +130,7 @@ describe('share_file via offload gateway (stub)', () => {
         stagedSeen = existsSync(path.join(data, decodeURIComponent(body.source)));
         return Response.json({ ok: true, file: `/pod/${path.basename(body.source)}` });
       }
+      if (u.pathname === '/media/preview' && body.file === '/pod/evicted.mp4') return Response.json({ ok: false, error: 'no such file' });
       if (u.pathname === '/media/preview') return Response.json({ ok: true, jobId: 'j1' });
       if (u.pathname === '/media/job') return Response.json({ ok: true, status: !jobDone || calls.filter(c => c.endsWith('/media/job')).length < 2 ? 'running' : 'done', result: { url: `${mintHost}/preview/j1` } });
       if (u.pathname === '/media/publish_url') return Response.json({ ok: true, url: `${mintHost}/p/${path.basename(body.file)}` });
@@ -154,6 +155,28 @@ describe('share_file via offload gateway (stub)', () => {
     expect(calls).toEqual(['GET /media/health', 'POST /media/ingest', 'POST /media/preview', 'GET /media/job', 'GET /media/job']);
     expect(shared()).toEqual([]);
     expect(readdirSync(path.join(data, 'uploads'))).toEqual([]);
+  });
+
+  const sha = (b: Buffer) => new Bun.CryptoHasher('sha256').update(b).digest('hex');
+  test('pod-copy sidecar with a matching sha → links the pod file, no re-upload', async () => {
+    calls.length = 0;
+    const src = path.join(work, 'gen.mp4'); writeFileSync(src, BIG);
+    writeFileSync(`${src}.pod.json`, JSON.stringify({ podFile: '/pod/fal/gen_1.mp4', sha256: sha(BIG) }));
+    const r = await sharer({ ...CFG, gateway: gw }).share(src);
+    if (!r.ok) throw new Error(r.error);
+    expect(calls).not.toContain('POST /media/ingest');
+    expect(calls).toContain('POST /media/preview');
+  });
+
+  test('stale sidecar (file changed) or evicted pod file → normal ingest', async () => {
+    for (const [podFile, digest] of [['/pod/fal/gen_1.mp4', 'deadbeef'], ['/pod/evicted.mp4', sha(BIG)]]) {
+      calls.length = 0;
+      const src = path.join(work, 'gen2.mp4'); writeFileSync(src, BIG);
+      writeFileSync(`${src}.pod.json`, JSON.stringify({ podFile, sha256: digest }));
+      const r = await sharer({ ...CFG, gateway: gw }).share(src);
+      if (!r.ok) throw new Error(r.error);
+      expect(calls).toContain('POST /media/ingest');
+    }
   });
 
   test('large image → publish_url (works even with no public origin)', async () => {
