@@ -39,6 +39,9 @@ export type TamperReason = 'hash-mismatch' | 'deleted';
 export const OWNER_ROLE = 'owner';
 /** Role of no-human system lanes (see resolve). */
 export const OPERATOR_ROLE = 'operator';
+/** Trust watermark: at or above this rank a principal is a known human of the deployment. Below it
+ *  (guest, anonymous) the sender is untrusted — see `mayReplyTo` (runtime.ts). */
+export const MEMBER_ROLE = 'member';
 const NONE_PROFILE: Profile = { tools: [], mcps: [], env: [], outbound: false, readScope: 'none', rate: '0' };
 const FULL_PROFILE: Profile = { tools: ['*'], mcps: ['*'], env: ['*'], outbound: true, readScope: 'all', rate: '600/h' };
 

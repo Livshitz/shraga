@@ -19,6 +19,7 @@ interface AgentConfig {
   skillDiscovery?: boolean;
   thinking?: 'adaptive' | 'enabled' | 'disabled';
   effort?: 'low' | 'medium' | 'high' | 'max';
+  allowUntrustedReplies?: boolean;
 }
 
 const FALLBACK_MODELS: EngineModel[] = [
@@ -340,6 +341,27 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
               className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${config.skillDiscovery !== false ? 'bg-primary' : 'bg-muted'}`}
             >
               <span className={`pointer-events-none block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform ${config.skillDiscovery !== false ? 'translate-x-5' : 'translate-x-0'}`} />
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div className="pr-4">
+              <label className="text-sm font-medium">Reply to untrusted senders</label>
+              <p className="text-xs text-muted-foreground">
+                Off: inbound messages from unverified or unknown senders are still processed and escalated to
+                owners, but the agent sends them no automatic reply.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              disabled={!canGlobal}
+              aria-checked={config.allowUntrustedReplies === true}
+              aria-label="Reply to untrusted senders"
+              onClick={() => setConfig((c) => ({ ...c, allowUntrustedReplies: c.allowUntrustedReplies === true ? false : true }))}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${config.allowUntrustedReplies === true ? 'bg-primary' : 'bg-muted'}`}
+            >
+              <span className={`pointer-events-none block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform ${config.allowUntrustedReplies === true ? 'translate-x-5' : 'translate-x-0'}`} />
             </button>
           </div>
 

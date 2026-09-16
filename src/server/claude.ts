@@ -30,33 +30,14 @@ import type { Principal } from './security/principal.ts';
 import { security, resolvePrincipal } from './security/runtime.ts';
 import { resolveAndGetEngine, ModelUnavailableError } from './engine/index.ts';
 
-const CONFIG_PATH = dataPath('agent-config.json');
-
 // ── Agent config (shared across users) ──────────────────────────────────────
+// The READ path lives in agent-config.ts (a leaf the security runtime can import without pulling this
+// module's graph); re-exported here so existing importers keep using claude.ts.
 
 export type { AgentSettings as AgentConfig } from './shraga-config.ts';
 import type { AgentSettings as AgentConfig } from './shraga-config.ts';
-
-const DEFAULT_CONFIG: AgentConfig = {
-  /** ToolSearch loads deferred MCP tools; without it, permission prompts / tool graph can block Meta Ads tools. */
-  allowedTools: ['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch'],
-  permissionMode: 'acceptEdits',
-  maxTurns: 15,
-  // Defaults are what a fresh self-hosted install runs before anyone touches the UI, so they favour
-  // cost/latency over ceiling. Both are overridable per-deployment via agent-config.json and per-send
-  // via directives — an operator who wants a bigger model sets it once; every operator pays for a default.
-  model: 'claude-sonnet-5',
-  effort: 'low',
-};
-
-export function getAgentConfig(): AgentConfig {
-  // agent-config.json (UI-writable, git-tracked) is the single source of truth for agent settings.
-  let config = { ...DEFAULT_CONFIG };
-  if (existsSync(CONFIG_PATH)) {
-    try { Object.assign(config, JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'))); } catch (e) { console.warn('[claude] failed to parse agent-config.json:', e); }
-  }
-  return config;
-}
+import { CONFIG_PATH, getAgentConfig } from './agent-config.ts';
+export { getAgentConfig };
 
 /**
  * Which credentials the claude-code SDK will resolve — process-global, derived from env at call time
