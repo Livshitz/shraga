@@ -72,6 +72,7 @@ import { claudeAccountDir } from './claude-account.ts';
 import { ClaudeLogin, ClaudeLoginError } from './claude-login.ts';
 import { getAll as getAllContacts } from './contacts.ts';
 import { artifactsRouter } from './artifacts/artifacts.routes.ts';
+import { setSharedFileHeaders } from './share-file.ts';
 import { ownerRouter } from './security/owner-routes.ts';
 import { handleArtifactToolUse } from './artifacts/artifacts.handler.ts';
 import { registerEngine } from './engine/index.ts';
@@ -853,7 +854,7 @@ app.get('/api/workspace/raw', requireAuth, (req, res) => {
   res.sendFile(resolved);
 });
 
-app.use('/uploads/shared', express.static(dataPath('uploads/shared'), { dotfiles: 'deny', index: false }));
+app.use('/uploads/shared', express.static(dataPath('uploads/shared'), { dotfiles: 'deny', index: false, setHeaders: setSharedFileHeaders }));
 app.use('/uploads', requireAuth, express.static(dataPath('uploads'), { dotfiles: 'deny', index: false }));
 
 app.post('/api/upload', requireAuth, express.raw({ type: '*/*', limit: '50mb' }), (req, res) => {

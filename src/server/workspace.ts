@@ -168,7 +168,7 @@ export function readWorkspaceFile(relPath: string): { content: string; binary: b
 /** How to hand a user a link to a file (video, image, PDF). Without it the agent invents share routes that don't exist. */
 function shareFilesGuide(): string {
   if (!getPublicOrigin()) return 'SHARING FILES: this deployment has no public origin — send files as attachments (e.g. Slack file upload), never a made-up URL.';
-  return `SHARING FILES: to give a user a link to a file, call the \`${SHARE_TOOL}\` tool and send the URL it returns. Never construct share URLs by hand.`;
+  return `SHARING FILES: to give a user a link to a file, call the \`${SHARE_TOOL}\` tool if you have it and send the URL it returns; without that tool, send the file as an attachment. Never construct share URLs by hand.`;
 }
 
 export function buildWorkspaceContextBlock(): string {
