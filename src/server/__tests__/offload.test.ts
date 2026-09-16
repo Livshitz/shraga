@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { resolveOffload, DEFAULT_OFFLOAD_MAX_LOCAL_FILE_MB } from '../shraga-config.ts';
-import { buildOffloadContextBlock, heavyLocalCommand, offloadEnv, OffloadGateway, shouldOffloadShare } from '../offload.ts';
+import { buildOffloadContextBlock, heavyLocalCommand, isPublicUrl, offloadEnv, OffloadGateway, shouldOffloadShare } from '../offload.ts';
 import { FileSharer } from '../share-file.ts';
 import { buildHooks } from '../hooks.ts';
 
@@ -25,13 +25,19 @@ describe('offload config', () => {
     expect(buildOffloadContextBlock(CFG)).toContain(CFG.gateway);
     expect(offloadEnv(CFG)).toEqual({ SHRAGA_OFFLOAD: '1', SHRAGA_OFFLOAD_GATEWAY: CFG.gateway, SHRAGA_OFFLOAD_MAX_LOCAL_FILE_MB: '1' });
   });
-  test('share routing', () => {
-    expect(shouldOffloadShare('a.mp4', 10, undefined)).toBe(false);
-    expect(shouldOffloadShare('a.mp4', 10, CFG)).toBe(true);
-    expect(shouldOffloadShare('a.PNG', 10, CFG)).toBe(true);
-    expect(shouldOffloadShare('a.pdf', 10, CFG)).toBe(false);
-    expect(shouldOffloadShare('a.pdf', 2 * 1024 * 1024, CFG)).toBe(true);
+  test('share routing is by size only — small media stays on the box', () => {
+    expect(shouldOffloadShare(2 * 1024 * 1024, undefined)).toBe(false);
+    expect(shouldOffloadShare(10, CFG)).toBe(false);
+    expect(shouldOffloadShare(2 * 1024 * 1024, CFG)).toBe(true);
   });
+  test('prompt block tells the agent pod links must be public', () => {
+    expect(buildOffloadContextBlock(CFG)).toContain('Slack/email attachment');
+  });
+  const publicUrls = ['https://circles-pod.taild06b03.ts.net/p/x', 'https://media.example.com/p/x', 'http://203.0.113.9:4700/p/x', 'https://8.8.8.8/p'];
+  const privateUrls = ['http://100.83.37.11:4700/p/x', 'http://100.64.0.1/p', 'http://10.1.2.3/p', 'http://172.20.0.1/p', 'http://192.168.1.2/p', 'http://127.0.0.1:4700/p',
+    'http://localhost:4700/p', 'http://circles-pod:4700/p', 'http://circles-pod.taild06b03.ts.net/p', 'http://[::1]/p', 'http://[fd7a:115c:a1e0::1]/p', 'http://169.254.1.1/p', 'http://pod.local/p', 'ftp://x.com/a', 'not a url'];
+  for (const u of publicUrls) test(`public: ${u}`, () => expect(isPublicUrl(u)).toBe(true));
+  for (const u of privateUrls) test(`not public: ${u}`, () => expect(isPublicUrl(u)).toBe(false));
 });
 
 describe('heavy local command guard', () => {
@@ -47,6 +53,12 @@ describe('heavy local command guard', () => {
     'echo hi && ffmpeg -i a.mp4 out.mkv',
     'bun run vendor/mcp-video/src/mcp/cli.ts --http',
     'nohup node /opt/x/mcp-audio/dist/server.js &',
+    'ffmpeg -i in.mp4 -c:v libx264 out.mp4 > /dev/null',
+    'ffmpeg -i in.mp4 -c:v libx264 out.mp4 >/dev/null 2>&1',
+    'ffmpeg -i in.mp4 out.mp4 &> /dev/null',
+    'ffmpeg -i in.mp4 -c:a copy out.mp4',
+    "cat > run.sh <<'EOF'\necho hi\nEOF\nffmpeg -i a.mp4 b.mp4",
+    'npx remotion render --log verbose a b',
   ];
   const cheap = [
     'grep -rn ffmpeg scripts/',
@@ -62,6 +74,15 @@ describe('heavy local command guard', () => {
     'ls vendor/mcp-video',
     'bun test vendor/mcp-video/src',
     'git commit -m "npx remotion render is refused"',
+    'ffmpeg -i a.mp4 -vn -acodec pcm_s16le audio.wav',
+    'ffmpeg -y -i a.mp4 -vn -c:a copy audio.m4a',
+    'ffmpeg -i a.mov voice.mp3',
+    'ffmpeg -i a.mp4 -vn -c:a copy out.mka',
+    "cat > build.sh <<'EOF'\nffmpeg -i a.mp4 -c:v libx264 b.mp4\nnpx remotion render x\nEOF",
+    'cat <<-EOF > notes.md\n\tffmpeg -i a.mp4 b.mp4\n\tEOF',
+    'npx remotion --help',
+    'bunx remotion --version',
+    'ffmpeg -i a.mp4 -f null - 2>&1 | tail -5',
   ];
   for (const c of heavy) test(`refuses: ${c}`, () => expect(heavyLocalCommand(c)).not.toBeNull());
   for (const c of cheap) test(`allows: ${c}`, () => expect(heavyLocalCommand(c)).toBeNull());
@@ -91,49 +112,105 @@ describe('share_file via offload gateway (stub)', () => {
 
   const calls: string[] = [];
   let stagedSeen = false;
+  let publicBase: string | undefined = 'https://pod.test';
+  let jobDone = true, ingestDelayMs = 0, mintHost = 'https://pod.test';
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
       const u = new URL(req.url);
       const body: any = req.method === 'POST' ? await req.json() : {};
       calls.push(`${req.method} ${u.pathname}`);
+      if (u.pathname === '/media/health') return Response.json({ ok: false, publicBase });
+      if (u.pathname === '/media/cancel') return Response.json({ ok: true, cancelled: body.jobId });
       if (u.pathname === '/media/ingest') {
+        if (ingestDelayMs) await Bun.sleep(ingestDelayMs);
         // The gateway pulls from the agent's /uploads — the staged file must exist while it does.
         stagedSeen = existsSync(path.join(data, decodeURIComponent(body.source)));
         return Response.json({ ok: true, file: `/pod/${path.basename(body.source)}` });
       }
       if (u.pathname === '/media/preview') return Response.json({ ok: true, jobId: 'j1' });
-      if (u.pathname === '/media/job') return Response.json({ ok: true, status: calls.filter(c => c.endsWith('/media/job')).length < 2 ? 'running' : 'done', result: { url: 'https://pod.test/preview/j1' } });
-      if (u.pathname === '/media/publish_url') return Response.json({ ok: true, url: `https://pod.test/p/${path.basename(body.file)}` });
+      if (u.pathname === '/media/job') return Response.json({ ok: true, status: !jobDone || calls.filter(c => c.endsWith('/media/job')).length < 2 ? 'running' : 'done', result: { url: `${mintHost}/preview/j1` } });
+      if (u.pathname === '/media/publish_url') return Response.json({ ok: true, url: `${mintHost}/p/${path.basename(body.file)}` });
       return Response.json({ ok: false, error: 'nope' }, { status: 404 });
     },
   });
   afterAll(() => server.stop(true));
   const gw = `http://localhost:${server.port}`;
-  const sharer = (offload: typeof CFG | undefined, origin = 'https://agent.example.com') => new FileSharer({
+  const sharer = (offload: typeof CFG | undefined, origin = 'https://agent.example.com', gwOpts = {}) => new FileSharer({
     dataDir: data, roots: () => [work], origin: () => origin, offload: () => offload,
-    gateway: (cfg) => new OffloadGateway({ gateway: cfg.gateway, pollMs: 10 }),
+    gateway: (cfg) => new OffloadGateway({ gateway: cfg.gateway, pollMs: 10, ...gwOpts }),
   });
+  const BIG = Buffer.alloc(2 * 1024 * 1024, 1); // over CFG's 1MB cap
   const shared = () => existsSync(path.join(data, 'uploads', 'shared')) ? readdirSync(path.join(data, 'uploads', 'shared')) : [];
 
-  test('video → ingest + preview job → preview URL; nothing left on the box', async () => {
-    const src = path.join(work, 'ad.mp4'); writeFileSync(src, 'VIDEO');
+  test('large video → ingest + preview job → public preview URL; nothing left on the box', async () => {
+    const src = path.join(work, 'ad.mp4'); writeFileSync(src, BIG);
     const r = await sharer({ ...CFG, gateway: gw }).share(src);
     if (!r.ok) throw new Error(r.error);
     expect(r.url).toBe('https://pod.test/preview/j1');
     expect(stagedSeen).toBe(true);
-    expect(calls).toEqual(['POST /media/ingest', 'POST /media/preview', 'GET /media/job', 'GET /media/job']);
+    expect(calls).toEqual(['GET /media/health', 'POST /media/ingest', 'POST /media/preview', 'GET /media/job', 'GET /media/job']);
     expect(shared()).toEqual([]);
     expect(readdirSync(path.join(data, 'uploads'))).toEqual([]);
   });
 
-  test('image → publish_url (works even with no public origin)', async () => {
+  test('large image → publish_url (works even with no public origin)', async () => {
     calls.length = 0;
-    const src = path.join(work, 'still.png'); writeFileSync(src, 'PNG');
+    const src = path.join(work, 'still.png'); writeFileSync(src, BIG);
     const r = await sharer({ ...CFG, gateway: gw }, '').share(src);
     if (!r.ok) throw new Error(r.error);
     expect(r.url).toBe('https://pod.test/p/still.png');
-    expect(calls).toEqual(['POST /media/ingest', 'POST /media/publish_url']);
+    expect(calls).toEqual(['GET /media/health', 'POST /media/ingest', 'POST /media/publish_url']);
+  });
+
+  test('small media stays on the box public path when offload is set', async () => {
+    calls.length = 0;
+    const src = path.join(work, 'clip.mp4'); writeFileSync(src, 'SMALLVIDEO');
+    const r = await sharer({ ...CFG, gateway: gw }).share(src);
+    if (!r.ok) throw new Error(r.error);
+    expect(r.url).toStartWith('https://agent.example.com/uploads/shared/');
+    expect(calls).toEqual([]);
+  });
+
+  test('gateway advertises a tailnet publicBase → refused before any bytes move, no link', async () => {
+    calls.length = 0; publicBase = 'http://100.83.37.11:4700';
+    try {
+      const src = path.join(work, 'big.mp4'); writeFileSync(src, BIG);
+      const r = await sharer({ ...CFG, gateway: gw }).share(src);
+      expect(r.ok).toBe(false);
+      if (!r.ok) { expect(r.error).toContain('attachment'); expect(r.error).not.toContain('100.83'); }
+      expect(calls).toEqual(['GET /media/health']);
+    } finally { publicBase = 'https://pod.test'; }
+  });
+
+  test('no advertised base but the minted link is tailnet-only → refused, staging cleaned', async () => {
+    calls.length = 0; publicBase = undefined; mintHost = 'http://100.83.37.11:4700';
+    try {
+      const src = path.join(work, 'big.pdf'); writeFileSync(src, BIG);
+      const r = await sharer({ ...CFG, gateway: gw }).share(src);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain('attachment');
+      expect(readdirSync(path.join(data, 'uploads')).filter(d => d.startsWith('offload-'))).toEqual([]);
+    } finally { publicBase = 'https://pod.test'; mintHost = 'https://pod.test'; }
+  });
+
+  test('preview job that outlives the wait is cancelled on the pod', async () => {
+    calls.length = 0; jobDone = false;
+    try {
+      const src = path.join(work, 'slow.mp4'); writeFileSync(src, BIG);
+      await expect(sharer({ ...CFG, gateway: gw }, undefined, { jobWaitMs: 60 }).share(src)).rejects.toThrow(/cancelled/);
+      expect(calls.at(-1)).toBe('POST /media/cancel');
+    } finally { jobDone = true; }
+  });
+
+  test('ingest request cap scales with file size (60s + 1s/MB), not the flat request cap', async () => {
+    calls.length = 0; ingestDelayMs = 150;
+    try {
+      const src = path.join(work, 'doc.pdf'); writeFileSync(src, BIG);
+      const r = await sharer({ ...CFG, gateway: gw }, undefined, { requestTimeoutMs: 50 }).share(src);
+      if (!r.ok) throw new Error(r.error);
+      expect(r.url).toBe('https://pod.test/p/doc.pdf');
+    } finally { ingestDelayMs = 0; }
   });
 
   test('small doc stays local when offload is set', async () => {
@@ -155,7 +232,7 @@ describe('share_file via offload gateway (stub)', () => {
 
   test('gateway failure surfaces as an error and cleans staging', async () => {
     const bad = new FileSharer({ dataDir: data, roots: () => [work], origin: () => 'https://a', offload: () => CFG, gateway: () => new OffloadGateway({ gateway: `${gw}/nope` }) });
-    await expect(bad.share(path.join(work, 'ad.mp4'))).rejects.toThrow(/offload gateway POST \/media\/ingest failed: 404/);
+    await expect(bad.share(path.join(work, 'ad.mp4'))).rejects.toThrow(/offload gateway POST \/media\/ingest failed: 404/); // ad.mp4 is BIG
     expect(readdirSync(path.join(data, 'uploads')).filter(d => d.startsWith('offload-'))).toEqual([]);
   });
 });

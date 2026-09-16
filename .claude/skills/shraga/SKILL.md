@@ -105,9 +105,13 @@ Prefer a programmatic `createShraga().registerFeature(...)` embed when you own t
   legacy fallback), seeded from `defaults/shraga.config.ts`. Typed `ShragaConfig` in
   [`src/server/shraga-config.ts`](../../../src/server/shraga-config.ts); today it declares global
   **MCPs** (`mcps`), `publicOrigin`, and `offload: { gateway, maxLocalFileMB? = 25 }` — a low-resource box
-  offloads heavy work: `<offload>` prompt section, `share_file` sends media / files over the cap through the
-  gateway (ingest → `/media/preview` job for video, `/media/publish_url` otherwise; contract in
-  [`src/server/offload.ts`](../../../src/server/offload.ts)), a PreToolUse Bash hook refuses ffmpeg encodes /
+  offloads heavy work: `<offload>` prompt section, `share_file` sends files over the cap through the
+  gateway (ingest → `/media/preview` job for video, `/media/publish_url` otherwise — the latter pins 7d, harmless
+  within pod retention; a job outliving the 5min wait is `/media/cancel`led) ONLY when the link is public: the
+  gateway's `/media/health` `publicBase` is checked before ingest and the minted URL after (loopback, RFC1918,
+  100.64/10 tailnet, bare/`.local` hosts, http `*.ts.net` are refused; https `*.ts.net` = Funnel is allowed);
+  a private link ⇒ error telling the agent to attach the file instead (contract in
+  [`src/server/offload.ts`](../../../src/server/offload.ts)), a PreToolUse Bash hook refuses ffmpeg video encodes (audio-only extraction, heredoc bodies, `--help` allowed) /
   remotion renders / starting mcp-video|mcp-audio, and agent env gets `SHRAGA_OFFLOAD=1`,
   `SHRAGA_OFFLOAD_GATEWAY`, `SHRAGA_OFFLOAD_MAX_LOCAL_FILE_MB`. Unset = today's behavior. Agent settings (model/engine/turns/thinking) live in the agent config written
   through the API, not this file.
@@ -172,8 +176,9 @@ only (every turn when `SECURITY_ENFORCE` is off; `*`-tools profiles when on). It
 (only) into `<data>/uploads/shared/<random-hex>-<name>` (served public, no auth) and returns
 `<publicOrigin>/uploads/shared/…`. Refuses secrets/key names, dotfiles/hidden dirs, hardlinked files, >500MB, and paths outside
 the workspace (by realpath). `/uploads/shared` is served nosniff + CSP sandbox; non-media downloads as attachment. No public origin ⇒ error telling the agent to attach the file. With `offload` configured,
-media and files over `maxLocalFileMB` are not copied to `uploads/shared`: they are briefly staged under `uploads/offload-<uuid>/`
-for the gateway to ingest, then linked from the gateway (see Deployment config). The agent must never
+files over `maxLocalFileMB` are not copied to `uploads/shared`: they are briefly staged under `uploads/offload-<uuid>/`
+for the gateway to ingest, then linked from the gateway if that link is public, else refused (see Deployment config).
+Files at or under the cap (media included) use the normal `uploads/shared` path. The agent must never
 build share URLs by hand.
 
 ### Untrusted replies
