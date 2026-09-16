@@ -6,6 +6,7 @@ import { Textarea } from './ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogBody, DialogFooter } from './ui/dialog';
 import { useSlots } from '@/lib/slots';
 import { useEngines, type EngineModel } from '@/hooks/useEngines';
+import { DEFAULT_MODEL } from '../../shared/models';
 import { ClaudeAccountSection } from './ClaudeAccountSection';
 
 interface AgentConfig {
@@ -21,7 +22,7 @@ interface AgentConfig {
 }
 
 const FALLBACK_MODELS: EngineModel[] = [
-  { value: '', label: 'Default (claude-sonnet-5)' },
+  { value: '', label: `Default (${DEFAULT_MODEL})` },
   { value: 'claude-fable-5-1', label: 'Fable 5.1 — frontier, most capable' },
   { value: 'claude-fable-5', label: 'Fable 5' },
   { value: 'claude-opus-5', label: 'Opus 5 — most capable, best for complex/agentic tasks' },

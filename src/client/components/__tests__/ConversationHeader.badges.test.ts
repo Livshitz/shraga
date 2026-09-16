@@ -1,4 +1,5 @@
 import { describe, test, expect } from 'bun:test';
+import { DEFAULT_MODEL } from '../../../shared/models';
 import { deriveRuntimeBadges } from '../ConversationHeader';
 
 /**
@@ -85,5 +86,7 @@ describe('deriveRuntimeBadges', () => {
     expect(b.provenance).toBe('pending');
     expect(b.engine).toBe('claude-code');
     expect(b.billingProvider).toBe('anthropic');
+    // The fallback must name the model the SERVER would actually run — not a literal that drifts.
+    expect(b.rawModel).toBe(DEFAULT_MODEL);
   });
 });
