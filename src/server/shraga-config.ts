@@ -78,7 +78,16 @@ export interface ShragaConfig {
    *  Used to build absolute session links for out-of-band notifications (push, alerts)
    *  that have no incoming request to derive it from. Falls back to `$PUBLIC_ORIGIN`. */
   publicOrigin?: string;
+  /** Offload heavy work (media generation/render/encode, large files) to an external pod for a low-resource box.
+   *  `gateway` is the base URL of a service implementing the contract documented in offload.ts. When set: the prompt
+   *  says so, share_file routes media/large files through the gateway, heavy local Bash commands are refused, and
+   *  agent subprocesses get SHRAGA_OFFLOAD=1 / SHRAGA_OFFLOAD_GATEWAY / SHRAGA_OFFLOAD_MAX_LOCAL_FILE_MB.
+   *  Unset = no offload (default). */
+  offload?: { gateway: string; maxLocalFileMB?: number };
 }
+
+export interface OffloadSettings { gateway: string; maxLocalFileMB: number }
+export const DEFAULT_OFFLOAD_MAX_LOCAL_FILE_MB = 25;
 
 export interface HttpSidecarSpec {
   name: string;
@@ -264,6 +273,19 @@ export function getShragaConfigSync(): ShragaConfig {
 export function getPublicOrigin(): string {
   const origin = getShragaConfigSync().publicOrigin ?? process.env.PUBLIC_ORIGIN ?? '';
   return origin.trim().replace(/\/+$/, '');
+}
+
+/** Resolved offload settings, or undefined when this deployment does not offload (no config / blank gateway). */
+export function getOffload(): OffloadSettings | undefined {
+  return resolveOffload(getShragaConfigSync());
+}
+
+export function resolveOffload(config: ShragaConfig): OffloadSettings | undefined {
+  const o = config.offload;
+  const gateway = o?.gateway?.trim().replace(/\/+$/, '');
+  if (!gateway) return undefined;
+  const mb = Number(o!.maxLocalFileMB);
+  return { gateway, maxLocalFileMB: Number.isFinite(mb) && mb > 0 ? mb : DEFAULT_OFFLOAD_MAX_LOCAL_FILE_MB };
 }
 
 /** Absolute link to a session in the web UI, or `undefined` when no public origin is configured. */

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { signInternalToken } from '../auth.ts';
 import { buildHooks } from '../hooks.ts';
+import { offloadEnv } from '../offload.ts';
 import { listSkills } from '../skills.ts';
 import { loadAgents } from '../agents.ts';
 import { registerProactiveMessage } from '../slack/sessions.ts';
@@ -346,6 +347,7 @@ export class ClaudeCodeEngine implements AgentEngine {
     sdkEnv.SHRAGA_USER_UID = sdkEnv.UNCLAW_USER_UID = opts.uid;
     if (opts.userEmail) sdkEnv.SHRAGA_USER_EMAIL = sdkEnv.UNCLAW_USER_EMAIL = opts.userEmail;
     sdkEnv.SHRAGA_SESSION_ID = sdkEnv.UNCLAW_SESSION_ID = opts.sessionId ?? '';
+    Object.assign(sdkEnv, offloadEnv());
     // Per-command wall-clock cap for the SDK's Bash tool. Without it a single unbounded command
     // (e.g. `curl` with no `-m` against an SSE endpoint that streams nothing) eats the whole turn and
     // the agent answers with "reads were interrupted". The model still sees `[exit 124]` + partial

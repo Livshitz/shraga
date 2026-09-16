@@ -20,6 +20,7 @@ import {
 } from './skills.ts';
 
 import { buildWorkspaceContextBlock, expandWorkspaceMentions } from './workspace.ts';
+import { buildOffloadContextBlock } from './offload.ts';
 import { parseDirectives, type Directives } from './directives.ts';
 import { parseSlashCommand, formatCommandBlock } from './commands.ts';
 import { getUserContextBlock } from './user-context.ts';
@@ -410,15 +411,16 @@ async function* runTurn(opts: StreamChatOpts, guard?: TurnGuard): AsyncGenerator
     }
   }
   const workspaceTree = buildWorkspaceContextBlock();
+  const offloadBlock = buildOffloadContextBlock();
   const contact = opts.userEmail ? contacts.find({ email: opts.userEmail }) : null;
   const userBlock = contacts.formatUserBlock(contact);
   const teamRoster = contacts.formatRoster();
   const userContextBlock = getUserContextBlock(contact);
-  const contextBlock = [userBlock, userContextBlock, teamRoster, defaultSkills, triggeredSkills, skillIndex, mcpSkills, workspaceTree].filter(Boolean).join('\n');
+  const contextBlock = [userBlock, userContextBlock, teamRoster, defaultSkills, triggeredSkills, skillIndex, mcpSkills, workspaceTree, offloadBlock].filter(Boolean).join('\n');
   const contextSections: Record<string, string> = Object.fromEntries(Object.entries({
     user: userBlock, userContext: userContextBlock, roster: teamRoster, defaultSkills,
     ...Object.fromEntries(triggeredSkillBlocks.map(([n, b]) => [`skill:${n}`, b])),
-    skillIndex, mcpSkills, workspace: workspaceTree,
+    skillIndex, mcpSkills, workspace: workspaceTree, offload: offloadBlock,
   }).filter(([, v]) => v));
 
   // Load conversation for the engine
