@@ -9,7 +9,8 @@ import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { z } from 'zod/v4';
 import { DATA_DIR } from './paths.ts';
-import { getPublicOrigin } from './shraga-config.ts';
+import { getOffload, getPublicOrigin, type OffloadSettings } from './shraga-config.ts';
+import { OffloadGateway, shouldOffloadShare } from './offload.ts';
 import { WORKSPACE_DIR } from './workspace.ts';
 import { SHARE_SERVER, SHARE_TOOL, touchesSecretPath } from './security/enforce.ts';
 
@@ -24,6 +25,9 @@ export class FileSharerOptions {
   /** Largest file that may be published. */
   maxBytes: number = MAX_SHARE_BYTES;
   origin: () => string = getPublicOrigin;
+  /** When set, media and files over `maxLocalFileMB` are shared through the offload gateway, not copied here. */
+  offload: () => OffloadSettings | undefined = getOffload;
+  gateway: (cfg: OffloadSettings) => OffloadGateway = (cfg) => new OffloadGateway({ gateway: cfg.gateway });
 }
 
 export const MAX_SHARE_BYTES = 500 * 1024 * 1024;
@@ -31,7 +35,7 @@ export const MAX_SHARE_BYTES = 500 * 1024 * 1024;
 /** Key/token files with no telltale extension (the secret path patterns cover .env, .pem, .key, service accounts). */
 const KEY_NAME_RE = /^(?:id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?|credentials?(?:[._-].*)?|tokens?(?:[._-].*)?|.*[._-]tokens?\.json)$/i;
 
-export type ShareResult = { ok: true; url: string; path: string; bytes: number } | { ok: false; error: string };
+export type ShareResult = { ok: true; url: string; path: string; bytes: number; offloaded?: boolean } | { ok: false; error: string };
 
 const real = (p: string) => { try { return realpathSync(p); } catch { return undefined; } };
 const within = (root: string, p: string) => { const r = path.relative(root, p); return !!r && !r.startsWith('..') && !path.isAbsolute(r); };
@@ -63,12 +67,18 @@ export class FileSharer {
   }
 
   public async share(filePath: string, name?: string): Promise<ShareResult> {
+    const offload = this.o.offload();
     const origin = this.o.origin();
-    if (!origin) return { ok: false, error: 'This deployment has no public origin, so no share link can be made. Send the file as an attachment instead (e.g. Slack file upload).' };
+    if (!origin && !offload) return { ok: false, error: 'This deployment has no public origin, so no share link can be made. Send the file as an attachment instead (e.g. Slack file upload).' };
     const c = this.check(filePath);
     if ('error' in c) return { ok: false, error: c.error };
     const { src, bytes } = c;
     const safe = (name || path.basename(src)).normalize('NFKD').replace(/[^\w.-]+/g, '-').replace(/^[.-]+/, '').slice(-100) || 'file';
+    // Low-resource box: media/large files never land in uploads/shared — the gateway ingests and links them.
+    if (shouldOffloadShare(safe, bytes, offload)) {
+      return { ok: true, url: await this.o.gateway(offload!).share(src, this.o.dataDir, safe), path: src, bytes, offloaded: true };
+    }
+    if (!origin) return { ok: false, error: 'This deployment has no public origin, so no share link can be made for this file. Send it as an attachment instead (e.g. Slack file upload).' };
     const fileName = `${randomBytes(16).toString('hex')}-${safe}`;
     const dir = path.join(this.o.dataDir, 'uploads', 'shared');
     mkdirSync(dir, { recursive: true });
@@ -109,7 +119,7 @@ export function shareMcpServer(sharer = new FileSharer()) {
         let r: ShareResult;
         try { r = await sharer.share(file_path, name); } catch (e) { r = { ok: false, error: `Share failed: ${(e as Error).message}` }; }
         if (!r.ok) console.warn(`[share] refused ${file_path}: ${r.error}`);
-        else console.log(`[share] ${file_path} -> ${r.path} (${r.bytes} bytes)`);
+        else console.log(`[share] ${file_path} -> ${r.offloaded ? `offload gateway ${r.url.split('?')[0]}` : r.path} (${r.bytes} bytes)`);
         return r.ok
           ? { content: [{ type: 'text' as const, text: `Public link (send exactly this): ${r.url}` }] }
           : { content: [{ type: 'text' as const, text: r.error }], isError: true };

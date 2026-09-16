@@ -249,6 +249,18 @@ export default defineConfig({
 Values in `env` resolve from `process.env` (your `.env` or system env) at startup. The legacy
 filename `unclaw.config.ts` is also accepted.
 
+Other keys: `publicOrigin` (absolute links in notifications), and `offload` for a low-resource box that
+sends heavy work to an external pod:
+
+```ts
+offload: { gateway: 'http://pod.internal:4700', maxLocalFileMB: 25 /* default */ },
+```
+
+When set, the prompt tells the agent to use the gateway, `share_file` routes media and files over
+`maxLocalFileMB` through it, heavy local Bash (ffmpeg encodes, remotion renders, starting mcp-video/mcp-audio)
+is refused, and agent subprocesses get `SHRAGA_OFFLOAD=1` / `SHRAGA_OFFLOAD_GATEWAY`. The gateway's HTTP
+contract is documented in `src/server/offload.ts`. Unset = none of this.
+
 ## Expose it (optional)
 
 Running on a home machine? Set `CLOUDFLARE_TUNNEL_TOKEN` for a public URL via Cloudflare Tunnel, or

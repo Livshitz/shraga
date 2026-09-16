@@ -8,6 +8,8 @@
 import type { HookCallback, HookCallbackMatcher, HookEvent, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { rewriteSlackMentions } from './slack/mention-rewrite.ts';
 import { PROTECTED_DATA_MESSAGE, writesProtectedData } from './security/enforce.ts';
+import { getOffload, type OffloadSettings } from './shraga-config.ts';
+import { heavyCommandDenyMessage, heavyLocalCommand } from './offload.ts';
 
 /** Patterns that indicate a long-running script the model should background. */
 const LONG_RUNNING_PATTERNS = [
@@ -152,12 +154,31 @@ const denyProtectedDataWrites: HookCallback = async (input) => {
   };
 };
 
+/** Offloading box only: refuse clearly heavy local media commands (ffmpeg encodes, remotion renders, media servers). */
+export const denyHeavyLocalMedia = (cfg: OffloadSettings): HookCallback => async (input) => {
+  if (input.hook_event_name !== 'PreToolUse') return {};
+  const { tool_name, tool_input } = input as PreToolUseHookInput;
+  if (tool_name !== 'Bash') return {};
+  const what = heavyLocalCommand(String((tool_input as Record<string, unknown>)?.command ?? ''));
+  if (!what) return {};
+  console.log(`[hooks] Denied Bash: ${what} (offload is configured)`);
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse' as const,
+      permissionDecision: 'deny' as const,
+      permissionDecisionReason: heavyCommandDenyMessage(what, cfg),
+    },
+  };
+};
+
 /** Build the hooks map to pass into SDK query() options.
  *  `exemptBashCommand` is the one command the turn was explicitly told to run in the foreground
  *  (a `bash` schedule's command) — see forceBackgroundForScripts. */
-export function buildHooks(opts?: { exemptBashCommand?: string }): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+export function buildHooks(opts?: { exemptBashCommand?: string; offload?: OffloadSettings }): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+  const offload = opts && 'offload' in opts ? opts.offload : getOffload();
   return {
     PreToolUse: [
+      ...(offload ? [{ matcher: 'Bash', hooks: [denyHeavyLocalMedia(offload)] }] : []),
       { matcher: 'Bash', hooks: [forceBackgroundForScripts(opts?.exemptBashCommand)] },
       { matcher: 'mcp__mcp-slack-use__post_slack_.*', hooks: [resolveSlackMentions] },
       { matcher: 'mcp__mcp-firebase-(?:prod|lab)__get_db.*', hooks: [guardFirebaseReads] },

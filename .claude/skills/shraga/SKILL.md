@@ -104,7 +104,12 @@ Prefer a programmatic `createShraga().registerFeature(...)` embed when you own t
 - **Deployment config** — `DATA_DIR/shraga.config.ts` (canonical filename; `unclaw.config.ts` is a
   legacy fallback), seeded from `defaults/shraga.config.ts`. Typed `ShragaConfig` in
   [`src/server/shraga-config.ts`](../../../src/server/shraga-config.ts); today it declares global
-  **MCPs** (`mcps`). Agent settings (model/engine/turns/thinking) live in the agent config written
+  **MCPs** (`mcps`), `publicOrigin`, and `offload: { gateway, maxLocalFileMB? = 25 }` — a low-resource box
+  offloads heavy work: `<offload>` prompt section, `share_file` sends media / files over the cap through the
+  gateway (ingest → `/media/preview` job for video, `/media/publish_url` otherwise; contract in
+  [`src/server/offload.ts`](../../../src/server/offload.ts)), a PreToolUse Bash hook refuses ffmpeg encodes /
+  remotion renders / starting mcp-video|mcp-audio, and agent env gets `SHRAGA_OFFLOAD=1`,
+  `SHRAGA_OFFLOAD_GATEWAY`, `SHRAGA_OFFLOAD_MAX_LOCAL_FILE_MB`. Unset = today's behavior. Agent settings (model/engine/turns/thinking) live in the agent config written
   through the API, not this file.
 - **MCPs** — global (via `shraga.config.ts` `mcps`) + per-user (UI-editable, under `data/`).
   Shorthand entries auto-resolve from `vendor/{name}`; full entries give explicit `command`/`args`/`env`.
@@ -166,7 +171,9 @@ In-process tool `mcp__shraga-share__share_file` (`src/server/share-file.ts`), at
 only (every turn when `SECURITY_ENFORCE` is off; `*`-tools profiles when on). It copies a file from the workspace
 (only) into `<data>/uploads/shared/<random-hex>-<name>` (served public, no auth) and returns
 `<publicOrigin>/uploads/shared/…`. Refuses secrets/key names, dotfiles/hidden dirs, hardlinked files, >500MB, and paths outside
-the workspace (by realpath). `/uploads/shared` is served nosniff + CSP sandbox; non-media downloads as attachment. No public origin ⇒ error telling the agent to attach the file. The agent must never
+the workspace (by realpath). `/uploads/shared` is served nosniff + CSP sandbox; non-media downloads as attachment. No public origin ⇒ error telling the agent to attach the file. With `offload` configured,
+media and files over `maxLocalFileMB` are not copied to `uploads/shared`: they are briefly staged under `uploads/offload-<uuid>/`
+for the gateway to ingest, then linked from the gateway (see Deployment config). The agent must never
 build share URLs by hand.
 
 ### Untrusted replies
