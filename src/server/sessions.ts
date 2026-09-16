@@ -1,15 +1,11 @@
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, renameSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, renameSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { DATA_DIR, dataPath } from './paths.ts';
 import type { Directives } from './directives.ts';
 import type { ClaudeAccountRef } from './claude-account.ts';
-import { claudeConfigDir, findClaudeTranscript, shortHash, type ClaudeResumeState } from './engine/claude-resume.ts';
-import { claudeAccountDir } from './claude-account.ts';
-import { forgetIdempotentSession } from './idempotency.ts';
-import { forgetUnreadSession } from './unread.ts';
-import { forgetSlackSession } from './slack/sessions.ts';
+import { findClaudeTranscript, type ClaudeResumeState } from './engine/claude-resume.ts';
 
 const SESSIONS_PATH = dataPath('sessions.json');
 
@@ -580,41 +576,8 @@ export function getSessionAbortController(sessionId: string): AbortController | 
   return globalSessionLocks.get(sessionId)?.abortController;
 }
 
-/**
- * Delete a conversation: its index entry, its files in `data/conversations/` (`<id>.jsonl`, `.partial.json`,
- * `.summary.md`, `.trace.yaml`), its uploads dir, its artifacts (`data/sessions/<id>/`), every user's unread marker,
- * its Slack thread/proactive mappings, idempotency keys and in-memory caches, and the claude-code resume transcript
- * recorded on its meta (other SDK transcripts carry no recorded id and stay). Never touches `data/audit`. Refused
- * while a turn holds the session lock. Returns the removed meta (for auditing), or why nothing was removed.
- */
-export function deleteSession(sessionId: string): { ok: true; meta: SessionMeta } | { ok: false; reason: 'invalid' | 'not_found' | 'running' } {
-  if (!/^[A-Za-z0-9._-]+$/.test(sessionId) || sessionId.startsWith('.')) return { ok: false, reason: 'invalid' }; // reaches rmSync
-  if (isSessionLocked(sessionId)) return { ok: false, reason: 'running' };
-  const sessions = loadIndex();
-  const meta = sessions.find((s) => s.sessionId === sessionId);
-  if (!meta) return { ok: false, reason: 'not_found' };
-  saveIndex(sessions.filter((s) => s !== meta));
-  flushIndex();
-  for (const ext of ['jsonl', 'partial.json', 'summary.md', 'trace.yaml']) rmSync(path.join(CONV_DIR, `${sessionId}.${ext}`), { force: true });
-  rmSync(dataPath('uploads', sessionId), { recursive: true, force: true });
-  rmSync(dataPath('sessions', sessionId), { recursive: true, force: true }); // artifacts, served by GET /api/artifacts/:sid/:id
-  forgetUnreadSession(sessionId);
-  forgetSlackSession(sessionId);
-  forgetIdempotentSession(sessionId);
-  const transcript = resumeTranscript(meta);
-  if (transcript) rmSync(transcript, { force: true });
-  unregisterLivePartial(sessionId);
-  for (const m of [liveModels, liveEngines, liveAccounts, floors]) m.delete(sessionId);
-  return { ok: true, meta };
-}
-
-/** The CC transcript the resume mapping points at, in the config dir whose hash it recorded (routed login, else default). */
-function resumeTranscript(meta: SessionMeta): string | null {
-  const r = meta.claudeResume;
-  if (!r?.claudeSessionId) return null;
-  const dir = [claudeAccountDir(meta.userEmail), null].map(claudeConfigDir).find((d) => shortHash(d) === r.configDirHash);
-  return dir ? findClaudeTranscript(r.claudeSessionId, dir) : null;
-}
+// Deleting a conversation is deliberately not exposed by the app (no route, no helper): the audit log is
+// append-only and an owner who really means to remove one does it by hand on the box.
 
 function findSessionFile(sessionId: string): string | null {
   return findClaudeTranscript(sessionId, path.join(homedir(), '.claude'));

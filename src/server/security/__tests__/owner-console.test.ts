@@ -294,7 +294,6 @@ describe('as the active instance', () => {
       ['POST', '/api/owner/tokens/revoke', { principalId: `user:nobody-${T}@console.test` }],
       ['POST', '/api/owner/api-keys', { label: 'x' }],
       ['DELETE', '/api/owner/api-keys/nope'],
-      ['DELETE', '/api/owner/sessions/nope'],
     ];
     const READS: [string, string, unknown?][] = [...ROUTES.filter(([m, u]) => !WRITES.some(([wm, wu]) => wm === m && wu === u)), ['GET', '/api/owner/api-keys']];
     const SYSTEM: [string, string, unknown?][] = [
@@ -349,27 +348,18 @@ describe('as the active instance', () => {
     expect(s.policy.current.blocklist.some(b => canonicalId(b.match).includes(OWNER))).toBe(false);
   }));
 
-  test('DELETE /api/owner/sessions/:id: login only, 409 while running, removes the conversation, audited without content', () => asActive(async () => {
-    const sessions = await import('../../sessions.ts');
-    const id = `console-del-${T}`;
-    sessions.upsertSession(id, 'private prompt text', { uid: BOB, email: BOB });
-    sessions.appendMessage(id, { id: 'm', role: 'user', blocks: [{ type: 'text', text: 'private message body' }] });
-    const ac = new AbortController();
-    sessions.acquireSessionLock(id, 'web', ac);
-    expect((await call(ownerTok, 'DELETE', `/api/owner/sessions/${id}`)).status).toBe(409);
-    sessions.releaseSessionLock(id, ac);
-    expect((await call(ownerTok, 'DELETE', `/api/owner/sessions/${id}`)).status).toBe(200);
-    expect(sessions.getSession(id)).toBeUndefined();
-    expect(sessions.loadConversation(id)).toEqual([]);
-    expect((await call(ownerTok, 'DELETE', `/api/owner/sessions/${id}`)).status).toBe(404);
-    const rec = (await sec()).audit.query({ limit: 1, type: 'session.delete' }).items[0];
-    expect(rec).toMatchObject({ principal: `user:${OWNER}`, sessionId: id, meta: { ownerUid: OWNER, sessionUid: BOB } });
-    expect(JSON.stringify(rec)).not.toMatch(/private/);
-  }));
+  // Conversation delete is deliberately not exposed. Asserted on the router itself, not on a response status:
+  // a request to a missing route 404s exactly like the old handler's "No such session" did, so status proves nothing.
+  test('the owner router registers no conversation-delete route', async () => {
+    const { ownerRouter } = await import('../owner-routes.ts');
+    type Route = { path: string; methods: string[] };
+    const walk = (stack: any[]): Route[] => stack.flatMap((l: any) => l.route
+      ? [{ path: String(l.route.path), methods: Object.keys(l.route.methods) }]
+      : l.handle?.stack ? walk(l.handle.stack) : []);
+    const all = walk((ownerRouter as any).stack);
+    expect(all.some(r => r.methods.includes('delete'))).toBe(true); // the walk does see DELETE routes (api-keys, blocks) — else this proves nothing
+    expect(all.filter(r => r.methods.includes('delete') && /session/i.test(r.path))).toEqual([]);
+  });
 });
 
 const canonicalId = (m: object) => JSON.stringify(m);
-
-test('DELETE /api/owner/sessions/:id on a PASSIVE standby → 409', async () => {
-  expect((await call(ownerTok, 'DELETE', '/api/owner/sessions/whatever')).status).toBe(409);
-});
