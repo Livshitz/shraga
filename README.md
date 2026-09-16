@@ -256,8 +256,9 @@ sends heavy work to an external pod:
 offload: { gateway: 'http://pod.internal:4700', maxLocalFileMB: 25 /* default */ },
 ```
 
-When set, the prompt tells the agent to use the gateway, `share_file` routes media and files over
-`maxLocalFileMB` through it, heavy local Bash (ffmpeg encodes, remotion renders, starting mcp-video/mcp-audio)
+When set, the prompt tells the agent to use the gateway, `share_file` routes files over `maxLocalFileMB`
+through it (smaller files, media included, keep the box's own public link) — but only when the gateway's links
+are public; a private/tailnet-only link is refused and the agent is told to send an attachment instead, heavy local Bash (ffmpeg encodes, remotion renders, starting mcp-video/mcp-audio)
 is refused, and agent subprocesses get `SHRAGA_OFFLOAD=1` / `SHRAGA_OFFLOAD_GATEWAY`. The gateway's HTTP
 contract is documented in `src/server/offload.ts`. Unset = none of this.
 

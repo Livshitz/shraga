@@ -10,7 +10,7 @@ import path from 'node:path';
 import { z } from 'zod/v4';
 import { DATA_DIR } from './paths.ts';
 import { getOffload, getPublicOrigin, type OffloadSettings } from './shraga-config.ts';
-import { OffloadGateway, shouldOffloadShare } from './offload.ts';
+import { OffloadGateway, OffloadPrivateLinkError, shouldOffloadShare } from './offload.ts';
 import { WORKSPACE_DIR } from './workspace.ts';
 import { SHARE_SERVER, SHARE_TOOL, touchesSecretPath } from './security/enforce.ts';
 
@@ -25,7 +25,7 @@ export class FileSharerOptions {
   /** Largest file that may be published. */
   maxBytes: number = MAX_SHARE_BYTES;
   origin: () => string = getPublicOrigin;
-  /** When set, media and files over `maxLocalFileMB` are shared through the offload gateway, not copied here. */
+  /** When set, files over `maxLocalFileMB` are shared through the offload gateway (only if it mints public links). */
   offload: () => OffloadSettings | undefined = getOffload;
   gateway: (cfg: OffloadSettings) => OffloadGateway = (cfg) => new OffloadGateway({ gateway: cfg.gateway });
 }
@@ -74,9 +74,15 @@ export class FileSharer {
     if ('error' in c) return { ok: false, error: c.error };
     const { src, bytes } = c;
     const safe = (name || path.basename(src)).normalize('NFKD').replace(/[^\w.-]+/g, '-').replace(/^[.-]+/, '').slice(-100) || 'file';
-    // Low-resource box: media/large files never land in uploads/shared — the gateway ingests and links them.
-    if (shouldOffloadShare(safe, bytes, offload)) {
-      return { ok: true, url: await this.o.gateway(offload!).share(src, this.o.dataDir, safe), path: src, bytes, offloaded: true };
+    // Low-resource box: large files never land in uploads/shared — the gateway ingests and links them, but only a
+    // link the recipient can open is returned (a tailnet-only pod link is refused, not handed out).
+    if (shouldOffloadShare(bytes, offload)) {
+      try {
+        return { ok: true, url: await this.o.gateway(offload!).share(src, this.o.dataDir, safe, bytes), path: src, bytes, offloaded: true };
+      } catch (e) {
+        if (e instanceof OffloadPrivateLinkError) { console.warn(`[share] offload gateway link is not public (${e.link}); refusing`); return { ok: false, error: e.message }; }
+        throw e;
+      }
     }
     if (!origin) return { ok: false, error: 'This deployment has no public origin, so no share link can be made for this file. Send it as an attachment instead (e.g. Slack file upload).' };
     const fileName = `${randomBytes(16).toString('hex')}-${safe}`;
@@ -110,7 +116,7 @@ export function shareMcpServer(sharer = new FileSharer()) {
     version: '1.0.0',
     tools: [tool(
       SHARE_TOOL,
-      'Publish a local file (video, image, PDF, …) and get a public link to send the user. The ONLY valid way to make a file link — never construct share URLs by hand. Anyone with the link can open it (no login).',
+      'Publish a local file (video, image, PDF, …) and get a public link to send the user. The ONLY valid way to make a file link — never construct share URLs by hand. Anyone with the link can open it (no login). If it refuses (e.g. the file is too large to link from here), send the file as a Slack/email attachment instead.',
       {
         file_path: z.string().min(1).describe('Absolute path of the file (must be under the workspace; move deliverables there first).'),
         name: z.string().max(200).optional().describe('Download name, e.g. "ad-v2.mp4". Defaults to the file name.'),

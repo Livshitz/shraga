@@ -7,11 +7,14 @@
 // gateway authenticates this box however it likes, e.g. network identity — no credential is sent from here):
 //   POST {gateway}/media/ingest       { source: '/uploads/<dir>/<file>' }  → { file } | { async: true, jobId }
 //        The gateway pulls `source` from THIS agent's authenticated `/uploads` route.
+//   GET  {gateway}/media/health                                             → { publicBase? }  (origin minted links use; optional)
 //   GET  {gateway}/media/job?jobId=…                                       → { status: queued|running|done|failed|cancelled, result?, error? }
 //        An async ingest's `result.file` is the gateway-side path.
 //   POST {gateway}/media/preview      { file, expiresHours? }              → { jobId }  (job result.url = human preview link)
 //   POST {gateway}/media/publish_url  { file, expiresHours? }              → { url }    (link to the original bytes)
+//   POST {gateway}/media/cancel       { jobId }                            (called when a job outlives our wait)
 // Every response may carry `ok: false` + `error`.
+// share_file only hands out a gateway link a human can open: a private/tailnet link is refused (see isPublicUrl).
 import { randomUUID } from 'node:crypto';
 import { linkSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
@@ -29,17 +32,39 @@ export function mediaKind(file: string): MediaKind | undefined {
   return VIDEO_EXT.has(ext) ? 'video' : AUDIO_EXT.has(ext) ? 'audio' : IMAGE_EXT.has(ext) ? 'image' : undefined;
 }
 
-/** Whether share_file must hand this file to the gateway instead of publishing it from the box. */
-export function shouldOffloadShare(file: string, bytes: number, cfg: OffloadSettings | undefined): boolean {
-  return !!cfg && (!!mediaKind(file) || bytes > cfg.maxLocalFileMB * 1024 * 1024);
+/** Whether share_file must hand this file to the gateway instead of publishing it from the box. Size is the only
+ *  criterion: a small file (media included) is served from the box's own public origin, which every recipient can open. */
+export function shouldOffloadShare(bytes: number, cfg: OffloadSettings | undefined): boolean {
+  return !!cfg && bytes > cfg.maxLocalFileMB * 1024 * 1024;
 }
+
+/** Whether a link is reachable by an arbitrary recipient (a Slack teammate, an external) — not loopback, a private
+ *  LAN (RFC1918 / link-local / ULA), the tailnet (100.64.0.0/10 CGNAT, http MagicDNS), or a bare/`.local` host.
+ *  `https://*.ts.net` counts as public: that is Tailscale Funnel. */
+export function isPublicUrl(url: string): boolean {
+  let u: URL;
+  try { u = new URL(url); } catch { return false; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const v4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/)?.slice(1).map(Number);
+  if (v4) {
+    const [a, b] = v4 as [number, number];
+    return !(a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127));
+  }
+  if (host.includes(':')) return !(host === '::1' || host === '::' || /^f[cd]/.test(host) || /^fe[89ab]/.test(host) || host.startsWith('::ffff:'));
+  if (!host.includes('.') || host === 'localhost' || /\.(localhost|local|internal|lan|home\.arpa)$/.test(host)) return false;
+  if (host.endsWith('.ts.net')) return u.protocol === 'https:';
+  return true;
+}
+
+export const OFFLOAD_PRIVATE_LINK_ERROR = 'This file is too large to share from this box, and the media pod has no public link origin yet (its links only open on the private network), so no link was made. Send the file as a Slack/email attachment instead, or ask an operator to publish it.';
 
 export class OffloadGatewayOptions {
   gateway = '';
   /** Cap for a single request. Bun's fetch otherwise cuts every request at an implicit 300s. */
   requestTimeoutMs = 60_000;
-  /** Overall wait for an async ingest / preview job. */
-  jobWaitMs = 20 * 60_000;
+  /** Overall wait for a preview job — share_file is an interactive tool call. An ingest waits longer, sized to the file. */
+  jobWaitMs = 5 * 60_000;
   pollMs = 3_000;
   /** Preview/link lifetime asked of the gateway. */
   expiresHours = 48;
@@ -54,13 +79,13 @@ export class OffloadGateway {
 
   private get o() { return this.options as OffloadGatewayOptions; }
 
-  public async api(method: 'GET' | 'POST', route: string, body?: unknown): Promise<Record<string, any>> {
+  public async api(method: 'GET' | 'POST', route: string, body?: unknown, timeoutMs = this.o.requestTimeoutMs): Promise<Record<string, any>> {
     const url = `${this.o.gateway.replace(/\/+$/, '')}${route}`;
     const init = {
       method,
       headers: body ? { 'Content-Type': 'application/json' } : {},
       body: body ? JSON.stringify(body) : undefined,
-      timeout: false, signal: AbortSignal.timeout(this.o.requestTimeoutMs), // explicit cap replaces Bun's implicit 300s
+      timeout: false, signal: AbortSignal.timeout(timeoutMs), // explicit cap replaces Bun's implicit 300s
     };
     const res = await this.o.fetch(url, init as RequestInit);
     const json = (await res.json().catch(() => ({}))) as Record<string, any>;
@@ -68,26 +93,42 @@ export class OffloadGateway {
     return json;
   }
 
-  /** Poll a job to `done` and return its result. */
-  public async waitJob(jobId: string): Promise<Record<string, any>> {
-    for (const end = Date.now() + this.o.jobWaitMs; Date.now() < end;) {
+  /** Poll a job to `done` and return its result. A job that outlives `waitMs` is cancelled so it frees the pod. */
+  public async waitJob(jobId: string, waitMs = this.o.jobWaitMs): Promise<Record<string, any>> {
+    for (const end = Date.now() + waitMs; Date.now() < end;) {
       const j = await this.api('GET', `/media/job?jobId=${encodeURIComponent(jobId)}`);
       if (j.status === 'done') return (j.result ?? {}) as Record<string, any>;
       if (j.status === 'failed' || j.status === 'cancelled') throw new Error(`offload job ${jobId} ${j.status}: ${j.error ?? 'no error given'}`);
       await Bun.sleep(this.o.pollMs);
     }
-    throw new Error(`offload job ${jobId} did not finish within ${Math.round(this.o.jobWaitMs / 60_000)}min`);
+    await this.api('POST', '/media/cancel', { jobId }).catch(e => console.error(`[offload] cancel of timed-out job ${jobId} failed: ${(e as Error).message}`));
+    throw new Error(`offload job ${jobId} did not finish within ${Math.round(waitMs / 1000)}s and was cancelled; no link was made. Send the file as an attachment instead, or retry later.`);
   }
 
-  /** Have the gateway pull an agent `/uploads/...` path; returns the gateway-side file. */
-  public async ingest(source: string): Promise<string> {
-    let r = await this.api('POST', '/media/ingest', { source });
-    if (r.async) r = await this.waitJob(String(r.jobId));
+  /** Have the gateway pull an agent `/uploads/...` path of `bytes`; returns the gateway-side file. The wait scales with
+   *  the size (60s + 1s/MB) — the pull crosses the network, a flat cap cut large files off. */
+  public async ingest(source: string, bytes = 0): Promise<string> {
+    const waitMs = Math.max(this.o.requestTimeoutMs, 60_000 + Math.ceil(bytes / (1024 * 1024)) * 1000);
+    let r = await this.api('POST', '/media/ingest', { source }, waitMs);
+    if (r.async) r = await this.waitJob(String(r.jobId), Math.max(this.o.jobWaitMs, waitMs));
     if (!r.file) throw new Error(`offload ingest of ${source} returned no file: ${JSON.stringify(r)}`);
     return String(r.file);
   }
 
-  /** Link for a gateway-side file: a transcoded preview for video, the original bytes otherwise. */
+  /** The gateway's advertised link origin, or undefined when it does not say (or cannot be asked). */
+  public async publicBase(): Promise<string | undefined> {
+    try {
+      const res = await this.o.fetch(`${this.o.gateway.replace(/\/+$/, '')}/media/health`, { signal: AbortSignal.timeout(this.o.requestTimeoutMs) });
+      const base = ((await res.json()) as Record<string, unknown>).publicBase; // health may be ok:false (degraded) and still say this
+      return typeof base === 'string' && base ? base : undefined;
+    } catch (e) {
+      console.warn(`[offload] could not read publicBase from ${this.o.gateway}/media/health: ${(e as Error).message}`);
+      return undefined;
+    }
+  }
+
+  /** Link for a gateway-side file: a transcoded preview for video, the original bytes otherwise (publish_url pins the
+   *  file 7 days — inherent to that route and within the pod's normal retention, so harmless for a human share). */
   public async link(file: string, kind: MediaKind | undefined): Promise<string> {
     const expiresHours = this.o.expiresHours;
     if (kind === 'video') {
@@ -103,19 +144,28 @@ export class OffloadGateway {
 
   /** Stage `src` under `<dataDir>/uploads/<id>/` (hardlink, copy fallback), let the gateway ingest it, drop the
    *  staging, and return a link. The staging exists only for the ingest, so the box's disk does not keep a copy. */
-  public async share(src: string, dataDir: string, name: string): Promise<string> {
+  public async share(src: string, dataDir: string, name: string, bytes = 0): Promise<string> {
+    // Refuse before moving any bytes when the gateway says its links are private.
+    const base = await this.publicBase();
+    if (base && !isPublicUrl(base)) throw new OffloadPrivateLinkError(base);
     const id = `offload-${randomUUID()}`;
     const dir = path.join(dataDir, 'uploads', id);
     mkdirSync(dir, { recursive: true });
     try {
       const staged = path.join(dir, name);
       try { linkSync(src, staged); } catch { copyFileSync(src, staged); }
-      const file = await this.ingest(`/uploads/${id}/${encodeURIComponent(name)}`);
-      return await this.link(file, mediaKind(name));
+      const file = await this.ingest(`/uploads/${id}/${encodeURIComponent(name)}`, bytes);
+      const url = await this.link(file, mediaKind(name));
+      if (!isPublicUrl(url)) throw new OffloadPrivateLinkError(url);
+      return url;
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }
+}
+
+export class OffloadPrivateLinkError extends Error {
+  public constructor(public readonly link: string) { super(OFFLOAD_PRIVATE_LINK_ERROR); }
 }
 
 /** Env handed to agent subprocesses so scripts can tell they run on an offloading box. Empty when unset. */
@@ -131,7 +181,7 @@ export function buildOffloadContextBlock(cfg = getOffload()): string {
     `This box is LOW-RESOURCE. Heavy work runs on an external pod behind the gateway ${cfg.gateway} (use its MCP tools).`,
     `- Generation, rendering, encoding/transcoding, large downloads, and any file over ${cfg.maxLocalFileMB}MB go through the gateway tools — never locally.`,
     '- Never run local ffmpeg encodes or remotion renders, and never hand-start media servers (mcp-video/mcp-audio) here; such Bash commands are refused. ffprobe and analysis are fine.',
-    '- To share media, use the gateway\'s preview tool, or share_file (it routes media and large files through the gateway).',
+    `- To share a file with people, use share_file. Files up to ${cfg.maxLocalFileMB}MB (media included) get a link from this box. Larger files go through the pod, but ONLY when the pod has a public link origin; otherwise share_file refuses — then send the file as a Slack/email attachment or ask an operator. Never hand people a gateway/pod link yourself (e.g. from its preview tool) unless it is a public https URL — tailnet/private links do not open for them.`,
     '</offload>',
   ].join('\n');
 }
@@ -139,15 +189,43 @@ export function buildOffloadContextBlock(cfg = getOffload()): string {
 // ── Heavy-command guard ─────────────────────────────────────────────────────────────────────────────
 
 /** Split a shell command into simple-command word lists on unquoted `; & | \n` (quote-aware, not a full shell parser;
- *  `bash -c "…"` / `$(…)` are not unpacked — this is a guardrail against the obvious, not a sandbox). */
+ *  `bash -c "…"` / `$(…)` are not unpacked — this is a guardrail against the obvious, not a sandbox). Redirections
+ *  (`> f`, `2>&1`, `&>/dev/null`) are dropped, and heredoc bodies are skipped — they are data, not commands. */
 export function shellSegments(cmd: string): string[][] {
   const segs: string[][] = [];
+  const heredocs: string[] = [];
   let words: string[] = [], word = '', quote: string | null = null, inWord = false;
   const endWord = () => { if (inWord) words.push(word); word = ''; inWord = false; };
   const endSeg = () => { endWord(); if (words.length) segs.push(words); words = []; };
   for (let i = 0; i < cmd.length; i++) {
     const c = cmd[i]!;
     if (quote) { if (c === quote) quote = null; else if (c === '\\' && quote === '"' && i + 1 < cmd.length) word += cmd[++i]; else word += c; continue; }
+    if (c === '<' && cmd[i + 1] === '<' && cmd[i + 2] !== '<') { // heredoc: remember the delimiter, skip the body at the next newline
+      const m = cmd.slice(i + 2).match(/^-?[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/);
+      if (m) { endWord(); heredocs.push(m[2]!); i += 1 + m[0].length; continue; }
+    }
+    if (c === '\n' && heredocs.length) {
+      endSeg();
+      for (const delim of heredocs.splice(0)) {
+        const end = cmd.slice(i + 1).search(new RegExp(`^[ \\t]*${delim}[ \\t]*$`, 'm'));
+        if (end < 0) { i = cmd.length; break; }
+        i += 1 + end + cmd.slice(i + 1 + end).indexOf(delim) + delim.length;
+      }
+      continue;
+    }
+    if (c === '>' || c === '<' || (c === '&' && cmd[i + 1] === '>')) { // redirection: drop the fd, the operator and its target
+      if (inWord && /^\d+$/.test(word)) { word = ''; inWord = false; } else endWord();
+      while (/[<>&]/.test(cmd[i + 1] ?? '')) i++;
+      if (/\d/.test(cmd[i + 1] ?? '') && cmd[i] === '&') { while (/\d/.test(cmd[i + 1] ?? '')) i++; continue; } // >&1
+      while (cmd[i + 1] === ' ' || cmd[i + 1] === '\t') i++;
+      let tq: string | null = null;
+      while (i + 1 < cmd.length) {
+        const t = cmd[i + 1]!;
+        if (tq) { if (t === tq) tq = null; } else if (t === '"' || t === "'") tq = t; else if (/[\s;&|()<>]/.test(t)) break;
+        i++;
+      }
+      continue;
+    }
     if (c === '"' || c === "'") { quote = c; inWord = true; }
     else if (c === '\\' && i + 1 < cmd.length) { word += cmd[++i]; inWord = true; }
     else if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '(' || c === ')') endSeg();
@@ -161,6 +239,7 @@ export function shellSegments(cmd: string): string[][] {
 const WRAPPERS = new Set(['sudo', 'nice', 'nohup', 'exec', 'time', 'command', 'env', 'timeout']);
 const RUNNERS = new Set(['npx', 'bunx', 'pnpx']);
 const IMAGE_OUT = /\.(png|jpe?g|bmp|ppm|webp|gif|tiff?)$/i;
+const AUDIO_OUT = /\.(wav|mp3|m4a|aac|flac|ogg|opus)$/i;
 
 /** ffmpeg argv (no binary) that encodes/transcodes a real output — vs analysis, stream copy, frame grabs, stdout. */
 function heavyFfmpeg(args: string[]): boolean {
@@ -171,6 +250,8 @@ function heavyFfmpeg(args: string[]): boolean {
   const frames = Number(val('-frames:v', '-vframes'));
   if (Number.isFinite(frames) && frames <= 2) return false;
   const out = args[args.length - 1]!;
+  // Audio-only extraction (`-vn`, or an audio-only output container) never touches a video encoder.
+  if (args.includes('-vn') || AUDIO_OUT.test(out)) return false;
   return !(out === '-' || out.startsWith('pipe:') || out === '/dev/null' || IMAGE_OUT.test(out));
 }
 
@@ -190,7 +271,7 @@ export function heavyLocalCommand(cmd: string): string | null {
     if (RUNNERS.has(bin) || ((bin === 'bun' || bin === 'pnpm' || bin === 'yarn') && rest[0] === 'x')) {
       if (bin !== 'npx' && bin !== 'bunx' && bin !== 'pnpx') rest = rest.slice(1);
       while (rest[0]?.startsWith('-')) rest = rest.slice(1);
-      if (/^(@remotion\/cli|remotion)(@.*)?$/.test(rest[0] ?? '')) return 'a remotion command';
+      if (/^(@remotion\/cli|remotion)(@.*)?$/.test(rest[0] ?? '') && !rest.slice(1).some(a => /^(--help|-h|--version|-v|help|versions)$/.test(a))) return 'a remotion command';
       if (rest[0] === 'ffmpeg' && heavyFfmpeg(rest.slice(1))) return 'an ffmpeg encode';
       continue;
     }
