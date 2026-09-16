@@ -4,6 +4,7 @@ import { dataPath } from './paths.ts';
 import { dataSync } from './data-sync.ts';
 import { injectFile } from './file-inject.ts';
 import { getPublicOrigin } from './shraga-config.ts';
+import { SHARE_TOOL } from './security/enforce.ts';
 
 export const WORKSPACE_DIR = process.env.WORKSPACE_DIR || dataPath('workspace');
 
@@ -166,9 +167,8 @@ export function readWorkspaceFile(relPath: string): { content: string; binary: b
 
 /** How to hand a user a link to a file (video, image, PDF). Without it the agent invents share routes that don't exist. */
 function shareFilesGuide(): string {
-  const origin = getPublicOrigin();
-  if (!origin) return 'SHARING FILES: this deployment has no public origin — send files as attachments (e.g. Slack file upload), never a made-up URL.';
-  return `SHARING FILES: to give a link to a file, copy it to ${dataPath('uploads/shared')}/<random-hex>-<name> and link ${origin}/uploads/shared/<random-hex>-<name> (public, no login). Before sending, verify the link with \`curl -sI\` returns 200 and the right content-type. Never invent other share routes.`;
+  if (!getPublicOrigin()) return 'SHARING FILES: this deployment has no public origin — send files as attachments (e.g. Slack file upload), never a made-up URL.';
+  return `SHARING FILES: to give a user a link to a file, call the \`${SHARE_TOOL}\` tool and send the URL it returns. Never construct share URLs by hand.`;
 }
 
 export function buildWorkspaceContextBlock(): string {

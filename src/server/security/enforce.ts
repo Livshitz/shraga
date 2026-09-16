@@ -36,6 +36,13 @@ export const ESCALATE_SERVER = 'security';
 export const ESCALATE_TOOL = 'escalate';
 export const ESCALATE_TOOL_ID = `mcp__${ESCALATE_SERVER}__${ESCALATE_TOOL}`;
 
+/** In-process MCP server carrying `share_file` (share-file.ts): publishes a file under a public link. Full (`*` tools)
+ *  profiles only — a restricted principal must not be able to publish arbitrary files to the internet. */
+export const SHARE_SERVER = 'shraga-share';
+export const SHARE_TOOL = 'share_file';
+export const SHARE_TOOL_ID = `mcp__${SHARE_SERVER}__${SHARE_TOOL}`;
+export const allowsShare = (p: Pick<Profile, 'tools'>) => p.tools.includes('*');
+
 /** `escalate` is opt-in by name (reply-only). `*` profiles don't get it: they can act, not just ask. */
 export const allowsEscalate = (p: Pick<Profile, 'tools'>) => p.tools.includes(ESCALATE_TOOL);
 export const allowsMcpServer = (p: Pick<Profile, 'mcps'>, server: string) => p.mcps.includes('*') || p.mcps.includes(server);
@@ -58,6 +65,7 @@ export function profileAllowsTool(p: Pick<Profile, 'tools' | 'mcps'>, tool: stri
   if (tool.startsWith('mcp__')) {
     const server = tool.slice(5).split('__')[0];
     if (server === ESCALATE_SERVER) return allowsEscalate(p);
+    if (server === SHARE_SERVER) return allowsShare(p);
     return allowsMcpServer(p, server) || p.tools.includes(tool);
   }
   const b = builtinTools(p);

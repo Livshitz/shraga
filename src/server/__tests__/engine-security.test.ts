@@ -2,7 +2,8 @@
 // mock.module is process-global). Flag OFF must be byte-for-byte today's config — the snapshot below was recorded
 // against the engine BEFORE enforcement existed (07182f7) and must never need updating for an enforcement change.
 // One deliberate, flag-INDEPENDENT baseline change since: the tamper-protection PreToolUse hook
-// (`Write|Edit|MultiEdit|NotebookEdit` → deny writes to server-owned data; normal workspace writes unchanged).
+// (`Write|Edit|MultiEdit|NotebookEdit` → deny writes to server-owned data; normal workspace writes unchanged), and
+// the in-process `share_file` server (mcpServers + its auto-approved tool id), attached to every full-access turn.
 import { afterAll, beforeAll, describe, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -61,7 +62,7 @@ async function shape(c: { options: any; mcpFile?: any }) {
     keys: Object.keys(o).sort(),
     tools: o.tools, allowedTools: o.allowedTools, disallowedTools: o.disallowedTools, permissionMode: o.permissionMode,
     settingSources: o.settingSources, maxTurns: o.maxTurns, includePartialMessages: o.includePartialMessages, model: o.model,
-    mcpServers: o.mcpServers, mcpFileServers: c.mcpFile ? Object.keys(c.mcpFile.mcpServers ?? c.mcpFile).sort() : undefined,
+    mcpServers: o.mcpServers && Object.fromEntries(Object.entries(o.mcpServers).map(([k, v]: any) => [k, v.type])), mcpFileServers: c.mcpFile ? Object.keys(c.mcpFile.mcpServers ?? c.mcpFile).sort() : undefined,
     extraArgKeys: Object.keys(o.extraArgs ?? {}),
     hooks: Object.fromEntries(Object.entries(o.hooks).map(([ev, ms]: any) => [ev, ms.map((m: any) => ({ matcher: m.matcher, hooks: m.hooks.length }))])),
     systemPromptSha: createHash('sha256').update(o.systemPrompt).digest('hex').slice(0, 16),
@@ -125,9 +126,11 @@ describe('flag ON: the engine applies the effective profile', () => {
   test('owner (full): all tools + MCPs, env = everything minus server secrets, scoped internal token, gate hook first', async () => {
     const { options: o, mcpFile } = await run(fromAuthUser({ uid: 'o', email: OWNER }), 'eng-on-owner');
     expect(o.tools).toEqual({ type: 'preset', preset: 'claude_code' });
-    expect(o.allowedTools).toEqual(['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch']);
+    expect(o.allowedTools).toEqual(['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch', 'mcp__shraga-share__share_file']);
     expect(Object.keys(mcpFile.mcpServers ?? mcpFile).sort()).toEqual(['mcp-notion', 'mcp-slack-use']);
-    expect(o.mcpServers).toBeUndefined();
+    expect(Object.keys(o.mcpServers)).toEqual(['shraga-share']);
+    expect(o.mcpServers['shraga-share'].type).toBe('sdk');
+    expect(await hookDecision(o, 'mcp__shraga-share__share_file', { file_path: '/tmp/x' })).toBe('pass');
     for (const k of Object.keys(SECRETS)) expect(o.env).not.toHaveProperty(k);
     expect(o.env.GITHUB_TOKEN).toBe('ghp_probe');
     expect(o.env.PATH).toBe(process.env.PATH);
@@ -143,6 +146,7 @@ describe('flag ON: the engine applies the effective profile', () => {
     expect(o.tools).toEqual(['Read', 'Glob', 'LS', 'WebSearch', 'ToolSearch']);
     expect(o.allowedTools).toEqual(['Read', 'WebSearch', 'Glob', 'LS', 'ToolSearch']);
     expect(Object.keys(mcpFile.mcpServers ?? mcpFile)).toEqual(['mcp-notion']);
+    expect(o.mcpServers).toBeUndefined(); // no share_file: a restricted principal can't publish files
     expect(o.env).not.toHaveProperty('GITHUB_TOKEN');
     expect(o.env).not.toHaveProperty('INTERNAL_API_TOKEN');
     for (const k of Object.keys(SECRETS)) expect(o.env).not.toHaveProperty(k);
@@ -172,6 +176,7 @@ describe('flag ON: the engine applies the effective profile', () => {
     floors.set(sid, 20); // a guest's message lands in the session while the turn runs
     expect(await deny(o, 'Bash', { command: 'ls' })).toBe('deny');
     expect(await hookDecision(o, 'Bash', { command: 'ls' })).toBe('deny');
+    expect(await hookDecision(o, 'mcp__shraga-share__share_file', { file_path: '/tmp/x' })).toBe('deny');
     const recs = rt.audit.query({ limit: 50, type: 'tool.deny' }).items;
     expect(recs.find(r => r.sessionId === sid && r.target === 'Bash')).toMatchObject({ role: 'guest', principal: `user:${OWNER}` });
   });
