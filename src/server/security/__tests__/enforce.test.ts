@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   buildAgentEnv, builtinTools, filterMcpServers, isServerSecretEnv, profileAllowsTool, touchesSecretPath, TurnGuard, enforcing,
-  PROTECTED_DATA_MESSAGE, writesProtectedData,
+  PROTECTED_DATA_MESSAGE, writesProtectedData, PROTECTED_DATA_READ_MESSAGE, readsProtectedData,
 } from '../enforce.ts';
 import { DATA_DIR } from '../../paths.ts';
 import { buildHooks } from '../../hooks.ts';
@@ -299,6 +299,35 @@ describe('taint floor', () => {
       expect(owner.check('Write', { file_path: 'logs/x.jsonl' }, ws).allow).toBe(false);
       expect(writesProtectedData('Read', { file_path: path.join(DATA_DIR, 'audit', 'x.jsonl') })).toBe(false);
       expect(writesProtectedData('Bash', { command: `rm -rf ${DATA_DIR}/audit` })).toBe(false); // best-effort layer only; OS-level chattr covers audit
+    });
+
+    // Quarantine holds attacker-controlled inbound text. Not writing it stops evidence laundering (f94b80d); not
+    // READING it is what stops the prompt injection — an agent turn that ingests it is the vector itself.
+    test('quarantine: Read/Glob/Grep are denied for member AND owner (enforce ON), reason quarantined-path; writes still denied; normal files unaffected', () => {
+      const { rt, member, owner } = guards();
+      const { ws } = workspace();
+      const q = path.join(DATA_DIR, 'quarantine');
+      const readDeny = { allow: false, message: PROTECTED_DATA_READ_MESSAGE };
+      for (const g of [member, owner]) {
+        // Read: the file itself and the directory, literal and via cwd-relative form.
+        expect(g.check('Read', { file_path: path.join(q, 'inbound/m1.json') })).toEqual(readDeny);
+        expect(g.check('Read', { file_path: q })).toEqual(readDeny);
+        expect(g.check('Read', { file_path: 'quarantine/inbound/m1.json' }, DATA_DIR)).toEqual(readDeny);
+        // Glob/Grep: the search ROOT and the pattern both reach the deny.
+        expect(g.check('Glob', { pattern: '*', path: q }, ws)).toEqual(readDeny);
+        expect(g.check('Glob', { pattern: 'quarantine/**', path: DATA_DIR }, ws)).toEqual(readDeny);
+        expect(g.check('Grep', { pattern: 'ignore previous', path: q }, ws)).toEqual(readDeny);
+        expect(g.check('Grep', { pattern: 'x', path: DATA_DIR, glob: 'quarantine/*.json' }, ws)).toEqual(readDeny);
+        // The write-deny from f94b80d still holds, and still reports the WRITE message, not the read one.
+        expect(g.check('Write', { file_path: path.join(q, 'inbound/m1.json') })).toEqual({ allow: false, message: PROTECTED_DATA_MESSAGE });
+      }
+      expect(rt.audit.query({ limit: 1000, type: 'tool.deny' }).items.some(r => r.reason === 'quarantined-path')).toBe(true);
+      // A normal workspace file is untouched, and so is an unrelated dir that merely shares the name.
+      expect(owner.check('Read', { file_path: path.join(ws, 'notes.md') }, ws)).toEqual({ allow: true });
+      expect(owner.check('Glob', { pattern: 'src/*.ts' }, ws)).toEqual({ allow: true });
+      expect(member.check('Read', { file_path: path.join(DATA_DIR, 'workspace/quarantine/notes.md') })).toEqual({ allow: true });
+      expect(readsProtectedData('Read', { file_path: path.join(ws, 'quarantine/x.json') }, ws)).toBe(false); // outside DATA_DIR
+      expect(readsProtectedData('Bash', { command: `cat ${q}/m1.json` })).toBe(false); // best-effort layer only, as for secret paths
     });
 
     test('protected data, flag OFF: the always-on engine hook denies the same writes with no TurnGuard at all', async () => {

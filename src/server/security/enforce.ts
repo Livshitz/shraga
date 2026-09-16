@@ -205,23 +205,55 @@ export const PROTECTED_DATA_WRITE: readonly string[] = [
   // data-sync's own repo: .git/config (core.fsmonitor, hooks) runs code on its next git call; .gitignore untracks state.
   '.git/', '.gitignore',
   // Untrusted inbound content held for operator review: the agent must not rewrite it (launder the evidence, or edit
-  // it into something an operator then approves). Writes only — reads follow the profile, as noted above.
+  // it into something an operator then approves). Reads are denied too — see PROTECTED_DATA_READ.
   'quarantine/',
 ];
+/** DATA_DIR-relative paths agent file tools may not READ either (same syntax as PROTECTED_DATA_WRITE).
+ *  `quarantine/` holds attacker-controlled inbound text kept for operator review. Not writing it stops the agent
+ *  laundering the evidence; not READING it is the point of the quarantine — ingesting that text into a turn IS the
+ *  prompt-injection vector. What this buys, precisely:
+ *  - RESTRICTED profiles (tools without `*`): a guarantee. No Bash/Grep at all, and Read/Glob/Grep are path-checked
+ *    literally and by realpath, so quarantined text cannot enter the turn through an agent tool.
+ *  - FULL profiles (owner/operator): best-effort, exactly as for secret paths above. Bash is auto-approved before
+ *    canUseTool, so `cat <data>/quarantine/x.json` is not stopped by this (nor by any deny list here); the file-tool
+ *    deny stops accidental ingestion, not a determined turn. Plan step 8 is the OS-level fix.
+ *  - Server-side code is unaffected: the lane that writes quarantine and the owner route that reads it use fs/HTTP,
+ *    never agent tools. This gate only sees agent tool calls.
+ *  Enforcement-only: TurnGuard is the sole caller, so with SECURITY_ENFORCE unset nothing here changes. */
+export const PROTECTED_DATA_READ: readonly string[] = ['quarantine/'];
+export const PROTECTED_DATA_READ_MESSAGE = 'Quarantined inbound content is held for operator review and cannot be read by agent tools.';
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 export const PROTECTED_DATA_MESSAGE = 'Audit logs, conversations, sessions, security policy, keys and MCP config are server-owned and cannot be modified by agent tools.';
+
+/** Do any of these path forms land on a DATA_DIR entry in `entries`? Absolute forms only (a relative literal would be
+ *  resolved against the process cwd by path.relative, which is not the form we mean); data dir matched in absolute and
+ *  realpath form. */
+function underDataEntry(forms: string[], entries: readonly string[], cwd: string, dataDir: string): boolean {
+  const roots = [...new Set(pathForms(dataDir, cwd).slice(1))];
+  return forms.filter(f => path.isAbsolute(f)).some(f => roots.some(root => {
+    const rel = path.relative(root, f);
+    if (!rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return false;
+    const r = rel.split(path.sep).join('/').toLowerCase(); // case-insensitive filesystems (macOS) alias Audit/ to audit/
+    return entries.some(e => (e.endsWith('/') ? r === e.slice(0, -1) || r.startsWith(e) : r === e));
+  }));
+}
 
 /** Would this file tool write a protected data path? Target and data dir both matched in absolute and realpath form. */
 export function writesProtectedData(tool: string, input: Record<string, unknown>, cwd: string = process.cwd(), dataDir: string = DATA_DIR): boolean {
   const target = WRITE_TOOLS.has(tool) ? str(input.file_path) ?? str(input.notebook_path) : undefined;
   if (!target) return false;
-  const roots = [...new Set(pathForms(dataDir, cwd).slice(1))];
-  return pathForms(target, cwd).slice(1).some(f => roots.some(root => {
-    const rel = path.relative(root, f);
-    if (!rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return false;
-    const r = rel.split(path.sep).join('/').toLowerCase(); // case-insensitive filesystems (macOS) alias Audit/ to audit/
-    return PROTECTED_DATA_WRITE.some(e => (e.endsWith('/') ? r === e.slice(0, -1) || r.startsWith(e) : r === e));
-  }));
+  return underDataEntry(pathForms(target, cwd), PROTECTED_DATA_WRITE, cwd, dataDir);
+}
+
+/** Would this call READ or LIST a protected data path (PROTECTED_DATA_READ)? Same path forms as touchesSecretPath, so
+ *  Read/Edit targets, a Glob/Grep search root and a Glob pattern are all covered. Bash is not — best-effort, see above. */
+export function readsProtectedData(tool: string, input: Record<string, unknown>, cwd: string = process.cwd(), dataDir: string = DATA_DIR): boolean {
+  if (tool === 'Bash') return false;
+  const hit = (forms: string[]) => underDataEntry(forms, PROTECTED_DATA_READ, cwd, dataDir);
+  const root = str(input.path);
+  const pattern = tool === 'Glob' ? str(input.pattern) : tool === 'Grep' ? str(input.glob) : undefined;
+  if (pattern && hit(globForms(pattern, root, cwd))) return true;
+  return [str(input.file_path), str(input.notebook_path), root].some(p => p !== undefined && hit(pathForms(p, cwd)));
 }
 
 /** Restricted profiles: does this Glob search outside the workspace root (`cwd`)? Its base is realpath-checked; any
@@ -277,6 +309,7 @@ export class TurnGuard {
     }
     const restricted = !eff.profile.tools.includes('*');
     const reason = writesProtectedData(tool, input, cwd) ? 'protected-path'
+      : readsProtectedData(tool, input, cwd) ? 'quarantined-path'
       : touchesSecretPath(tool, input, cwd, restricted) ? 'secret-path'
       : !profileAllowsTool(eff.profile, tool) ? 'profile'
         : restricted && tool === 'Glob' && globOutsideWorkspace(input, cwd) ? 'outside-workspace' : undefined;
@@ -290,6 +323,7 @@ export class TurnGuard {
     if (!reason) return { allow: true };
     log.log(`[security] Denied ${tool} for ${principal.id} (role=${eff.role} profile=${eff.profileName} ${reason}) session=${sessionId ?? 'new'}`);
     if (reason === 'protected-path') return { allow: false, message: PROTECTED_DATA_MESSAGE };
+    if (reason === 'quarantined-path') return { allow: false, message: PROTECTED_DATA_READ_MESSAGE };
     if (reason === 'secret-path') return { allow: false, message: 'Credential and secret files are not accessible.' };
     if (reason === 'outside-workspace') return { allow: false, message: `Glob is limited to the workspace for role "${eff.role}".` };
     const hint = allowsEscalate(eff.profile) ? ` Use the ${ESCALATE_TOOL} tool to hand this request to an owner.` : '';

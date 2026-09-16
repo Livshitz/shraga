@@ -100,7 +100,8 @@ Prefer a programmatic `createShraga().registerFeature(...)` embed when you own t
   `shraga.config.ts`, uploads, `security/` + `audit/` (see Security model), and the legacy
   `whitelist.json` (Firebase login allowlist + operator contacts seed; read once into the first
   `policy.json`). All via `dataPath()`.
-- **`quarantine/`** — untrusted inbound content held for operator review; not synced, not agent-writable.
+- **`quarantine/`** — untrusted inbound content held for operator review; not synced, and neither writable nor
+  readable by agent tools (see Tamper protection).
 - **Deployment config** — `DATA_DIR/shraga.config.ts` (canonical filename; `unclaw.config.ts` is a
   legacy fallback), seeded from `defaults/shraga.config.ts`. Typed `ShragaConfig` in
   [`src/server/shraga-config.ts`](../../../src/server/shraga-config.ts); today it declares global
@@ -207,6 +208,14 @@ event type so such an out-of-band removal can still be recorded.)
   `.git/` and `.gitignore` (`PROTECTED_DATA_WRITE`, realpath-resolved).
 - **Guaranteed for restricted profiles:** no secret-file reads (no Bash/Grep, path-checked file tools, no
   `/proc`/`/sys`, Glob inside the workspace).
+- **Quarantined content is also unreadable** (`PROTECTED_DATA_READ`, enforcement only — with `SECURITY_ENFORCE`
+  unset nothing changes). Reading attacker-controlled inbound text into a turn IS the prompt-injection vector the
+  quarantine exists to prevent, so Read/Glob/Grep on `quarantine/` are denied for **every profile, owner included**.
+  The guarantee is the same shape as for secret paths: **restricted profiles cannot reach it** (no Bash/Grep,
+  path-checked file tools); for **full profiles it is best-effort** — Bash is auto-approved by the SDK and never
+  reaches `canUseTool`, so `cat` is not stopped, and the deny prevents accidental ingestion, not a determined turn.
+  Server-side code is unaffected: the lane that writes quarantine and the owner route that reads it use fs/HTTP,
+  not agent tools.
 - **Best-effort for full profiles (owner/operator):** they have Bash, which can read secrets and write data.
   The audit log's backstop is the OS: as root on Linux run `src/scripts/harden-audit.sh <DATA_DIR>` hourly
   from cron (`chattr +a`; new month files need the next run). A planted month entry (symlink/dir) is
