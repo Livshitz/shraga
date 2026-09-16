@@ -204,6 +204,9 @@ export const PROTECTED_DATA_WRITE: readonly string[] = [
   'oauth-clients.json', 'mcps/', '.internal-token', '.mcp-oauth-secret', '.local-auth-secret', 'users.json',
   // data-sync's own repo: .git/config (core.fsmonitor, hooks) runs code on its next git call; .gitignore untracks state.
   '.git/', '.gitignore',
+  // Untrusted inbound content held for operator review: the agent must not rewrite it (launder the evidence, or edit
+  // it into something an operator then approves). Writes only — reads follow the profile, as noted above.
+  'quarantine/',
 ];
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 export const PROTECTED_DATA_MESSAGE = 'Audit logs, conversations, sessions, security policy, keys and MCP config are server-owned and cannot be modified by agent tools.';

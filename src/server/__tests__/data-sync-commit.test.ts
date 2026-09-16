@@ -4,6 +4,8 @@ import { DataSync, extractCommitSubject, fallbackCommitMessage, isChurnPath, wit
 test('data git ignores security/ (blocks.json, policy.json + .migrated: single writer is the active instance) but tracks audit/', () => {
   const entries = (DataSync as unknown as { GITIGNORE_ENTRIES: string[] }).GITIGNORE_ENTRIES;
   expect(entries).toContain('security/');
+  // quarantine/ holds attacker-supplied inbound text; committing it would push it to the data remote permanently.
+  expect(entries).toContain('quarantine/');
   expect(entries.filter(e => e.startsWith('audit'))).toEqual([]);
 });
 
