@@ -158,10 +158,17 @@ the link and continues as themselves; the escalated session never upgrades.
 ### Untrusted replies
 A turn's prompt carries roster/skill/workspace context, so a channel that mails the model's text back to an
 unverified sender is a disclosure path. `allowUntrustedReplies` (agent-config.json, owner-only, **default off**;
-Settings → "Reply to untrusted senders") gates the AUTOMATIC outbound reply to a principal resolving below
-`member` rank. Off, the turn still runs and `escalate` still reaches owners — only the reply is suppressed
-(audited `guard.limit`, reason `untrusted-reply`, once per turn). Channels/add-ons call
-`mayReplyTo(principal, { sessionId, channel })` (`runtime.ts`); no runtime or an invalid policy ⇒ no reply.
+Settings → "Reply to untrusted senders") gates the AUTOMATIC outbound reply to a principal that is
+**unverified** OR resolves below `member` rank. Verified matters on its own: a `domain`/`emailIn` binding
+matches the *claimed* `From:`, so without it `{ match: { domain: 'x' }, role: 'member' }` would let a spoofed
+sender earn a reply. Kinds proven by construction (user, apikey, internal, slack) set `verified: true` in
+their builder, so this never silences a logged-in user or an internal lane. Off, the turn still runs and
+`escalate` still reaches owners — only the reply is suppressed (audited `guard.limit`, reason
+`untrusted-reply`, once per turn). Channels/add-ons call
+`mayReplyTo(principal, { sessionId, turnId, channel })` (`runtime.ts`); `turnId` is a per-MESSAGE id (a Gmail
+`messageId`) and is what makes the row once per turn — `sessionId` alone is per-thread and permanent, so a
+campaign down one thread would collapse to a single row. Omitting it keeps the old per-session behavior.
+No runtime or an invalid policy ⇒ no reply.
 Independent of `SECURITY_ENFORCE`: it gates outbound replies, not tools, so it applies in shadow mode too.
 
 ### Guard
