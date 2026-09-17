@@ -33,8 +33,13 @@ fi
 # discarded value must be readable somewhere afterwards.
 case "$p" in
   *[!a-z0-9_-]*)
-    printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$UNCLAW_PANE_ID" "$p" \
-      >> "$UNCLAW_DATA_DIR/pane-profile-rejects.log" 2>/dev/null
+    rej="$UNCLAW_DATA_DIR/pane-profile-rejects.log"
+    printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$UNCLAW_PANE_ID" "$p" >> "$rej" 2>/dev/null
+    # BOUNDED. A persistently malformed CC_PROFILE appends on every SessionStart of every pane, so an
+    # unbounded log is a slow leak in a data dir that gets synced. The tail is what a later probe reads.
+    if [ "$(wc -l < "$rej" 2>/dev/null || echo 0)" -gt 500 ]; then
+      tail -n 200 "$rej" > "$rej.tmp" 2>/dev/null && mv "$rej.tmp" "$rej" 2>/dev/null
+    fi
     exit 0 ;;
 esac
 

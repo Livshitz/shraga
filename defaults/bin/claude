@@ -26,7 +26,14 @@ record() { # $1 = session uuid → drop <paneToken>→<uuid> for the revive reso
 # Called only from `record` (i.e. exactly where a session id is bound to this pane), so a scripted
 # `claude -p` run inside the pane can never overwrite the interactive session's profile.
 record_profile() {
-  [ -x "$self_dir/cc-record-profile" ] && "$self_dir/cc-record-profile"
+  # SAY SO if the one writer is gone. Recording used to be inline here and could not fail this way;
+  # a bare `&&` would restore exactly the silent-drop this change set exists to remove — a pane with a
+  # session file and no profile sibling, indistinguishable from one that never had a profile.
+  if [ -x "$self_dir/cc-record-profile" ]; then
+    "$self_dir/cc-record-profile"
+  else
+    echo "claude-shim: cc-record-profile missing from $self_dir — pane profile not recorded" >&2
+  fi
   return 0
 }
 
