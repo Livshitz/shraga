@@ -119,6 +119,18 @@ describe('login flow (fake CLI)', () => {
     expect(globalChanges).toBe(1);
   });
 
+  test('darwin in-place implicit global login runs WITHOUT CLAUDE_CONFIG_DIR (Keychain item is keyed by it)', async () => {
+    const cli = path.join(root, 'claude-env');
+    const seen = path.join(root, 'seen-dir');
+    writeFileSync(cli, `#!/bin/sh\nprintf '%s' "\${CLAUDE_CONFIG_DIR-unset}" > "${seen}"\necho "visit: https://claude.com/cai/oauth/authorize?x=1"\nread code\nexit 0\n`);
+    chmodSync(cli, 0o755);
+    const l = new ClaudeLogin({ cliPath: cli, globalConfigDir: undefined, home: path.join(root, 'home'), swap: false, urlTimeoutMs: 5_000, codeTimeoutMs: 5_000 });
+    const t = l.resolve('global', owner);
+    await l.start(t);
+    l.cancel(t.key);
+    expect(readFileSync(seen, 'utf8')).toBe('unset');
+  });
+
   test('code without a pending login → 404', async () => {
     await expect(login.submitCode(login.resolve('me', member), 'good')).rejects.toMatchObject({ status: 404 });
   });
