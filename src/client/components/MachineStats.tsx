@@ -136,7 +136,7 @@ function ClaudeUsageMetric({ getToken }: { getToken: () => Promise<string | null
 
 /** Pure render — null usage (204, or any failure) renders NOTHING. Split from the fetching shell so
  *  the gate and the labelling are testable without a network or a DOM. */
-export function UsageMetric({ usage }: { usage: Usage | null }) {
+export function UsageMetric({ usage, compact }: { usage: Usage | null; /** Inline text trigger (settings rows) instead of the strip gauge. */ compact?: boolean }) {
   const top = usage && binding(usage.limits);
   const [state, setState] = useState<CardState>(CLOSED);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -169,7 +169,9 @@ export function UsageMetric({ usage }: { usage: Usage | null }) {
           onPointerEnter={e => send({ type: 'pointerenter', pointerType: e.pointerType }, HOVER_OPEN_MS)}
           onPointerLeave={e => send({ type: 'pointerleave', pointerType: e.pointerType }, HOVER_CLOSE_MS)}
         >
-          <Metric label="usage" value={top.percent} severity={top.severity} />
+          {compact
+            ? <span className={cn('tabular-nums', level(top.percent, top.severity))}>{top.percent}% used</span>
+            : <Metric label="usage" value={top.percent} severity={top.severity} />}
         </button>
       </PopoverTrigger>
       <PopoverContent
