@@ -19,25 +19,15 @@ record() { # $1 = session uuid → drop <paneToken>→<uuid> for the revive reso
   record_profile
 }
 
-# Which SUBSCRIPTION this pane is running on (cc-profile.sh / the `ccp` shell function). A revive that
-# re-runs a bare `ccd -r <id>` re-resolves the profile from the folder binding, so a pane the user pinned
-# to another sub with `ccp` came back on the WRONG account. The profile is only knowable here, at exec
-# time, so drop <paneToken>→<profile> next to the session id and let revive replay it as `ccd @<p> -r`.
-# Empty CLAUDE_CONFIG_DIR/CC_PROFILE means the DEFAULT profile really was in use — record that explicitly
-# rather than nothing, so a later revive pins it instead of re-resolving to whatever the default is then.
+# Which SUBSCRIPTION this pane is running on — delegated to `cc-record-profile`, the ONE writer of the
+# pane-profiles store (the SessionStart hook calls the same script for an id CC rotates in-process, and
+# the two must not drift on the resolution rule or the charset). Resolved from our own dir, the same way
+# `real` is, so a shim and its helper always travel together.
 # Called only from `record` (i.e. exactly where a session id is bound to this pane), so a scripted
 # `claude -p` run inside the pane can never overwrite the interactive session's profile.
 record_profile() {
-  pd="$UNCLAW_DATA_DIR/pane-profiles"
-  p="${CC_PROFILE:-}"
-  if [ -z "$p" ]; then
-    case "${CLAUDE_CONFIG_DIR:-}" in
-      "$HOME/.claude-"*) p=${CLAUDE_CONFIG_DIR#"$HOME"/.claude-} ;;
-      *) p=default ;;
-    esac
-  fi
-  case "$p" in *[!a-z0-9_-]*) return 0 ;; esac   # never write a name the revive command would have to quote
-  mkdir -p "$pd" 2>/dev/null && printf '%s' "$p" > "$pd/$UNCLAW_PANE_ID" 2>/dev/null
+  [ -x "$self_dir/cc-record-profile" ] && "$self_dir/cc-record-profile"
+  return 0
 }
 
 # Only pin for a genuinely fresh interactive session: skip resume/continue (id already exists) and
