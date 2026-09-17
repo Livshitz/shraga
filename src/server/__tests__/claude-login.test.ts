@@ -145,4 +145,19 @@ describe('login flow (fake CLI)', () => {
     expect(changed).toEqual([t.dir, t.dir]); // connect + disconnect each invalidate THAT account's usage
     expect(globalChanges).toBe(0);
   });
+
+  test('me: hot-switch to shared and back keeps the login; reconnect clears the switch', async () => {
+    const t = login.resolve('me', member);
+    await login.start(t);
+    await login.submitCode(t, 'good');
+    await login.setUseShared(t, true);
+    expect(await login.status(t)).toMatchObject({ connected: true, useShared: true });
+    await login.setUseShared(t, false);
+    expect((await login.status(t)).useShared).toBeUndefined();
+    await login.setUseShared(t, true);
+    await login.start(t);
+    await login.submitCode(t, 'good');
+    expect((await login.status(t)).useShared).toBeUndefined();
+    await expect(login.setUseShared(login.resolve('global', owner), true)).rejects.toMatchObject({ status: 400 });
+  });
 });

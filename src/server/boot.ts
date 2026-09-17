@@ -295,7 +295,14 @@ app.get('/api/claude-account', requireAuth, claudeLoginRoute(async (_req, res, u
     return null;
   });
   const global = user?.isOwner ? await claudeLogin.status(claudeLogin.resolve('global', user)) : undefined;
-  res.json({ me, global });
+  // Cached readings only (the reader dedupes + TTLs upstream) — shared usage is visible to every member.
+  const meDir = me?.connected ? claudeLogin.resolve('me', user).dir : null;
+  const [meUsage, globalUsage] = await Promise.all([meDir ? claudeUsageFor(meDir).get() : null, claudeUsageFor(null).get()]);
+  res.json({ me, global, usage: { me: meUsage, global: globalUsage } });
+}));
+app.put('/api/claude-account/:target/use-shared', requireAuth, claudeLoginRoute(async (req, res, user) => {
+  await claudeLogin.setUseShared(claudeLogin.resolve(String(req.params.target), user), !!req.body?.on);
+  res.json({ ok: true });
 }));
 app.post('/api/claude-account/:target/login', requireAuth, claudeLoginRoute(async (req, res, user) => {
   res.json({ url: await claudeLogin.start(claudeLogin.resolve(String(req.params.target), user)) });
