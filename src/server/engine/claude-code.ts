@@ -23,7 +23,7 @@ import { getPromptSuffix } from '../prompt-suffix.ts';
 import { APP_ROOT } from '../paths.ts';
 import { writeMcpConfigFile } from './mcp-config-file.ts';
 import { claudeUsageFor } from '../claude-usage.ts';
-import { claudeAccountDir, applyClaudeAccount, claudeAccountRef, type ClaudeAccountRef } from '../claude-account.ts';
+import { claudeAccountDir, applyClaudeAccount, claudeForcesSubscription, claudeAccountRef, type ClaudeAccountRef } from '../claude-account.ts';
 import { buildAgentEnv, builtinTools, filterMcpServers, allowsEscalate, allowsInternalToken, allowsShare, SHARE_TOOL_ID, SENSITIVE_PATH_PATTERNS } from '../security/enforce.ts';
 import { escalateMcpServer } from '../security/escalate.ts';
 import { shareMcpServer } from '../share-file.ts';
@@ -363,6 +363,7 @@ export class ClaudeCodeEngine implements AgentEngine {
     // Per-user subscription (workspace/users/<contactId>/.claude): run on that login, never the box's credentials.
     const accountDir = plan.accountDir;
     if (accountDir) applyClaudeAccount(sdkEnv, accountDir);
+    else if (claudeForcesSubscription()) for (const k of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) delete sdkEnv[k];
     // Which login this run is on (email/plan, never a token) — read lazily from the login's local
     // files, only once init proves the run is on a subscription login (see init below).
     let accountRefP: Promise<ClaudeAccountRef | undefined> | undefined;
