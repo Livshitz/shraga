@@ -1,0 +1,43 @@
+#!/usr/bin/env sh
+# Record which SUBSCRIPTION (cc-profile) this pane's Claude Code session is running on:
+# `<UNCLAW_PANE_ID> → <profile>` under $UNCLAW_DATA_DIR/pane-profiles, the sibling store of
+# pane-sessions (see cc-sessions.ts `paneProfileFile`). Revive replays it as `ccd @<p> -r <id>` so a
+# pane pinned to another account with `ccp` comes back on the SAME account, and the tab's @profile chip
+# has something to show.
+#
+# ONE writer, called from every place a pane's session id is recorded — the `claude` shim (a fresh or
+# explicitly-resumed launch) and the SessionStart hook (an id ROTATED in-process by /clear, compact or a
+# fork, which the shim never sees). Before this existed only the shim wrote here, so every pane whose id
+# came from the hook — including every `ccd -c` pane, which the shim deliberately skips — had a
+# pane-sessions file with no profile sibling and silently resolved no chip (5 of 15 live panes).
+#
+# The profile is only knowable at exec time, from the environment CC itself inherits: `ccp`/`ccd @<p>`
+# export CC_PROFILE, and the folder binding lands as CLAUDE_CONFIG_DIR. Empty means the DEFAULT profile
+# really was in use — record that explicitly rather than nothing, so a later revive pins it instead of
+# re-resolving to whatever the default is by then.
+
+[ -n "$UNCLAW_DATA_DIR" ] && [ -n "$UNCLAW_PANE_ID" ] || exit 0
+
+p="${CC_PROFILE:-}"
+if [ -z "$p" ]; then
+  case "${CLAUDE_CONFIG_DIR:-}" in
+    "$HOME/.claude-"*) p=${CLAUDE_CONFIG_DIR#"$HOME"/.claude-} ;;
+    *) p=default ;;
+  esac
+fi
+
+# Never write a name the revive command would have to quote — the value is spliced into `ccd @<p> -r`,
+# and the server's PROFILE_RE refuses anything else on the read side anyway.
+# LEAVE A TRACE. This guard used to `return 0` in silence, so a pane that lost its chip looked exactly
+# like a pane that never had one, and two rounds of investigation could not tell the cases apart. A
+# discarded value must be readable somewhere afterwards.
+case "$p" in
+  *[!a-z0-9_-]*)
+    printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$UNCLAW_PANE_ID" "$p" \
+      >> "$UNCLAW_DATA_DIR/pane-profile-rejects.log" 2>/dev/null
+    exit 0 ;;
+esac
+
+pd="$UNCLAW_DATA_DIR/pane-profiles"
+mkdir -p "$pd" 2>/dev/null && printf '%s' "$p" > "$pd/$UNCLAW_PANE_ID" 2>/dev/null
+exit 0
