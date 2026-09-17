@@ -97,7 +97,10 @@ export class ClaudeLogin {
     this.cancel(target.key);
     const loginDir = this.options.swap ? await mkdtemp(path.join(tmpdir(), 'shraga-claude-login-')) : target.dir;
     if (!this.options.swap) await mkdir(loginDir, { recursive: true, mode: 0o700 });
-    const child = spawn(this.options.cliPath, ['auth', 'login', '--claudeai'], { env: this.env(loginDir, true), stdio: ['pipe', 'pipe', 'pipe'] });
+    // In-place (darwin): same dir rule as status()/runs. macOS keys the Keychain item by CLAUDE_CONFIG_DIR, so
+    // logging an implicit global login in with CLAUDE_CONFIG_DIR=~/.claude saved it under a suffixed item nobody reads.
+    const envDir = this.options.swap || target.explicitDir ? loginDir : null;
+    const child = spawn(this.options.cliPath, ['auth', 'login', '--claudeai'], { env: this.env(envDir, true), stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
     const onData = (b: Buffer) => { out += b.toString(); };
     child.stdout!.on('data', onData);
