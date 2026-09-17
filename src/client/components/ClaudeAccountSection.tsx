@@ -54,35 +54,41 @@ export function ClaudeAccountSection({ getToken }: { getToken: () => Promise<str
     ? !accounts?.me?.connected || !!accounts.me.useShared
     : !!accounts?.me?.connected && !accounts.me.useShared;
 
-  const row = (target: Target, title: string, s: AccountStatus | null, canManage = true) => (
-    <div className="flex items-center justify-between gap-2 flex-wrap">
-      <div className="text-sm min-w-0">
-        <div className="font-medium flex items-center gap-2">
-          {title}
-          {active(target) && <span className="text-[10px] uppercase tracking-wide text-emerald-500">active</span>}
-          <UsageMetric usage={accounts?.usage?.[target] ?? null} />
+  const row = (target: Target, title: string, s: AccountStatus | null, canManage = true) => {
+    const usage = accounts?.usage?.[target] ?? null;
+    const identity = s?.connected ? [s.account ?? 'Connected', s.subscriptionType].filter(Boolean).join(' · ')
+      : target === 'me' ? 'Not connected' : canManage ? 'Not connected' : null;
+    return (
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0 space-y-0.5">
+          <div className="flex items-center gap-2 text-sm font-medium">
+            {title}
+            {active(target) && <span className="rounded-full bg-emerald-500/15 px-1.5 py-px text-[10px] font-medium text-emerald-500">Active</span>}
+          </div>
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0">
+            {identity && <span className="truncate">{identity}</span>}
+            {identity && usage && <span aria-hidden>·</span>}
+            <UsageMetric usage={usage} compact />
+          </div>
         </div>
-        <div className="text-xs text-muted-foreground truncate">
-          {s?.connected ? `${s.account ?? 'Connected'}${s.subscriptionType ? ` · ${s.subscriptionType}` : ''}` : target === 'me' ? 'Not connected — using the shared subscription' : canManage ? 'Not connected' : ''}
-        </div>
+        {canManage && (
+          <div className="flex shrink-0 gap-2">
+            {target === 'me' && s?.connected && (
+              <>
+                <Button size="sm" variant="outline" disabled={busy} onClick={() => useShared(!s.useShared)}>{s.useShared ? 'Use mine' : 'Use shared'}</Button>
+                <Button size="sm" variant="outline" disabled={busy} onClick={() => disconnect(target)}>Sign out</Button>
+              </>
+            )}
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => connect(target)}>{s?.connected ? 'Replace' : 'Connect'}</Button>
+          </div>
+        )}
       </div>
-      {canManage && (
-        <div className="flex gap-2">
-          <Button size="sm" variant="outline" disabled={busy} onClick={() => connect(target)}>{s?.connected ? 'Replace' : 'Connect'}</Button>
-          {target === 'me' && s?.connected && (
-            <>
-              <Button size="sm" variant="ghost" disabled={busy} onClick={() => useShared(!s.useShared)}>{s.useShared ? 'Use mine' : 'Use shared'}</Button>
-              <Button size="sm" variant="ghost" disabled={busy} onClick={() => disconnect(target)}>Sign out</Button>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
+    );
+  };
 
   if (!accounts) return error ? <p className="text-xs text-destructive">{error}</p> : null;
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       <label className="text-sm font-medium block">Claude subscription</label>
       {accounts.me ? row('me', 'Your subscription', accounts.me) : (
         <p className="text-xs text-muted-foreground">Personal subscription unavailable: you are not a contact on this agent.</p>
