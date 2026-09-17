@@ -30,6 +30,12 @@ export async function claudeAccountRef(dir: string | null): Promise<ClaudeAccoun
   return id ? { ...id, personal: !!dir } : undefined;
 }
 
+/** CLAUDE_CODE_AUTH=subscription: claude-code runs use the box's stored claude login even when ANTHROPIC_API_KEY
+ *  is set for other engines (agentx anthropic/*, tools) — without it the key silently wins and bills the API. */
+export function claudeForcesSubscription(): boolean {
+  return process.env.CLAUDE_CODE_AUTH === 'subscription';
+}
+
 /** Route a child env to `dir`: strip inherited credentials so neither the box's API key nor its token can win. */
 export function applyClaudeAccount(env: Record<string, string>, dir: string): void {
   for (const k of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']) delete env[k];

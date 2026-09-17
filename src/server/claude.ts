@@ -38,6 +38,7 @@ import { resolveAndGetEngine, ModelUnavailableError } from './engine/index.ts';
 export type { AgentSettings as AgentConfig } from './shraga-config.ts';
 import type { AgentSettings as AgentConfig } from './shraga-config.ts';
 import { CONFIG_PATH, getAgentConfig } from './agent-config.ts';
+import { claudeForcesSubscription } from './claude-account.ts';
 export { getAgentConfig };
 
 /**
@@ -47,6 +48,7 @@ export { getAgentConfig };
  * per-turn ground truth (SDK `apiKeySource`) is logged by the engine.
  */
 export function getClaudeAuthSource(): 'subscription' | 'api-key' {
+  if (claudeForcesSubscription()) return 'subscription';
   return process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN ? 'api-key' : 'subscription';
 }
 
