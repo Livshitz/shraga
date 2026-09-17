@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { DataSync, extractCommitSubject, fallbackCommitMessage, isChurnPath, withTimeout } from '../data-sync.ts';
+import { DataSync, extractCommitSubject, fallbackCommitMessage, isAuthoredDocPath, isChurnPath, withTimeout } from '../data-sync.ts';
 
 test('data git ignores security/ (blocks.json, policy.json + .migrated: single writer is the active instance) but tracks audit/', () => {
   const entries = (DataSync as unknown as { GITIGNORE_ENTRIES: string[] }).GITIGNORE_ENTRIES;
@@ -255,5 +255,16 @@ describe('guardMassDeletions alerting', () => {
     ds.git = async (...a: string[]) => (a.includes('--numstat') ? '1\t200\tcontacts.json' : '');
     expect(await ds.guardMassDeletions('flush')).toBe(true);
     expect(dms).toHaveLength(2);           // recurrence is news, not spam
+  });
+});
+
+describe('isAuthoredDocPath', () => {
+  test('rewritten reports from the 2026-09-17 block are exempt from the shrink guard', () => {
+    expect(isAuthoredDocPath('workspace/analysis/trial-journey/template.html')).toBe(true);
+    expect(isAuthoredDocPath('workspace/users/094b713a/artifacts/trial-journey-funnel.html')).toBe(true);
+  });
+
+  test('shared records stay guarded', () => {
+    for (const f of ['contacts.json', 'memory/notes.md', 'leads.csv']) expect(isAuthoredDocPath(f)).toBe(false);
   });
 });

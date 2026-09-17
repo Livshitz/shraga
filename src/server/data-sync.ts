@@ -85,6 +85,13 @@ export function isChurnPath(file: string): boolean {
     || /\.bak(-|\.|$)/.test(file);
 }
 
+/** Authored documents (HTML reports, dashboards, styles, scripts) are REWRITTEN wholesale by design —
+ *  a redesign that drops 87 lines is an edit, not data loss (2026-09-17: two trial-journey report
+ *  copies blocked every flush). The shrink guard protects records like contacts.json, not these. */
+export function isAuthoredDocPath(file: string): boolean {
+  return /\.(html?|css|m?[jt]sx?|svg)$/i.test(file);
+}
+
 export class DataSyncOptions {
   repoUrl = process.env.DATA_SYNC_REPO || '';
   branch = process.env.DATA_SYNC_BRANCH || 'main';
@@ -294,7 +301,7 @@ export class DataSync {
         const [addRaw, delRaw, file] = line.split('\t');
         if (addRaw === '-' || delRaw === '-' || !file) continue; // binary
         const net = (parseInt(delRaw, 10) || 0) - (parseInt(addRaw, 10) || 0);
-        if (net > shrinkThreshold && !isChurnPath(file)) shrunk.push(`• ${file}  (−${net} net lines)`);
+        if (net > shrinkThreshold && !isChurnPath(file) && !isAuthoredDocPath(file)) shrunk.push(`• ${file}  (−${net} net lines)`);
       }
       if (shrunk.length) {
         console.error(`${TAG} 🚫 BLOCKED large content shrink (${context}): ${shrunk.length} file(s) — net-removal threshold is ${shrinkThreshold}`);
