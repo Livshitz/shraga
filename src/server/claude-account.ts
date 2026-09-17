@@ -4,7 +4,7 @@
  * `CLAUDE_CONFIG_DIR=<dir> claude auth login`). Anything else → null → the default account, unchanged.
  * The folder is data-sync ignored (see DataSync.GITIGNORE_ENTRIES) and hidden from the workspace UI (dotdir).
  */
-import { statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import * as contacts from './contacts.ts';
 import { WORKSPACE_DIR } from './workspace.ts';
@@ -19,7 +19,13 @@ export function claudeAccountDir(
   const contact = email ? find(email) : null;
   if (!contact?.id) return null;
   const dir = path.join(workspaceDir, 'users', contact.id, '.claude');
-  try { return statSync(dir).isDirectory() ? dir : null; } catch { return null; }
+  try { return statSync(dir).isDirectory() && !usesShared(dir) ? dir : null; } catch { return null; }
+}
+
+/** Marker inside a personal login dir: keep the credentials but route runs to the shared login (hot-switch). */
+export const USE_SHARED_MARKER = '.shraga-use-shared';
+export function usesShared(dir: string): boolean {
+  return existsSync(path.join(dir, USE_SHARED_MARKER));
 }
 
 /** The login a run on `dir` (null = the box default) is signed in as, for provenance. Never a token. */

@@ -14,7 +14,7 @@ import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import * as contacts from './contacts.ts';
-import { applyClaudeAccount } from './claude-account.ts';
+import { applyClaudeAccount, usesShared, USE_SHARED_MARKER } from './claude-account.ts';
 import { WORKSPACE_DIR } from './workspace.ts';
 
 const TAG = '[claude-login]';
@@ -32,7 +32,7 @@ export interface ClaudeTarget {
   explicitDir: boolean;
 }
 
-export interface ClaudeAccountStatus { connected: boolean; account: string | null; subscriptionType: string | null }
+export interface ClaudeAccountStatus { connected: boolean; account: string | null; subscriptionType: string | null; useShared?: boolean }
 
 export class ClaudeLoginError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -85,7 +85,8 @@ export class ClaudeLogin {
     try {
       const out = await this.run(['auth', 'status', '--json'], target.explicitDir ? target.dir : null);
       const s = JSON.parse(out);
-      return { connected: !!s.loggedIn, account: s.email ?? null, subscriptionType: s.subscriptionType ?? null };
+      const useShared = target.name === 'me' && usesShared(target.dir);
+      return { connected: !!s.loggedIn, account: s.email ?? null, subscriptionType: s.subscriptionType ?? null, ...(useShared && { useShared }) };
     } catch (err) {
       console.warn(`${TAG} status failed for ${target.key}:`, (err as Error).message);
       return none;
@@ -145,8 +146,18 @@ export class ClaudeLogin {
     } finally {
       if (this.options.swap) await rm(p.loginDir, { recursive: true, force: true });
     }
+    if (target.name === 'me') await rm(path.join(target.dir, USE_SHARED_MARKER), { force: true }); // (re)connecting = use it
     this.options.onChange(target);
     return this.status(target);
+  }
+
+  /** `me` only: hot-switch between the personal login and the shared one, keeping the credentials. */
+  async setUseShared(target: ClaudeTarget, on: boolean): Promise<void> {
+    if (target.name !== 'me') throw new ClaudeLoginError(400, 'Only a personal login can be switched');
+    if (!(await exists(target.dir))) throw new ClaudeLoginError(409, 'No personal login to switch');
+    const marker = path.join(target.dir, USE_SHARED_MARKER);
+    // No onChange: the login itself is unchanged, and each dir's usage cache stays valid.
+    if (on) await writeFile(marker, ''); else await rm(marker, { force: true });
   }
 
   /** `me`: logout + remove the dir → runs fall back to the shared subscription. `global`: logout. */

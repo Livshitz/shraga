@@ -2,9 +2,10 @@ import { useCallback, useEffect, useState } from 'react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { api } from '@/lib/api';
+import { UsageMetric, type Usage } from './MachineStats';
 
-interface AccountStatus { connected: boolean; account: string | null; subscriptionType: string | null }
-interface Accounts { me: AccountStatus | null; global?: AccountStatus }
+interface AccountStatus { connected: boolean; account: string | null; subscriptionType: string | null; useShared?: boolean }
+interface Accounts { me: AccountStatus | null; global?: AccountStatus; usage?: { me: Usage | null; global: Usage | null } }
 type Target = 'me' | 'global';
 
 /** Connect / replace / disconnect a Claude Code subscription login from the browser (no SSH). */
@@ -44,21 +45,38 @@ export function ClaudeAccountSection({ getToken }: { getToken: () => Promise<str
     await api(`/api/claude-account/${target}`, getToken, { method: 'DELETE' });
     refresh();
   });
+  const useShared = (on: boolean) => act(async () => {
+    await api('/api/claude-account/me/use-shared', getToken, { method: 'PUT', body: JSON.stringify({ on }) });
+    refresh();
+  });
 
-  const row = (target: Target, title: string, s: AccountStatus | null) => (
+  const active = (target: Target) => target === 'global'
+    ? !accounts?.me?.connected || !!accounts.me.useShared
+    : !!accounts?.me?.connected && !accounts.me.useShared;
+
+  const row = (target: Target, title: string, s: AccountStatus | null, canManage = true) => (
     <div className="flex items-center justify-between gap-2 flex-wrap">
       <div className="text-sm min-w-0">
-        <div className="font-medium">{title}</div>
+        <div className="font-medium flex items-center gap-2">
+          {title}
+          {active(target) && <span className="text-[10px] uppercase tracking-wide text-emerald-500">active</span>}
+          <UsageMetric usage={accounts?.usage?.[target] ?? null} />
+        </div>
         <div className="text-xs text-muted-foreground truncate">
-          {s?.connected ? `${s.account ?? 'Connected'}${s.subscriptionType ? ` · ${s.subscriptionType}` : ''}` : target === 'me' ? 'Not connected — using the shared subscription' : 'Not connected'}
+          {s?.connected ? `${s.account ?? 'Connected'}${s.subscriptionType ? ` · ${s.subscriptionType}` : ''}` : target === 'me' ? 'Not connected — using the shared subscription' : canManage ? 'Not connected' : ''}
         </div>
       </div>
-      <div className="flex gap-2">
-        <Button size="sm" variant="outline" disabled={busy} onClick={() => connect(target)}>{s?.connected ? 'Replace' : 'Connect'}</Button>
-        {target === 'me' && s?.connected && (
-          <Button size="sm" variant="ghost" disabled={busy} onClick={() => disconnect(target)}>Use shared</Button>
-        )}
-      </div>
+      {canManage && (
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => connect(target)}>{s?.connected ? 'Replace' : 'Connect'}</Button>
+          {target === 'me' && s?.connected && (
+            <>
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => useShared(!s.useShared)}>{s.useShared ? 'Use mine' : 'Use shared'}</Button>
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => disconnect(target)}>Sign out</Button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 
@@ -69,7 +87,8 @@ export function ClaudeAccountSection({ getToken }: { getToken: () => Promise<str
       {accounts.me ? row('me', 'Your subscription', accounts.me) : (
         <p className="text-xs text-muted-foreground">Personal subscription unavailable: you are not a contact on this agent.</p>
       )}
-      {accounts.global && row('global', 'Shared subscription', accounts.global)}
+      {accounts.global ? row('global', 'Shared subscription', accounts.global)
+        : accounts.usage?.global && row('global', 'Shared subscription', null, false)}
       {pending && (
         <div className="rounded-md bg-muted/50 px-3 py-2 space-y-2 text-xs">
           <p>
