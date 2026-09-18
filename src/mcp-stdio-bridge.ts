@@ -63,6 +63,20 @@ async function sendMessage(message: any): Promise<void> {
 
   if (res.status === 204) return;
 
+  // A non-2xx (401 on a stale key, 404 on a wrong MCP_PATH, 502 from a proxy) has no JSON-RPC
+  // body, so forwarding nothing left the client waiting on a reply that never came — it surfaced
+  // as "connection timed out after 30000ms", which reads as an unreachable server rather than a
+  // refused credential. Raising the HTTP status as a JSON-RPC error names the real cause. This
+  // cost a full investigation on 2026-09-18 after a key rotation missed one config file.
+  if (!res.ok && message?.id !== undefined && message?.id !== null) {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: message.id,
+      error: { code: -32603, message: `Bridge: ${baseUrl}${mcpPath} returned HTTP ${res.status} for ${message?.method ?? 'message'}${res.status === 401 ? ' — check MCP_API_KEY' : ''}` },
+    }) + '\n');
+    return;
+  }
+
   const contentType = res.headers.get('content-type') || '';
 
   if (contentType.includes('text/event-stream')) {
