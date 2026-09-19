@@ -203,7 +203,7 @@ export function registerMcpOAuthRoutes(app: Express) {
       if (!id || id.kind !== 'refresh') return void res.status(400).json({ error: 'invalid_grant', error_description: 'invalid refresh_token' });
       // Re-apply the Firebase login gate: a 30d refresh must not outlive the user's removal from the policy bindings.
       if (AUTH_PROVIDER === 'firebase' && !loginAllowed(fromAuthUser(id))) {
-        security()?.authDeny('mcp:oauth-refresh', 'not-whitelisted', req.ip);
+        security()?.authDeny('mcp:oauth-refresh', 'not-whitelisted', req.ip, fromAuthUser(id));
         return void res.status(400).json({ error: 'invalid_grant', error_description: 'User not in whitelist — sign in again' });
       }
       return void res.json({

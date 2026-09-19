@@ -250,3 +250,36 @@ describe('consumer migrate seam (ShragaOptions.security.migrate → initSecurity
     expect(rt.policy.resolve(fromSlack('UOPS')).role).toBe('operator');
   });
 });
+
+describe('auth.deny attribution', () => {
+  test('a denied login names WHO was rejected, and shows up in recentPrincipals', async () => {
+    const { recentPrincipals } = await import('../owner-routes.ts');
+    const rt = tmpRuntime();
+    const stranger = fromAuthUser({ uid: 'u1', email: 'Ethan.Livshitz@gmail.com' });
+    rt.authDeny('http:bearer', 'not-whitelisted', '1.2.3.4', stranger);
+
+    const deny = all(rt).find(r => r.type === 'auth.deny')!;
+    expect(deny).toMatchObject({
+      principal: 'user:ethan.livshitz@gmail.com',
+      reason: 'not-whitelisted',
+      meta: { ip: '1.2.3.4', kind: 'user', email: 'ethan.livshitz@gmail.com' },
+    });
+
+    const row = recentPrincipals(rt, 0, 50).principals.find(p => p.id === 'user:ethan.livshitz@gmail.com');
+    expect(row).toMatchObject({ kind: 'user', turns: 0, denies: 1 });
+  });
+
+  test('two rejected people are two rows — the dedupe key is per principal', () => {
+    const rt = tmpRuntime();
+    rt.authDeny('http:bearer', 'not-whitelisted', undefined, fromAuthUser({ uid: 'a', email: 'a@x.test' }));
+    rt.authDeny('http:bearer', 'not-whitelisted', undefined, fromAuthUser({ uid: 'b', email: 'b@x.test' }));
+    expect(all(rt).filter(r => r.type === 'auth.deny').map(r => r.principal)).toEqual(['user:a@x.test', 'user:b@x.test']);
+  });
+
+  test('an anonymous branch (no identity known) still records, without a principal', () => {
+    const rt = tmpRuntime();
+    rt.authDeny('http', 'missing-token', '1.2.3.4');
+    expect(all(rt).find(r => r.type === 'auth.deny')).toMatchObject({ reason: 'missing-token', meta: { ip: '1.2.3.4' } });
+    expect(all(rt).find(r => r.type === 'auth.deny')!.principal).toBeUndefined();
+  });
+});
