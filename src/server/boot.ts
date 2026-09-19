@@ -19,7 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
-import { requireAuth, verifyBearer, authenticateToken, AUTH_PROVIDER, localLogin, addLocalUser, localUserCount } from './auth.ts';
+import { requireAuth, verifyBearer, authenticateToken, AUTH_PROVIDER, localLogin, addLocalUser, localUserCount, deniedPrincipalOf } from './auth.ts';
 import { getMcpConfig, getRawMcpConfig, getResolvedMcpConfig, getGlobalMcpConfig, saveMcpConfig, maskEnvValues, mergeWithOriginal, type McpConfig } from './mcp.ts';
 import { streamChat, consumeStream, getAgentConfig, saveAgentConfig, getClaudeAuthSource, type AgentConfig, type PermissionHandler, type QuestionHandler, type QuestionAnswers, type AttachmentMeta, type WsEvent, MAX_TURNS_NOTICE } from './claude.ts';
 import { mountFeatures, registerFeature, resumeFeatureSession, collectFeatureFlags, collectSidecarRoutes } from './features.ts';
@@ -1800,7 +1800,7 @@ function handleConnection(ws: WebSocket, session: WsSession) {
           }
         }
       } catch (err: any) {
-        security()?.authDeny('ws:bearer', 'invalid-bearer');
+        security()?.authDeny('ws:bearer', err?.message?.includes('whitelist') ? 'not-whitelisted' : err?.message?.includes('revoked') ? 'token-revoked' : 'invalid-bearer', undefined, deniedPrincipalOf(err));
         console.error(`[ws] Auth failed:`, err.message);
         send(ws, { type: 'auth_error', message: err.message });
         ws.close();

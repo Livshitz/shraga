@@ -132,8 +132,15 @@ export class SecurityRuntime {
     this.record({ type: 'auth.allow', principal: principal.id, target: via, meta: { kind: principal.kind } }, `auth.allow|${principal.id}|${via}`);
   }
 
-  public authDeny(via: string, reason: string, ip?: string): void {
-    this.record({ type: 'auth.deny', target: via, reason, meta: ip ? { ip } : undefined }, `auth.deny|${via}|${reason}|${ip ?? ''}`);
+  /** `principal` = WHO was rejected, when the branch knows it (a verified token that failed the login gate).
+   *  Without it a denial is unattributable, so Owner Console → Principals can't show that anyone was turned away —
+   *  which is how a typo'd binding stays invisible until the person complains. */
+  public authDeny(via: string, reason: string, ip?: string, principal?: Principal): void {
+    const meta = { ...(ip ? { ip } : {}), ...(principal ? { kind: principal.kind, ...(principal.email ? { email: principal.email } : {}) } : {}) };
+    this.record(
+      { type: 'auth.deny', target: via, reason, ...(principal ? { principal: principal.id } : {}), ...(Object.keys(meta).length ? { meta } : {}) },
+      `auth.deny|${via}|${reason}|${principal?.id ?? ''}|${ip ?? ''}`,
+    );
   }
 
   private onTamper(info: { path: string; reason: TamperReason; expected: string | null; actual: string | null }): void {
