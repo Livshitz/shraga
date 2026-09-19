@@ -173,6 +173,22 @@ const authUser = (uid: string, email: string, principal: Principal): AuthUser =>
 const internalUser = (t: { uid: string; email: string }) => authUser(t.uid, t.email, fromInternal(t));
 const apiKeyUser = (k: { id: string; uid: string; email: string; role?: string }) => authUser(k.uid, k.email, apiKeyPrincipal(k));
 
+// ── Attributing a rejection ──────────────────────────────────────────────────
+// A token can be CRYPTOGRAPHICALLY valid and still be refused (not in the policy bindings, revoked). The identity is
+// known at that moment but was thrown away with the error, so `auth.deny` landed in the audit with no principal and
+// Owner Console → Principals never showed the person who was turned away. Carry it on the error instead.
+const DENIED = Symbol.for('shraga.deniedPrincipal');
+/** Tag an auth error with the identity it rejected. */
+export function deniedPrincipal<E extends Error>(err: E, principal: Principal): E {
+  (err as any)[DENIED] = principal;
+  return err;
+}
+/** The identity an auth error rejected, if it carries one. */
+export function deniedPrincipalOf(err: unknown): Principal | undefined {
+  const p = (err as any)?.[DENIED];
+  return p && typeof p === 'object' && typeof p.id === 'string' ? (p as Principal) : undefined;
+}
+
 export async function verifyToken(token: string): Promise<AuthUser> {
   const projectId = JSON.parse(process.env.FIREBASE_CONFIG_PROD ?? process.env.VITE_FIREBASE_CONFIG_PROD ?? '{}').projectId;
   if (!projectId) throw new Error('FIREBASE_CONFIG_PROD not set or missing projectId');
@@ -188,9 +204,10 @@ export async function verifyToken(token: string): Promise<AuthUser> {
   const principal = fromAuthUser({ uid, email: payload.email });
   // Login gate = policy bindings (member rank+) or OWNERS; fails closed. The message keeps the word 'whitelist':
   // the client (App.tsx, useAgentSocket, lib/ws) keys its permanent "not allowed" handling on it.
-  if (!loginAllowed(principal)) throw new Error('User not in whitelist — ask an owner to add a binding (Owner Console → Bindings)');
+  // The rejected identity rides on the error so the caller can audit WHO was denied (auth.deny is otherwise anonymous).
+  if (!loginAllowed(principal)) throw deniedPrincipal(new Error('User not in whitelist — ask an owner to add a binding (Owner Console → Bindings)'), principal);
   // auth_time = sign-in time; the hourly-refreshed iat would outlive a revocation.
-  if (tokenRevoked(principal.id, firebaseIssuedAt(payload))) throw new Error('Token revoked — sign in again');
+  if (tokenRevoked(principal.id, firebaseIssuedAt(payload))) throw deniedPrincipal(new Error('Token revoked — sign in again'), principal);
   return authUser(uid, payload.email, principal);
 }
 
@@ -261,7 +278,7 @@ function verifyLocalToken(token: string): AuthUser {
   if (!Number.isFinite(exp) || nowSec() > exp) throw new Error('Token expired — sign in again');
   const principal = fromAuthUser({ uid: email, email });
   if (!Number.isInteger(iat)) throw new Error('Malformed token');
-  if (tokenRevoked(principal.id, iat)) throw new Error('Token revoked — sign in again');
+  if (tokenRevoked(principal.id, iat)) throw deniedPrincipal(new Error('Token revoked — sign in again'), principal);
   return authUser(email, email, principal);
 }
 
@@ -321,7 +338,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   } catch (err: any) {
     const whitelisted = err?.message?.includes('whitelist');
     const reason = whitelisted ? 'not-whitelisted' : err?.message?.includes('revoked') ? 'token-revoked' : 'invalid-bearer';
-    security()?.authDeny('http:bearer', reason, req.ip);
+    security()?.authDeny('http:bearer', reason, req.ip, deniedPrincipalOf(err));
     return void res.status(whitelisted ? 403 : 401).json({ error: err.message });
   }
   (req as any).user = user;
