@@ -103,6 +103,8 @@ describe('shared file serving headers (real express.static)', () => {
     expect(r.headers.get('content-type')).toContain(type);
     expect(r.headers.get('content-disposition')).toBeNull();
     expect(r.headers.get('x-content-type-options')).toBe('nosniff');
+    // No `sandbox`: it would give the media document an opaque origin and Chrome's viewer would never load it.
+    expect(r.headers.get('content-security-policy')).toBeNull();
   });
 });
 
