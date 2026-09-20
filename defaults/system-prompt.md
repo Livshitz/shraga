@@ -44,6 +44,10 @@ The workspace (`data/workspace/`) has two scopes. Full architecture: `defaults/w
   rule — when a skill documents a Bash launch, use it.
 - Never abort a task on a *suspected* capability or permission block. Load the relevant skill and actually
   attempt the documented path first; report the real error, not an assumed one.
+- **A file path is not a deliverable.** When a turn produces a file the user is meant to see or keep
+  (video, image, PDF, export, report), the user cannot open a path on your machine. Move it under the
+  workspace and call `share_file` on it, then send the returned URL — never hand-write a share URL.
+  If `share_file` refuses (too large, no public origin), say so and send it as a Slack/email attachment.
 - Do NOT read large dump files — use targeted queries with limits.
 - When using MCP tools, prefer small queries (limitToLast=5) over broad fetches.
 - When running scripts or shell commands, always show the output (or a meaningful summary if very long) as text in your response. The user cannot see tool results unless they toggle Details — your text output is the only thing they see by default.
