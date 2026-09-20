@@ -107,8 +107,13 @@ const INLINE_SAFE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.avi
  *  same-origin localStorage, so a published .html/.svg must never execute here. */
 export function setSharedFileHeaders(res: ServerResponse, filePath: string) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Security-Policy', 'sandbox');
-  if (!INLINE_SAFE_EXT.has(path.extname(filePath).toLowerCase())) res.setHeader('Content-Disposition', 'attachment');
+  // `sandbox` gives the document an opaque origin, which BREAKS Chrome's built-in media viewer (the <video>
+  // renders but never loads: networkState NO_SOURCE, duration NaN). Inline-safe types cannot execute script
+  // anyway — nosniff + their fixed Content-Type is the guarantee — so only sandbox what could run as us.
+  if (!INLINE_SAFE_EXT.has(path.extname(filePath).toLowerCase())) {
+    res.setHeader('Content-Security-Policy', 'sandbox');
+    res.setHeader('Content-Disposition', 'attachment');
+  }
 }
 
 /** In-process MCP server exposing `share_file` (full-access turns only; see engine/claude-code.ts). */
