@@ -286,6 +286,42 @@ describe('background tasks and resumed sessions', () => {
     expect(await inputEnd).toBe(true); // released once the turn ended
   });
 
+  test('a bg task completing before the result still gets its follow-up turn', async () => {
+    reset();
+    const sid = newSid(); const conv: ConvMessage[] = [];
+    scripts = [async function* (_o, { first }) {
+      yield init('cc-race');
+      yield { type: 'system', subtype: 'task_started', task_id: 'bg1', session_id: 'cc-race' };
+      yield { type: 'system', subtype: 'task_notification', task_id: 'bg1', status: 'completed', session_id: 'cc-race' };
+      yield text('cc-race', 'will report');
+      yield result('cc-race', 2, 'will report', first.uuid);
+      await new Promise((r) => setTimeout(r, 50));
+      yield text('cc-race', 'code-123456');
+      yield result('cc-race', 2, 'code-123456');
+    }];
+    const events = await turn(sid, conv, ALICE, 'give me the code');
+    expect(events.filter((e) => e.type === 'text_delta').map((e) => e.text).join('')).toBe('will report\n\ncode-123456');
+    expect(events.filter((e) => e.type === 'done')).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({ type: 'done', stopReason: 'success' });
+  });
+
+  test('a mid-turn bg notification with no follow-up turn ends after the grace window', async () => {
+    reset();
+    const sid = newSid(); const conv: ConvMessage[] = [];
+    scripts = [async function* (_o, { first, input }) {
+      yield init('cc-grace');
+      yield { type: 'system', subtype: 'task_notification', task_id: 'bg1', status: 'completed', session_id: 'cc-grace' };
+      yield text('cc-grace', 'all done');
+      yield result('cc-grace', 2, 'all done', first.uuid);
+      await input.next(); // the CLI idles until the input closes
+    }];
+    const t0 = Date.now();
+    const events = await turn(sid, conv, ALICE, 'check it');
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    expect(events.filter((e) => e.type === 'done')).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({ type: 'done', stopReason: 'success' });
+  }, 15_000);
+
   test("a resumed session's stale zero-turn result does not end the turn before the user's prompt is answered", async () => {
     reset();
     const sid = newSid(); const conv: ConvMessage[] = [];

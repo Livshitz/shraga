@@ -15,6 +15,10 @@ import { heavyCommandDenyMessage, heavyLocalCommand } from './offload.ts';
 const LONG_RUNNING_PATTERNS = [
   /\bdata\/scripts\//,
 ];
+/** Instant scripts under those paths whose output the user is waiting on (a 2FA code must not go async). */
+const INSTANT_SCRIPT_PATTERNS = [
+  /\bdata\/scripts\/totp\.ts\b/,
+];
 
 /**
  * Deny foreground Bash calls matching known long-running patterns.
@@ -35,7 +39,7 @@ const forceBackgroundForScripts = (exemptCommand?: string): HookCallback => asyn
   // exit code behind a task id, so the guard must not fire on it.
   if (exemptCommand && cmd === exemptCommand) return {};
 
-  const isLongRunning = LONG_RUNNING_PATTERNS.some(p => p.test(cmd));
+  const isLongRunning = LONG_RUNNING_PATTERNS.some(p => p.test(cmd)) && !INSTANT_SCRIPT_PATTERNS.some(p => p.test(cmd));
   if (!isLongRunning) return {};
 
   console.log(`[hooks] Denying foreground Bash for long-running script: ${cmd.slice(0, 120)}`);

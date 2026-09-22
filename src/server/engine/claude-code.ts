@@ -32,6 +32,8 @@ const DEFAULT_USER_PROMPT = `You are a helpful assistant with access to MCP tool
 const DEFAULT_ALLOWED_TOOLS = ['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch'];
 const BG_TASK_MAX_WAIT_MS = 15 * 60_000;
 const BG_HEARTBEAT_MS = 60_000;
+/** How long to wait for the CLI's follow-up turn on a bg task that finished before the turn's result. */
+const BG_FOLLOWUP_GRACE_MS = 5_000;
 const HISTORY_LIMIT = 50;
 
 const NO_INTERACTIVE_ANSWER = 'No interactive channel is available to answer right now. Use your best judgement to proceed, and surface these options to the user in your reply so they can redirect if needed.';
@@ -571,6 +573,9 @@ export class ClaudeCodeEngine implements AgentEngine {
     const iter = q[Symbol.asyncIterator]();
     let pendingNext: Promise<IteratorResult<any>> | null = null;
     let waitingForBg = false;
+    // Grace hold: no task outstanding, but one finished mid-turn and the CLI may still run its follow-up turn.
+    let graceStop: string | null = null;
+    let notifiedBeforeAnswer = false;
     // Has the result answering THIS prompt arrived? Later results are the model's follow-ups on bg-task completions.
     let answered = false;
     let turnBreak = false;
@@ -584,8 +589,15 @@ export class ClaudeCodeEngine implements AgentEngine {
         if (!pendingNext) pendingNext = iter.next();
         let res: IteratorResult<any>;
         if (waitingForBg) {
-          if (!bgTimer) bgTimer = new Promise((r) => { bgTimerHandle = setTimeout(() => r('__bgtimeout'), BG_TASK_MAX_WAIT_MS); });
+          if (!bgTimer) bgTimer = new Promise((r) => { bgTimerHandle = setTimeout(() => r('__bgtimeout'), graceStop ? BG_FOLLOWUP_GRACE_MS : BG_TASK_MAX_WAIT_MS); });
           const raced = await Promise.race([pendingNext, bgTimer]);
+          if (raced === '__bgtimeout' && graceStop) {
+            console.log(`[claude] No follow-up turn within grace — ending (${elapsed()})`);
+            yield { type: 'done', sessionId: lastSessionId, stopReason: graceStop };
+            return;
+          }
+          // The follow-up turn started: it gets the full bg wait, not the grace window.
+          if (graceStop) { graceStop = null; clearBgTimer(); }
           if (raced === '__bgtimeout') {
             console.warn(`[claude] Background-task wait timed out (${elapsed()})`);
             yield { type: 'done', sessionId: lastSessionId, stopReason: 'end_turn' };
@@ -649,6 +661,7 @@ export class ClaudeCodeEngine implements AgentEngine {
         }
         if (m.type === 'system' && m.subtype === 'task_notification') {
           outstandingTasks.delete(m.task_id);
+          if (!answered) notifiedBeforeAnswer = true;
           console.log(`[claude] Background task ${m.status}: ${m.task_id} (${outstandingTasks.size} pending) (${elapsed()})`);
           // Not the end of the turn: the CLI now runs a follow-up turn on the result, whose own result ends it
           // (still bounded by the bg timer).
@@ -666,6 +679,7 @@ export class ClaudeCodeEngine implements AgentEngine {
           // ours arrives (older CLIs don't echo the uuid: then only a zero-turn result counts as stale).
           const echoed = m.user_message_uuids ?? (m.user_message_uuid ? [m.user_message_uuid] : undefined);
           if (!answered && !m.is_error && (echoed ? !echoed.includes(promptUuid) : !m.num_turns)) {
+            notifiedBeforeAnswer = false; // that notification belonged to the stale turn
             console.log(`[claude] Skipping result of an earlier turn: turns=${m.num_turns ?? 0} result_index=${m.result_index ?? '?'} (${elapsed()})`);
             continue;
           }
@@ -685,6 +699,15 @@ export class ClaudeCodeEngine implements AgentEngine {
               bgHeartbeat = setInterval(() => console.log(`[claude] Still holding for ${outstandingTasks.size} bg task(s): ${[...outstandingTasks].join(',')} (${elapsed()})`), BG_HEARTBEAT_MS);
               bgHeartbeat.unref?.();
             }
+            turnBreak = textDeltaCount > 0;
+            continue;
+          }
+          // A task that finished BEFORE this result is already out of the set, yet the CLI queues a follow-up
+          // turn on its notification — ending here drops it (the model said "will report" and never did).
+          const firstResult = !waitingForBg && !graceStop;
+          if (firstResult && (m.queued_turn_count > 0 || notifiedBeforeAnswer) && !m.is_error) {
+            waitingForBg = true; clearBgTimer(); graceStop = sub;
+            console.log(`[claude] Holding for follow-up turn on a bg task that finished mid-turn (queued=${m.queued_turn_count ?? '?'}) (${elapsed()})`);
             turnBreak = textDeltaCount > 0;
             continue;
           }
