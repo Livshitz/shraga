@@ -41,18 +41,18 @@ describe('schedule prompt [model] directive', () => {
 describe('stacked directive groups', () => {
   test('[turns:120][opus] keeps both', () => {
     const { prompt, directives } = parseDirectives('[turns:120][opus] Run the routine.');
-    expect(directives.model).toBe('claude-opus-5');
+    expect(directives.model).toBe('claude-opus-5-5');
     expect(directives.turns).toBe(120);
     expect(prompt).toBe('Run the routine.');
   });
   test('[opus] [turns:120] (runner prepend shape) keeps both', () => {
     const { directives } = parseDirectives('[opus] [turns:120] Run the routine.');
-    expect(directives.model).toBe('claude-opus-5');
+    expect(directives.model).toBe('claude-opus-5-5');
     expect(directives.turns).toBe(120);
   });
   test('non-directive bracket text is left in the prompt', () => {
     const { prompt, directives } = parseDirectives("[opus] [WARN] disk full");
-    expect(directives.model).toBe('claude-opus-5');
+    expect(directives.model).toBe('claude-opus-5-5');
     expect(prompt).toBe('[WARN] disk full');
   });
 });
