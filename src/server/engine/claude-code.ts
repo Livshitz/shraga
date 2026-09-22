@@ -27,6 +27,7 @@ import { claudeAccountDir, applyClaudeAccount, claudeForcesSubscription, claudeA
 import { buildAgentEnv, builtinTools, filterMcpServers, allowsEscalate, allowsInternalToken, allowsShare, SHARE_TOOL_ID, SENSITIVE_PATH_PATTERNS } from '../security/enforce.ts';
 import { escalateMcpServer } from '../security/escalate.ts';
 import { shareMcpServer } from '../share-file.ts';
+import { jobsMcpServer, JOBS_TOOL_IDS } from '../jobs-mcp.ts';
 const IMMUTABLE_SYSTEM_PROMPT = readFileSync(path.resolve(import.meta.dirname, '../../../defaults/system-prompt.md'), 'utf-8');
 const DEFAULT_USER_PROMPT = `You are a helpful assistant with access to MCP tools.`;
 const DEFAULT_ALLOWED_TOOLS = ['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch'];
@@ -529,6 +530,15 @@ export class ClaudeCodeEngine implements AgentEngine {
       const server = shareMcpServer();
       options['mcpServers'] = { ...(options['mcpServers'] as object | undefined), [server.name]: server };
       options['allowedTools'] = [...allowedTools, SHARE_TOOL_ID];
+    }
+    // Durable background jobs (in-process, like share_file): server-owned children that outlive the
+    // turn, the CLI process, and the bg-wait budget, with wake-on-exit (background-jobs.ts). Only
+    // where the profile grants Bash — job_start is arbitrary shell — and only for a real session id
+    // (wake reports need a session to land in).
+    if (opts.sessionId && (available === 'all' || available.includes('Bash'))) {
+      const server = jobsMcpServer({ sessionId: opts.sessionId, uid: opts.uid, userEmail: opts.userEmail, cwd });
+      options['mcpServers'] = { ...(options['mcpServers'] as object | undefined), [server.name]: server };
+      options['allowedTools'] = [...((options['allowedTools'] as string[] | undefined) ?? allowedTools), ...JOBS_TOOL_IDS];
     }
 
     const mcpNames = mcpServers ? Object.keys(mcpServers) : [];

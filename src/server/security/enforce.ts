@@ -43,6 +43,14 @@ export const SHARE_TOOL = 'share_file';
 export const SHARE_TOOL_ID = `mcp__${SHARE_SERVER}__${SHARE_TOOL}`;
 export const allowsShare = (p: Pick<Profile, 'tools'>) => p.tools.includes('*');
 
+/** In-process MCP server carrying the durable background-job tools (jobs-mcp.ts). `job_start` runs
+ *  arbitrary shell, so it is exactly as powerful as Bash — gate it the same way. */
+export const JOBS_SERVER = 'jobs';
+export const allowsJobs = (p: Pick<Profile, 'tools' | 'mcps'>) => {
+  const b = builtinTools(p);
+  return b === 'all' || b.includes('Bash');
+};
+
 /** `escalate` is opt-in by name (reply-only). `*` profiles don't get it: they can act, not just ask. */
 export const allowsEscalate = (p: Pick<Profile, 'tools'>) => p.tools.includes(ESCALATE_TOOL);
 export const allowsMcpServer = (p: Pick<Profile, 'mcps'>, server: string) => p.mcps.includes('*') || p.mcps.includes(server);
@@ -66,6 +74,7 @@ export function profileAllowsTool(p: Pick<Profile, 'tools' | 'mcps'>, tool: stri
     const server = tool.slice(5).split('__')[0];
     if (server === ESCALATE_SERVER) return allowsEscalate(p);
     if (server === SHARE_SERVER) return allowsShare(p);
+    if (server === JOBS_SERVER) return allowsJobs(p);
     return allowsMcpServer(p, server) || p.tools.includes(tool);
   }
   const b = builtinTools(p);

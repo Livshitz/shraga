@@ -126,9 +126,10 @@ describe('flag ON: the engine applies the effective profile', () => {
   test('owner (full): all tools + MCPs, env = everything minus server secrets, scoped internal token, gate hook first', async () => {
     const { options: o, mcpFile } = await run(fromAuthUser({ uid: 'o', email: OWNER }), 'eng-on-owner');
     expect(o.tools).toEqual({ type: 'preset', preset: 'claude_code' });
-    expect(o.allowedTools).toEqual(['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch', 'mcp__shraga-share__share_file']);
+    expect(o.allowedTools).toEqual(['Read', 'Edit', 'Bash', 'WebSearch', 'Glob', 'LS', 'ToolSearch', 'mcp__shraga-share__share_file',
+      'mcp__jobs__job_start', 'mcp__jobs__job_status', 'mcp__jobs__job_output', 'mcp__jobs__job_kill', 'mcp__jobs__job_list']);
     expect(Object.keys(mcpFile.mcpServers ?? mcpFile).sort()).toEqual(['mcp-notion', 'mcp-slack-use']);
-    expect(Object.keys(o.mcpServers)).toEqual(['shraga-share']);
+    expect(Object.keys(o.mcpServers)).toEqual(['shraga-share', 'jobs']);
     expect(o.mcpServers['shraga-share'].type).toBe('sdk');
     expect(await hookDecision(o, 'mcp__shraga-share__share_file', { file_path: '/tmp/x' })).toBe('pass');
     for (const k of Object.keys(SECRETS)) expect(o.env).not.toHaveProperty(k);

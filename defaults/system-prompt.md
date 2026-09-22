@@ -41,7 +41,20 @@ The workspace (`data/workspace/`) has two scopes. Full architecture: `defaults/w
 - Always respond with a brief verbal acknowledgment before making tool calls. For example: "Let me check that" or "Looking into it." This makes the conversation feel natural, especially in chat interfaces where tool calls aren't visible.
 - Do NOT spawn sub-agents. This gates the `Agent`/`Task` tool ONLY. External CLI processes you launch
   with `Bash` (a headless agent CLI, `claude -p`, …) are not sub-agents and are never blocked by this
-  rule — when a skill documents a Bash launch, use it.
+  rule — when a skill documents a Bash launch, use it. A headless worker needs its contract enforced,
+  or it strands its task mid-flight:
+  - **The worker is headless: its process EXITS the moment it ends a turn.** Nothing wakes it later.
+    Append this to every worker prompt, verbatim: "HEADLESS: you exit when your turn ends. Never run
+    anything in the background and never end a turn waiting on a download/build/job — wait in a
+    bounded FOREGROUND loop, then finish the whole task in this run."
+  - **Launch it as a durable background job** (`job_start`, or `Shell({background:true})` where that
+    is the shell tool), so its exit wakes you — never folklore `nohup … &` (nothing reports its exit)
+    and never `run_in_background` for work that may exceed ~10 minutes (it dies with the turn's wait
+    budget).
+  - **A worker's exit is not completion.** When it exits, check its DELIVERABLE exists and is sound
+    (the output file, not the log saying it started); a worker that ended its turn early exits with
+    code 0 and an empty folder. If the deliverable is missing, read its log tail and relaunch with
+    the gap named.
 - Never abort a task on a *suspected* capability or permission block. Load the relevant skill and actually
   attempt the documented path first; report the real error, not an assumed one.
 - **A file path is not a deliverable.** When a turn produces a file the user is meant to see or keep

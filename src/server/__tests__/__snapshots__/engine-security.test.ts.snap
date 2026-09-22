@@ -11,6 +11,11 @@ exports[`flag OFF: spawn config is today's matches the pre-enforcement snapshot 
     "LS",
     "ToolSearch",
     "mcp__shraga-share__share_file",
+    "mcp__jobs__job_start",
+    "mcp__jobs__job_status",
+    "mcp__jobs__job_output",
+    "mcp__jobs__job_kill",
+    "mcp__jobs__job_list",
   ],
   "canUseTool": {
     "bash": "allow",
@@ -87,6 +92,7 @@ exports[`flag OFF: spawn config is today's matches the pre-enforcement snapshot 
     "mcp-slack-use",
   ],
   "mcpServers": {
+    "jobs": "sdk",
     "shraga-share": "sdk",
   },
   "model": "claude-sonnet-5",
@@ -94,7 +100,7 @@ exports[`flag OFF: spawn config is today's matches the pre-enforcement snapshot 
   "settingSources": [
     "project",
   ],
-  "systemPromptSha": "ca4d70d55c3184b5",
+  "systemPromptSha": "03132057074a6074",
   "tools": {
     "preset": "claude_code",
     "type": "preset",
