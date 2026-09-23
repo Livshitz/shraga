@@ -12,6 +12,9 @@ const DEPLOYMENT_ID_FILE = '.deployment-id';
 const AUDIT_DIR = 'audit';
 const NOT_AUDIT = ['--', '.', `:(exclude)${AUDIT_DIR}`];
 
+/** A git conflict-marker line (start or end of a hunk). */
+const CONFLICT_MARKER = /^(<{7}|>{7}) /m;
+
 /** How long the LLM commit-message call may take before we fall back (ms). */
 const COMMIT_MSG_TIMEOUT_MS = 60_000;
 /** Warn if the push latch has been held longer than this — the 2026-08 outage's signature was silence. */
@@ -437,10 +440,58 @@ export class DataSync {
       }
     }
 
-    if (dirty) await this.git('stash', 'pop').catch(err => {
-      console.error(`${TAG} Stash pop failed — local changes may be stuck in git stash:`, (err as Error).message);
-    });
+    if (dirty) await this.popStash();
     this.rebuildLog().catch(() => {});
+  }
+
+  /** Restore the pre-pull stash. A failed pop used to be logged and left as-is: the worktree kept conflict
+   *  markers and an unmerged index, every later flush's commit failed silently, and a `git add` of a marked
+   *  file pushed the markers upstream (2026-09-23 on feedox, twice: para-links.json and push-tokens.json
+   *  unparseable, para delivery + mobile push dead). The stash holds THIS instance's live writes, so on a
+   *  conflict its side wins; the index is cleared, and the stash is dropped only when nothing in it is lost. */
+  private async popStash(): Promise<void> {
+    try {
+      await this.git('stash', 'pop');
+      return;
+    } catch (err) {
+      console.error(`${TAG} Stash pop failed, repairing the worktree:`, (err as Error).message);
+    }
+    const conflicted = await this.getConflictedFiles().catch(() => [] as string[]);
+    for (const f of conflicted) {
+      // In a stash apply, "theirs" is the stash (local writes). A path the stash deleted has no theirs side.
+      await this.git('checkout', '--theirs', '--', f).catch(async () => {
+        await this.git('checkout', '--ours', '--', f).catch(e =>
+          console.error(`${TAG} Could not take either side of ${f}:`, (e as Error).message));
+      });
+    }
+    // Clear the unmerged index (worktree kept) so later commits are not refused.
+    await this.git('reset', '-q').catch(e => console.error(`${TAG} Index reset after failed pop failed:`, (e as Error).message));
+    const marked = await this.filesWithMarkers(conflicted);
+    const lostUntracked = await this.stashUntrackedMissing();
+    const kept = marked.length > 0 || lostUntracked.length > 0;
+    if (!kept) {
+      await this.git('stash', 'drop').catch(e => console.error(`${TAG} Stash drop failed:`, (e as Error).message));
+    }
+    console.error(`${TAG} Stash pop conflict repaired: kept local side of ${conflicted.length} file(s)${conflicted.length ? ` (${conflicted.join(', ')})` : ''}${kept ? `; stash KEPT — markers: [${marked.join(', ')}], unrestored untracked: [${lostUntracked.join(', ')}]` : '; stash dropped'}`);
+    await this.alertOnce('stash-pop', [...conflicted, ...marked, ...lostUntracked].join('\n'),
+      `⚠️ Data sync: a pre-pull stash failed to re-apply. Kept this instance's version of: ${conflicted.join(', ') || '(none)'}.` +
+      (kept ? `\n\nNOT fully repaired — stash kept. Markers in: ${marked.join(', ') || '-'}; untracked not restored: ${lostUntracked.join(', ') || '-'}. Inspect: \`cd data && git stash show -p --include-untracked\`` : ''),
+    ).catch(e => console.warn(`${TAG} Stash-pop notify failed:`, (e as Error).message));
+  }
+
+  /** Worktree files (of the given paths) that still carry conflict markers. */
+  private async filesWithMarkers(files: string[]): Promise<string[]> {
+    const out: string[] = [];
+    for (const f of files) {
+      try { if (CONFLICT_MARKER.test(readFileSync(path.join(DATA_DIR, f), 'utf-8'))) out.push(f); } catch { /* missing = no markers */ }
+    }
+    return out;
+  }
+
+  /** Untracked files saved in stash@{0} that are not on disk (a pop that refused them: "already exists"). */
+  private async stashUntrackedMissing(): Promise<string[]> {
+    const listed = await this.git('ls-tree', '-r', '--name-only', 'stash@{0}^3').catch(() => '');
+    return listed.split('\n').filter(Boolean).filter(f => !existsSync(path.join(DATA_DIR, f)));
   }
 
   trackWrite(relativePath: string): void {
@@ -507,8 +558,10 @@ export class DataSync {
       if (!status.trim()) return;
 
       if (await this.guardMassDeletions('flush')) return;
+      if (await this.guardConflictMarkers()) return;
       const msg = await this.generateCommitMessage(files);
-      await this.git('commit', '-m', auditHead ? `${msg}\n\naudit-head: ${auditHead}` : msg).catch(() => {});
+      await this.git('commit', '-m', auditHead ? `${msg}\n\naudit-head: ${auditHead}` : msg).catch(err =>
+        console.error(`${TAG} Commit failed — nothing from this flush is synced:`, (err as Error).message));
       const ahead = await this.git('rev-list', '--count', `origin/${this.options.branch}..HEAD`).catch(() => '0');
       if (parseInt(ahead.trim()) === 0) return;
       await this.git('push', 'origin', this.options.branch).catch(async (err) => {
@@ -821,6 +874,33 @@ export class DataSync {
    */
   private async askClaude(prompt: string, model: 'haiku' | 'sonnet' | 'opus' = 'sonnet', abortController?: AbortController): Promise<string> {
     return runTextQuery({ prompt, model, maxTurns: 1, abortController });
+  }
+
+  /** Never commit a conflict marker: unstage marked files (they stay on disk for repair) and alert.
+   *  An unmerged index blocks the whole commit, so that case is reported rather than committed around.
+   *  Returns true when nothing is left to commit. */
+  private async guardConflictMarkers(): Promise<boolean> {
+    const unmerged = await this.getConflictedFiles().catch(() => [] as string[]);
+    if (unmerged.length) {
+      console.error(`${TAG} 🚫 Unmerged paths in data/ — commit skipped: ${unmerged.join(', ')}`);
+      await this.alertOnce('unmerged', unmerged.join('\n'),
+        `🚫 Data sync is not committing: unmerged paths in data/: ${unmerged.join(', ')}. Resolve them (keep both sides), then \`git add\` them.`,
+      ).catch(e => console.warn(`${TAG} Unmerged notify failed:`, (e as Error).message));
+      return true;
+    }
+    this.clearAlert('unmerged');
+    // Only what this commit stages: grepping the whole index each flush would scan GBs on a real deployment.
+    const changed = (await this.git('diff', '--cached', '--name-only', '--diff-filter=AM').catch(() => '')).split('\n').filter(Boolean);
+    const staged = changed.length
+      ? (await this.git('grep', '--cached', '-l', '-E', '^(<{7}|>{7}) ', '--', ...changed).catch(() => '')).split('\n').filter(Boolean)
+      : [];
+    if (!staged.length) { this.clearAlert('markers'); return false; }
+    console.error(`${TAG} 🚫 Conflict markers staged — unstaged, not committed: ${staged.join(', ')}`);
+    await this.git('reset', '-q', 'HEAD', '--', ...staged).catch(e => console.error(`${TAG} Unstaging marked files failed:`, (e as Error).message));
+    await this.alertOnce('markers', staged.join('\n'),
+      `🚫 Data sync refused to commit file(s) containing git conflict markers: ${staged.join(', ')}. They are left on disk unsynced; fix their content.`,
+    ).catch(e => console.warn(`${TAG} Markers notify failed:`, (e as Error).message));
+    return !(await this.git('diff', '--cached', '--name-only').catch(() => '')).trim();
   }
 
   private async getConflictedFiles(): Promise<string[]> {
