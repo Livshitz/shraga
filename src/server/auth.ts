@@ -51,8 +51,14 @@ export const LOCAL_TOKEN_TTL = 30 * 24 * 3600;
 /** Server secret for signing scoped internal tokens — stable per startup. */
 const INTERNAL_SECRET = process.env.INTERNAL_API_TOKEN || randomBytes(32).toString('hex');
 process.env.INTERNAL_API_TOKEN = INTERNAL_SECRET;
-const tmpDir = join(dataPath('..'), '.tmp');
-try { mkdirSync(tmpDir, { recursive: true }); writeFileSync(join(tmpDir, '.internal-token'), INTERNAL_SECRET); } catch (e: any) { console.error('[auth] failed to write .internal-token:', e.message); }
+/** Publish this process's secret to `<app>/.tmp/.internal-token`. SERVER ONLY — called from boot.
+ *  It used to run at import time, so any process importing auth.ts (e.g. the `shraga para post` CLI) overwrote
+ *  the live server's token with its own throwaway secret, and every token signed from the file then 401'd
+ *  (feedox 2026-09-23). */
+export function publishInternalToken(): void {
+  const tmpDir = join(dataPath('..'), '.tmp');
+  try { mkdirSync(tmpDir, { recursive: true }); writeFileSync(join(tmpDir, '.internal-token'), INTERNAL_SECRET); } catch (e: any) { console.error('[auth] failed to write .internal-token:', e.message); }
+}
 
 /** Sign a scoped internal token embedding user identity. Agent subprocess uses this as INTERNAL_API_TOKEN — single env var carries both auth + identity.
  *  Format `<sig64>.<iat>:<uid>:<email>`, sig = HMAC("v2:<iat>:<uid>:<email>"). (Legacy: `<sig64>:<uid>:<email>`, no iat.) */

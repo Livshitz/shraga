@@ -19,7 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
-import { requireAuth, verifyBearer, authenticateToken, AUTH_PROVIDER, localLogin, addLocalUser, localUserCount, deniedPrincipalOf } from './auth.ts';
+import { requireAuth, verifyBearer, authenticateToken, AUTH_PROVIDER, localLogin, addLocalUser, localUserCount, deniedPrincipalOf, publishInternalToken } from './auth.ts';
 import { getMcpConfig, getRawMcpConfig, getResolvedMcpConfig, getGlobalMcpConfig, saveMcpConfig, maskEnvValues, mergeWithOriginal, type McpConfig } from './mcp.ts';
 import { streamChat, consumeStream, getAgentConfig, saveAgentConfig, getClaudeAuthSource, type AgentConfig, type PermissionHandler, type QuestionHandler, type QuestionAnswers, type AttachmentMeta, type WsEvent, MAX_TURNS_NOTICE } from './claude.ts';
 import { mountFeatures, registerFeature, resumeFeatureSession, collectFeatureFlags, collectSidecarRoutes } from './features.ts';
@@ -173,6 +173,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distPath = process.env.SHRAGA_CLIENT_DIR
   ? path.resolve(process.env.SHRAGA_CLIENT_DIR)
   : path.resolve(__dirname, '../../dist/client');
+
+// Only the server publishes its internal-token secret (auth.ts no longer does it on import).
+publishInternalToken();
 
 const app = express();
 app.use(express.json({
