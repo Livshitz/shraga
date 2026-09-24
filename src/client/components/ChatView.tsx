@@ -1,27 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import rehypeHighlight from 'rehype-highlight';
-import type { Root, Element } from 'hast';
-import type { Plugin } from 'unified';
-
-const RTL_BLOCK_TAGS = new Set(['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'td', 'th']);
-const rehypeBidi: Plugin<[], Root> = () => (tree) => {
-  const visit = (node: Root | Element) => {
-    for (const child of (node.children ?? [])) {
-      if (child.type === 'element') {
-        if (RTL_BLOCK_TAGS.has(child.tagName)) {
-          child.properties ??= {};
-          child.properties.dir = 'auto';
-        }
-        visit(child);
-      }
-    }
-  };
-  visit(tree);
-};
-import 'highlight.js/styles/github.css';
-import { ChevronRight, Wrench, User, Bot, Copy, Check, RotateCcw, Pencil, X, SendHorizontal, ShieldQuestion, CheckCircle2, XCircle, Eye, EyeOff, Info, Loader2, BrainCircuit, GitFork, Minimize2 } from 'lucide-react';
+import { ChevronRight, Wrench, User, Bot, Check, RotateCcw, Pencil, X, SendHorizontal, ShieldQuestion, CheckCircle2, XCircle, Eye, EyeOff, Info, Loader2, BrainCircuit, GitFork, Minimize2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toolPreview } from '@/lib/tool-preview';
 import { annotateLimitReset } from '@/lib/limit-reset';
@@ -32,32 +10,14 @@ import { AuthedImage, AuthedFileLink } from './AuthedImage';
 import { useSlots } from '@/lib/slots';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { ZoomableImage } from './ZoomableImage';
+import { AssistantMarkdown } from './AssistantMarkdown';
 
 // The appwrap iOS WKWebView wedges its GPU compositor when rendering react-markdown's DOM for a chat with
 // history — JS keeps running but paint + hit-testing freeze for ~1-2min (screen stuck/touch-dead) before
 // WebKit lazily restores. The SAME content in mobile Safari and on desktop is fine, so this is specific to
-// the native WKWebView shell, not the web app. Until the native shell issue is fixed, render assistant
+// the native WKWebView shell, not the web app. (Observed with react-markdown; MarkdownStream is unverified there.) Until the native shell issue is fixed, render assistant
 // messages as PLAIN TEXT inside the native app only; full markdown stays on Safari/desktop/web.
 const IS_APPWRAP_NATIVE = typeof window !== 'undefined' && !!(window as { webkit?: { messageHandlers?: { appwrap?: unknown } } }).webkit?.messageHandlers?.appwrap;
-
-function AssistantMarkdown({ text, onImageClick }: { text: string; onImageClick?: (src: string) => void }) {
-  const clean = text.replace(/\[Image #\d+\]\s*/g, '').trim();
-  if (IS_APPWRAP_NATIVE) {
-    return <div className="prose prose-sm max-w-none dark:prose-invert break-words min-w-0 whitespace-pre-wrap">{clean}</div>;
-  }
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      rehypePlugins={[rehypeHighlight, rehypeBidi]}
-      className="prose prose-sm max-w-none dark:prose-invert prose-pre:bg-muted prose-pre:border prose-code:before:content-none prose-code:after:content-none break-words min-w-0"
-      components={{
-        pre: ({ children, ...props }) => <CodeBlock {...props}>{children}</CodeBlock>,
-        a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
-        img: ({ src, alt }) => <AuthedImage src={src ?? ''} alt={alt ?? ''} className="max-h-[80vh] max-w-full rounded-xl border object-contain cursor-pointer hover:opacity-80 transition-opacity" onClick={(s) => onImageClick?.(s)} />,
-      }}
-    >{clean}</ReactMarkdown>
-  );
-}
 
 function formatTs(ts: number): string {
   const d = new Date(ts);
@@ -397,7 +357,7 @@ const MessageRow = memo(function MessageRow({
             const result = block.type === 'tool_use'
               ? message.blocks.find((b): b is MessageBlock & { type: 'tool_result' } => b.type === 'tool_result' && b.toolUseId === block.toolUseId)
               : undefined;
-            return <BlockRenderer key={i} block={block} isUser={isUser} ts={message.ts} onPermissionRespond={onPermissionRespond} onQuestionRespond={onQuestionRespond} pairedResult={result} onImageClick={onImageClick} busy={busy} screenMap={screenMap} />;
+            return <BlockRenderer key={i} block={block} isUser={isUser} ts={message.ts} onPermissionRespond={onPermissionRespond} onQuestionRespond={onQuestionRespond} pairedResult={result} onImageClick={onImageClick} busy={busy} live={!!busy && block === message.blocks[message.blocks.length - 1]} screenMap={screenMap} />;
           })}
             {isUser && userText && (
               <div className={cn('flex gap-1 items-center justify-end transition-opacity', actionsVisible ? 'opacity-100' : 'opacity-0 group-hover/row:opacity-100')}>
@@ -462,7 +422,7 @@ function CompactMarkerDivider({ summary, compactedCount }: { summary: string; co
   );
 }
 
-function BlockRenderer({ block, isUser, ts, onPermissionRespond, onQuestionRespond, pairedResult, onImageClick, busy, screenMap }: { block: MessageBlock; isUser: boolean; ts?: number; onPermissionRespond?: (id: string, allow: boolean, allowAll?: boolean) => void; onQuestionRespond?: (id: string, answers: QuestionAnswers) => void; pairedResult?: MessageBlock & { type: 'tool_result' }; onImageClick?: (src: string) => void; busy?: boolean; screenMap?: Map<string, string[]> }) {
+function BlockRenderer({ block, isUser, ts, onPermissionRespond, onQuestionRespond, pairedResult, onImageClick, busy, live, screenMap }: { block: MessageBlock; isUser: boolean; ts?: number; onPermissionRespond?: (id: string, allow: boolean, allowAll?: boolean) => void; onQuestionRespond?: (id: string, answers: QuestionAnswers) => void; pairedResult?: MessageBlock & { type: 'tool_result' }; onImageClick?: (src: string) => void; busy?: boolean; /** This text block is the one currently streaming. */ live?: boolean; screenMap?: Map<string, string[]> }) {
   const slots = useSlots();
   if (block.type === 'image') {
     return (
@@ -500,7 +460,9 @@ function BlockRenderer({ block, isUser, ts, onPermissionRespond, onQuestionRespo
     }
     return (
       <div className="text-sm" dir="auto">
-        <AssistantMarkdown text={block.text} onImageClick={onImageClick} />
+        {IS_APPWRAP_NATIVE
+          ? <div className="prose prose-sm max-w-none dark:prose-invert break-words min-w-0 whitespace-pre-wrap">{block.text.replace(/\[Image #\d+\]\s*/g, '').trim()}</div>
+          : <AssistantMarkdown text={block.text} streaming={live} onImageClick={onImageClick} />}
       </div>
     );
   }
@@ -936,35 +898,5 @@ function QuestionRequestBlock({
         <span className="text-muted-foreground">{answeredCount}/{questions.length} answered</span>
       </div>
     </div>
-  );
-}
-
-function CodeBlock({ children, ...props }: any) {
-  const ref = useRef<HTMLPreElement>(null);
-  return (
-    <div className="relative group">
-      <pre ref={ref} {...props} className="rounded-lg border bg-muted p-4 overflow-x-auto text-xs text-foreground">
-        {children}
-      </pre>
-      <CopyButton getText={() => ref.current?.textContent || ''} />
-    </div>
-  );
-}
-
-function CopyButton({ getText }: { getText: () => string }) {
-  const [copied, setCopied] = useState(false);
-
-  return (
-    <button
-      onClick={() => {
-        navigator.clipboard.writeText(getText());
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      }}
-      className="absolute top-2 right-2 p-1.5 rounded-md bg-background/80 border opacity-0 group-hover:opacity-100 transition-opacity"
-      title="Copy"
-    >
-      {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-    </button>
   );
 }

@@ -1,0 +1,18 @@
+/* bare-v3 ships its styles in @layer; Tailwind's preflight is unlayered, so it wins regardless of
+   specificity (zeroes borders, strips button chrome). Inside bare-v3 components, roll those
+   properties back to bare's layer. */
+.assistant-md { font-family: inherit; }
+.assistant-md :is(.b3-table-wrap, .b3-alert, .b3-stat, .b3-surface, .b3-badge, .b3-button, .b3-skeleton),
+.assistant-md :is(.b3-table-wrap, .b3-alert) * {
+  border-width: revert-layer;
+  border-style: revert-layer;
+  border-color: revert-layer;
+}
+.assistant-md .b3-button {
+  padding: revert-layer;
+  background: revert-layer;
+  line-height: revert-layer;
+}
+.assistant-md .b3-alert :is(ul, ol) { list-style: revert-layer; padding-inline-start: 1.25em; }
+.assistant-md .b3-alert p + * { margin-block-start: 0.5em; }
+.assistant-md > .not-prose { margin-block: 1em; }

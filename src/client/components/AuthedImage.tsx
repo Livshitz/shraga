@@ -5,7 +5,15 @@ import { useWorkspace } from '@/lib/workspaceContext';
 // `/uploads/*` is gated by requireAuth on the server, so a plain <img src>/<a href> GET 401s
 // (no Authorization header). Fetch with a fresh bearer token and render/open a blob URL instead.
 // Other srcs (data:, http(s):, blob:) need no auth.
-const NEEDS_AUTH = /^\/uploads\//;
+export const NEEDS_AUTH = /^\/uploads\//;
+
+/** Fetch an auth-gated src with a bearer token → a blob URL the caller must revoke. */
+export async function authedBlobUrl(src: string, getToken: () => Promise<string | null | undefined>): Promise<string> {
+  const token = await getToken();
+  const res = await fetch(src, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return URL.createObjectURL(await res.blob());
+}
 
 interface ImageProps {
   src: string;
@@ -29,10 +37,7 @@ export function AuthedImage({ src, alt, className, onClick }: ImageProps) {
     setResolved(null);
     (async () => {
       try {
-        const token = await getToken();
-        const res = await fetch(src, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        objectUrl = URL.createObjectURL(await res.blob());
+        objectUrl = await authedBlobUrl(src, getToken);
         if (cancelled) URL.revokeObjectURL(objectUrl);
         else setResolved(objectUrl);
       } catch (err) {
