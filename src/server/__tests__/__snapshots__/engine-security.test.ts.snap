@@ -47,7 +47,7 @@ exports[`flag OFF: spawn config is today's matches the pre-enforcement snapshot 
   "hooks": {
     "PreToolUse": [
       {
-        "hooks": 1,
+        "hooks": 2,
         "matcher": "Bash",
       },
       {
