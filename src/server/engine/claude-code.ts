@@ -538,7 +538,11 @@ export class ClaudeCodeEngine implements AgentEngine {
     // where the profile grants Bash — job_start is arbitrary shell — and only for a real session id
     // (wake reports need a session to land in).
     if (durableJobs) {
-      const server = jobsMcpServer({ sessionId: opts.sessionId, uid: opts.uid, userEmail: opts.userEmail, cwd });
+      // The job store scrubs `*_API_KEY` from children, so a nested agent (the social legs' agentx worker)
+      // died "No provider key found" (2026-09-24). Hand back the provider keys THIS turn's own env already
+      // carries (profile-filtered by buildAgentEnv) — the same set the agentx engine gives its jobs.
+      const providerEnv = Object.fromEntries(Object.entries(sdkEnv).filter(([k, v]) => /_API_KEY$/.test(k) && v));
+      const server = jobsMcpServer({ sessionId: opts.sessionId!, uid: opts.uid, userEmail: opts.userEmail, cwd, env: providerEnv });
       options['mcpServers'] = { ...(options['mcpServers'] as object | undefined), [server.name]: server };
       options['allowedTools'] = [...((options['allowedTools'] as string[] | undefined) ?? allowedTools), ...JOBS_TOOL_IDS];
     }
