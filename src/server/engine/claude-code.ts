@@ -387,6 +387,8 @@ export class ClaudeCodeEngine implements AgentEngine {
     // Enforced: built-in tool AVAILABILITY is the profile's (tools outside it are not in the model's context), and
     // auto-approval never widens it.
     const available = eff ? builtinTools(eff.profile) : 'all';
+    // Same gate that mounts the jobs server below — the hooks steer to job_start only where it exists.
+    const durableJobs = !!opts.sessionId && (available === 'all' || available.includes('Bash'));
     const allowedTools = available === 'all' ? withToolSearch : withToolSearch.filter((t) => available.includes(t));
     const maxTurns = directives.turns ?? config.maxTurns ?? 50;
 
@@ -413,7 +415,7 @@ export class ClaudeCodeEngine implements AgentEngine {
       agents: loadAgents(),
       // Enforced: the profile gate runs FIRST on every tool call — hooks fire even for auto-approved `allowedTools`,
       // which never reach canUseTool.
-      hooks: ((h) => (guard ? { ...h, PreToolUse: [{ hooks: [guard.hook()] }, ...(h.PreToolUse ?? [])] } : h))(buildHooks({ exemptBashCommand: opts.foregroundBashCommand })),
+      hooks: ((h) => (guard ? { ...h, PreToolUse: [{ hooks: [guard.hook()] }, ...(h.PreToolUse ?? [])] } : h))(buildHooks({ exemptBashCommand: opts.foregroundBashCommand, durableJobs })),
     };
 
     const userHandler = opts.onPermissionRequest;
@@ -535,7 +537,7 @@ export class ClaudeCodeEngine implements AgentEngine {
     // turn, the CLI process, and the bg-wait budget, with wake-on-exit (background-jobs.ts). Only
     // where the profile grants Bash — job_start is arbitrary shell — and only for a real session id
     // (wake reports need a session to land in).
-    if (opts.sessionId && (available === 'all' || available.includes('Bash'))) {
+    if (durableJobs) {
       const server = jobsMcpServer({ sessionId: opts.sessionId, uid: opts.uid, userEmail: opts.userEmail, cwd });
       options['mcpServers'] = { ...(options['mcpServers'] as object | undefined), [server.name]: server };
       options['allowedTools'] = [...((options['allowedTools'] as string[] | undefined) ?? allowedTools), ...JOBS_TOOL_IDS];

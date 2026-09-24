@@ -26,7 +26,7 @@ const INSTANT_SCRIPT_PATTERNS = [
  * which lets the CLI manage the process asynchronously (the model can
  * continue working and gets notified when the command finishes).
  */
-const forceBackgroundForScripts = (exemptCommand?: string): HookCallback => async (input) => {
+const forceBackgroundForScripts = (exemptCommand?: string, durableJobs = false): HookCallback => async (input) => {
   if (input.hook_event_name !== 'PreToolUse') return {};
   const { tool_name, tool_input } = input as PreToolUseHookInput;
   if (tool_name !== 'Bash') return {};
@@ -47,8 +47,31 @@ const forceBackgroundForScripts = (exemptCommand?: string): HookCallback => asyn
     hookSpecificOutput: {
       hookEventName: 'PreToolUse' as const,
       permissionDecision: 'deny' as const,
-      permissionDecisionReason:
-        'This script may take several minutes. Use run_in_background: true so you can continue working while it runs.',
+      permissionDecisionReason: durableJobs
+        ? `This script may take several minutes. Start it with ${JOB_START} instead — it survives this turn and the session is woken when it exits.`
+        : 'This script may take several minutes. Use run_in_background: true so you can continue working while it runs.',
+    },
+  };
+};
+
+const JOB_START = 'mcp__jobs__job_start';
+
+/**
+ * Where durable jobs are mounted, refuse native `run_in_background`. The CLI holds the turn open for
+ * such a task only up to the bg-wait budget (claude-code.ts BG_TASK_MAX_WAIT_MS, 15 min), then exits
+ * and the task dies with it. On 2026-09-24 that SIGTERMed a social publish run mid-LinkedIn after
+ * X and @livshitz_ had posted. `job_start` runs the same command server-side, detached, with wake-on-exit.
+ */
+const denyNativeBackground: HookCallback = async (input) => {
+  if (input.hook_event_name !== 'PreToolUse') return {};
+  const { tool_name, tool_input } = input as PreToolUseHookInput;
+  if (tool_name !== 'Bash' || !(tool_input as Record<string, unknown>)?.run_in_background) return {};
+  console.log('[hooks] Denied native run_in_background — steering to job_start');
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse' as const,
+      permissionDecision: 'deny' as const,
+      permissionDecisionReason: `run_in_background dies when this turn ends (15-min cap). Run the same command with ${JOB_START} — it outlives the turn and the session is woken when it exits.`,
     },
   };
 };
@@ -178,12 +201,12 @@ export const denyHeavyLocalMedia = (cfg: OffloadSettings): HookCallback => async
 /** Build the hooks map to pass into SDK query() options.
  *  `exemptBashCommand` is the one command the turn was explicitly told to run in the foreground
  *  (a `bash` schedule's command) — see forceBackgroundForScripts. */
-export function buildHooks(opts?: { exemptBashCommand?: string; offload?: OffloadSettings }): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+export function buildHooks(opts?: { exemptBashCommand?: string; offload?: OffloadSettings; durableJobs?: boolean }): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
   const offload = opts && 'offload' in opts ? opts.offload : getOffload();
   return {
     PreToolUse: [
       ...(offload ? [{ matcher: 'Bash', hooks: [denyHeavyLocalMedia(offload)] }] : []),
-      { matcher: 'Bash', hooks: [forceBackgroundForScripts(opts?.exemptBashCommand)] },
+      { matcher: 'Bash', hooks: [forceBackgroundForScripts(opts?.exemptBashCommand, opts?.durableJobs), ...(opts?.durableJobs ? [denyNativeBackground] : [])] },
       { matcher: 'mcp__mcp-slack-use__post_slack_.*', hooks: [resolveSlackMentions] },
       { matcher: 'mcp__mcp-firebase-(?:prod|lab)__get_db.*', hooks: [guardFirebaseReads] },
       { matcher: 'Write|Edit|MultiEdit|NotebookEdit', hooks: [denyProtectedDataWrites] },
