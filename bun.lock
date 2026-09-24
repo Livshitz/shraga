@@ -6,7 +6,7 @@
       "name": "shraga",
       "dependencies": {
         "@anthropic-ai/claude-agent-sdk": "^0.3.280",
-        "@livx.cc/bare-v3": "0.1.0-alpha.57",
+        "@livx.cc/bare-v3": "0.1.0-alpha.59",
         "@livx.cc/mcp-firebase": "^0.1.14",
         "@radix-ui/react-accordion": "^1.2.2",
         "@radix-ui/react-dialog": "^1.1.4",
@@ -300,7 +300,7 @@
 
     "@js-sdsl/ordered-map": ["@js-sdsl/ordered-map@4.4.2", "", {}, "sha512-iUKgm52T8HOE/makSxjqoWhe95ZJA1/G1sYsGev2JDKUSS14KAgg1LHb+Ba+IPow0xflbnSkOsZcO08C7w1gYw=="],
 
-    "@livx.cc/bare-v3": ["@livx.cc/bare-v3@0.1.0-alpha.57", "", {}, "sha512-YJSTbmCLxYhtuvndc8lErefIGpxb60TnIk3nlb4JagVvTWathrTntj2lCUkssxXdANYVbKmX2c3r1pU+1YlByw=="],
+    "@livx.cc/bare-v3": ["@livx.cc/bare-v3@0.1.0-alpha.59", "", {}, "sha512-4F6/nF56DbTlNVj3reneb+LFT7ncgK66Q8IaEgJSALV88IcLSOUQc1Bj6EXnMsuJG5qCKTFQMWRg9QFpcNQgCA=="],
 
     "@livx.cc/mcp-firebase": ["@livx.cc/mcp-firebase@0.1.17", "", { "dependencies": { "dotenv": "^16.4.7", "edge.libx.js": "^0.6.2", "firebase-admin": "^13.0.2", "yaml": "^2.7.0" }, "bin": { "mcp-firebase": "src/cli.ts" } }, "sha512-Ba9FgQhx6Fyu5xQe+rF03XcxHkhALgEZxhzIvYC0LLewBdNwxa/DX2SUQ3a3afEIplFRYO+ItRzFT30u6sYn2g=="],
 

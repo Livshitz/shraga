@@ -47,7 +47,7 @@ const code = (text: string, lang: string) => {
 export function AssistantMarkdown({ text, streaming = false, onImageClick }: { text: string; streaming?: boolean; onImageClick?: (src: string) => void }) {
   const clean = text.replace(/\[Image #\d+\]\s*/g, '').trim();
   const ref = useRef<HTMLDivElement>(null);
-  const view = useMemo(() => new MarkdownStream({ Marked, sanitize, code }), []);
+  const view = useMemo(() => new MarkdownStream({ Marked, sanitize, code, images: (src) => NEEDS_AUTH.test(src) }), []);
   const shown = useRef<{ text: string; live: boolean } | null>(null);
   const blobs = useRef(new Map<string, Promise<string>>());
   const { getToken } = useWorkspace();
