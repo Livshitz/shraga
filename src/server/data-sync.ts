@@ -19,6 +19,9 @@ const CONFLICT_MARKER = /^(<{7}|>{7}) /m;
 const COMMIT_MSG_TIMEOUT_MS = 60_000;
 /** Warn if the push latch has been held longer than this — the 2026-08 outage's signature was silence. */
 const PUSHING_STUCK_MS = 5 * 60_000;
+/** Largest file sync will commit. GitHub rejects >100MB, and packing multi-GB blobs OOM-killed the
+ *  Circles box in a restart loop (2026-09-27: 8GB of raw Mixpanel exports auto-committed from workspace/). */
+const MAX_FILE_BYTES = 50 * 1024 * 1024;
 
 /**
  * Reject after `ms` so a hung subprocess can't hold the push latch forever.
@@ -183,7 +186,7 @@ export class DataSync {
       await this.git('add', '-A');
       const status = await this.git('status', '--porcelain');
       if (status.trim()) {
-        if (await this.guardMassDeletions('init merge')) {
+        if (await this.guardMassDeletions('init merge') || await this.guardOversized()) {
           console.error(`${TAG} Init merge aborted — mass deletion blocked`);
         } else {
           await this.git('commit', '-m', 'data-sync: merge local state');
@@ -559,6 +562,7 @@ export class DataSync {
 
       if (await this.guardMassDeletions('flush')) return;
       if (await this.guardConflictMarkers()) return;
+      if (await this.guardOversized()) return;
       const msg = await this.generateCommitMessage(files);
       await this.git('commit', '-m', auditHead ? `${msg}\n\naudit-head: ${auditHead}` : msg).catch(err =>
         console.error(`${TAG} Commit failed — nothing from this flush is synced:`, (err as Error).message));
@@ -879,6 +883,19 @@ export class DataSync {
   /** Never commit a conflict marker: unstage marked files (they stay on disk for repair) and alert.
    *  An unmerged index blocks the whole commit, so that case is reported rather than committed around.
    *  Returns true when nothing is left to commit. */
+  /** Unstage files over MAX_FILE_BYTES (left on disk, unsynced). Returns true when nothing is left to commit. */
+  private async guardOversized(): Promise<boolean> {
+    const changed = (await this.git('diff', '--cached', '--name-only', '-z', '--diff-filter=AM').catch(() => '')).split('\0').filter(Boolean);
+    const big = changed.filter(f => { try { return statSync(path.join(DATA_DIR, f)).size > MAX_FILE_BYTES; } catch { return false; } });
+    if (!big.length) { this.clearAlert('oversized'); return false; }
+    console.error(`${TAG} 🚫 Oversized file(s) staged — unstaged, not committed: ${big.join(', ')}`);
+    await this.git('reset', '-q', 'HEAD', '--', ...big).catch(e => console.error(`${TAG} Unstaging oversized files failed:`, (e as Error).message));
+    await this.alertOnce('oversized', big.join('\n'),
+      `🚫 Data sync refused file(s) over ${MAX_FILE_BYTES / 1024 / 1024}MB: ${big.join(', ')}. Left on disk unsynced — move them out of data/ or gitignore them.`,
+    ).catch(e => console.warn(`${TAG} Oversized notify failed:`, (e as Error).message));
+    return !(await this.git('diff', '--cached', '--name-only').catch(() => '')).trim();
+  }
+
   private async guardConflictMarkers(): Promise<boolean> {
     const unmerged = await this.getConflictedFiles().catch(() => [] as string[]);
     if (unmerged.length) {

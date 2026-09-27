@@ -269,3 +269,27 @@ describe('isAuthoredDocPath', () => {
     for (const f of ['contacts.json', 'memory/notes.md', 'leads.csv']) expect(isAuthoredDocPath(f)).toBe(false);
   });
 });
+
+describe('guardOversized', () => {
+  test('unstages files over the limit (2026-09-27: 8GB Mixpanel dumps OOM-looped the box), keeps small ones', async () => {
+    const { openSync, closeSync, ftruncateSync, writeFileSync: write, rmSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { DATA_DIR } = await import('../paths.ts');
+    const big = join(DATA_DIR, 'huge.ndjson');
+    const fd = openSync(big, 'w'); ftruncateSync(fd, 60 * 1024 * 1024); closeSync(fd); // sparse: no real 60MB write
+    write(join(DATA_DIR, 'small.md'), 'x');
+    const ds: any = new DataSync({ repoUrl: 'x', branch: 'main', enabled: true } as any);
+    const calls: string[][] = [];
+    ds.git = async (...args: string[]) => {
+      calls.push(args);
+      if (args.includes('-z')) return 'huge.ndjson\0small.md\0';
+      if (args[0] === 'diff') return 'small.md\n';
+      return '';
+    };
+    ds.alertOnce = async () => {};
+    try {
+      expect(await ds.guardOversized()).toBe(false); // small.md still staged → commit proceeds
+      expect(calls).toContainEqual(['reset', '-q', 'HEAD', '--', 'huge.ndjson']);
+    } finally { rmSync(big, { force: true }); rmSync(join(DATA_DIR, 'small.md'), { force: true }); }
+  });
+});
