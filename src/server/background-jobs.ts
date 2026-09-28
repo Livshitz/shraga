@@ -202,7 +202,7 @@ function pidAgeSeconds(pid: number): number | null {
 const SECRET_ENV_RE = /(API_KEY|_TOKEN|_SECRET|_PASSWORD|_PRIVATE_KEY|^AWS_|^GITHUB_TOKEN$|^OPENAI_|^ANTHROPIC_|^GOOGLE_|^GEMINI_|^GROQ_|^NPM_TOKEN$|^SLACK_)/i;
 function childEnv(): Record<string, string | undefined> {
   const out: Record<string, string | undefined> = {};
-  for (const [k, v] of Object.entries(process.env)) if (!SECRET_ENV_RE.test(k)) out[k] = v;
+  for (const [k, v] of Object.entries(process.env)) if (!SECRET_ENV_RE.test(k) && k !== 'PORT') out[k] = v; // PORT = the server's own port; a job honouring it would shadow us
   return out;
 }
 
