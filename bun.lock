@@ -22,7 +22,7 @@
         "firebase": "^11.0.0",
         "highlight.js": "~11.11.0",
         "lucide-react": "^0.468.0",
-        "mcp-slack-use": "github:Livshitz/mcp-slack-use#38ff8b7",
+        "mcp-slack-use": "github:Livshitz/mcp-slack-use#ce2bd32",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
         "react-markdown": "^9.0.0",
@@ -1039,7 +1039,7 @@
 
     "math-intrinsics": ["math-intrinsics@1.1.0", "", {}, "sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g=="],
 
-    "mcp-slack-use": ["mcp-slack-use@github:Livshitz/mcp-slack-use#38ff8b7", { "dependencies": { "edge.libx.js": "^0.7.0" } }, "Livshitz-mcp-slack-use-38ff8b7", "sha512-ASvVnvvu+dXYpNskq3CQfCriMWRtGpJGzWp9IJVGPi1K7XopP72BY2UAn9Km5+DF/4/UMVh7P81uTaR9X7XNvg=="],
+    "mcp-slack-use": ["mcp-slack-use@github:Livshitz/mcp-slack-use#ce2bd32", { "dependencies": { "edge.libx.js": "^0.7.0" } }, "Livshitz-mcp-slack-use-ce2bd32", "sha512-RRulJCb/mAhURscshpPf2sNf5NiH2SzAN31DCow9WMbCYFkoD0sJEhXv2Y1S3hnAYRPRdP5cxX9XG5uMq2QV7g=="],
 
     "mdast-util-find-and-replace": ["mdast-util-find-and-replace@3.0.2", "", { "dependencies": { "@types/mdast": "^4.0.0", "escape-string-regexp": "^5.0.0", "unist-util-is": "^6.0.0", "unist-util-visit-parents": "^6.0.0" } }, "sha512-Tmd1Vg/m3Xz43afeNxDIhWRtFZgM2VLyaf4vSTYwudTyeuTneoL3qtWMA5jeLyz/O1vDJmmV4QuScFCA2tBPwg=="],
 
