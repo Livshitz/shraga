@@ -1,94 +1,85 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import { Marked } from 'marked';
-import DOMPurify from 'dompurify';
-import hljs from 'highlight.js/lib/common';
-import { MarkdownStream, codeBlock } from '@livx.cc/bare-v3/elements/markdown-stream';
-import '@livx.cc/bare-v3/css';
+import { useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import rehypeHighlight from 'rehype-highlight';
+import type { Root, Element } from 'hast';
+import type { Plugin } from 'unified';
+import { Copy, Check } from 'lucide-react';
 import 'highlight.js/styles/github.css';
-import './AssistantMarkdown.css';
-import { NEEDS_AUTH, authedBlobUrl } from './AuthedImage';
-import { useWorkspace } from '@/lib/workspaceContext';
-import { useDarkMode } from '@/hooks/useDarkMode';
-import { logger } from '@/lib/debug';
+import { AuthedImage, NEEDS_AUTH } from './AuthedImage';
 
-const log = logger.forComponent('AssistantMarkdown');
+// Assistant-reply markdown renderer — a replaceable seam: ChatView imports it as
+// `@/components/AssistantMarkdown`, so a distribution overrides it by shipping a file at that path
+// (the EE build's EE-first `@/` alias). Keep the props contract stable.
 
-// Assistant text renders through bare-v3's MarkdownStream: finished blocks freeze, only the tail
-// re-renders, and half-written syntax never flashes raw. One instance per text block, so text
-// segments split by tool calls each get their own stream.
-
-const RTL_BLOCK_TAGS = new Set(['P', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'TD', 'TH']);
-// bare-v3 component roots — `not-prose` keeps Tailwind Typography off them (it would override their styles).
-const B3_BLOCKS = ['b3-table-wrap', 'b3-alert', 'b3-md-code', 'b3-md-stats', 'b3-md-bars', 'b3-md-tasks'];
-const IMG_CLASS = 'max-h-[80vh] max-w-full rounded-xl border object-contain cursor-pointer hover:opacity-80 transition-opacity';
-
-const purify = DOMPurify(window);
-purify.addHook('afterSanitizeAttributes', (node) => {
-  const el = node as Element;
-  if (RTL_BLOCK_TAGS.has(el.tagName)) el.setAttribute('dir', 'auto');
-  if (B3_BLOCKS.some((c) => el.classList?.contains(c))) el.classList.add('not-prose');
-  if (el.tagName === 'A' && el.hasAttribute('href')) { el.setAttribute('target', '_blank'); el.setAttribute('rel', 'noopener noreferrer'); }
-  if (el.tagName === 'IMG') {
-    el.setAttribute('class', IMG_CLASS);
-    const src = el.getAttribute('src') ?? '';
-    // `/uploads/*` 401s without a bearer header — park the src; resolveImages() swaps in a blob URL.
-    if (NEEDS_AUTH.test(src)) { el.setAttribute('data-authed-src', src); el.removeAttribute('src'); }
-  }
-});
-const sanitize = (html: string) => purify.sanitize(html);
-
-const code = (text: string, lang: string) => {
-  const base = codeBlock(text, lang);
-  if (!lang || !hljs.getLanguage(lang)) return base;
-  const html = hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
-  return base.replace(/<code>[\s\S]*<\/code>/, () => `<code class="hljs language-${lang}">${html}</code>`);
+const RTL_BLOCK_TAGS = new Set(['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'td', 'th']);
+const rehypeBidi: Plugin<[], Root> = () => (tree) => {
+  const visit = (node: Root | Element) => {
+    for (const child of (node.children ?? [])) {
+      if (child.type === 'element') {
+        if (RTL_BLOCK_TAGS.has(child.tagName)) {
+          child.properties ??= {};
+          child.properties.dir = 'auto';
+        }
+        visit(child);
+      }
+    }
+  };
+  visit(tree);
 };
 
-export function AssistantMarkdown({ text, streaming = false, onImageClick }: { text: string; streaming?: boolean; onImageClick?: (src: string) => void }) {
+export interface AssistantMarkdownProps {
+  text: string;
+  /** This block is still streaming (a renderer may use it; this one re-renders whole). */
+  streaming?: boolean;
+  onImageClick?: (src: string) => void;
+}
+
+export function AssistantMarkdown({ text, onImageClick }: AssistantMarkdownProps) {
   const clean = text.replace(/\[Image #\d+\]\s*/g, '').trim();
-  const ref = useRef<HTMLDivElement>(null);
-  const view = useMemo(() => new MarkdownStream({ Marked, sanitize, code, images: (src) => NEEDS_AUTH.test(src) }), []);
-  const shown = useRef<{ text: string; live: boolean } | null>(null);
-  const blobs = useRef(new Map<string, Promise<string>>());
-  const { getToken } = useWorkspace();
-  const { dark } = useDarkMode();
-
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const s = shown.current;
-    const extends_ = !!s?.live && clean.startsWith(s.text);
-    if (streaming) {
-      if (!extends_) { el.replaceChildren(); view.attach(el); view.push(clean); }
-      else if (clean.length > s!.text.length) view.push(clean.slice(s!.text.length));
-    } else if (extends_) {
-      view.push(clean.slice(s!.text.length));
-      view.end();
-    } else if (!s || s.text !== clean) {
-      view.attach(el); // binds the Copy-button delegate; toHtml renders the settled message in one pass
-      el.innerHTML = view.toHtml(clean);
-    }
-    shown.current = { text: clean, live: streaming };
-    for (const img of el.querySelectorAll<HTMLImageElement>('img[data-authed-src]:not([src])')) {
-      const src = img.dataset.authedSrc!;
-      if (!blobs.current.has(src)) blobs.current.set(src, authedBlobUrl(src, getToken));
-      blobs.current.get(src)!.then((url) => { img.src = url; }, (err) => log.error('image load failed:', src, err));
-    }
-  }, [clean, streaming, view, getToken]);
-
-  useEffect(() => () => {
-    view.detach();
-    shown.current = null;
-    for (const p of blobs.current.values()) p.then(URL.revokeObjectURL, () => {});
-    blobs.current.clear();
-  }, [view]);
-
   return (
-    <div
-      ref={ref}
-      data-b3-theme={dark ? 'dark' : 'light'}
-      onClick={(e) => { const t = e.target as HTMLElement; if (t instanceof HTMLImageElement && t.src) onImageClick?.(t.src); }}
-      className="b3-root assistant-md bg-transparent prose prose-sm max-w-none dark:prose-invert prose-code:before:content-none prose-code:after:content-none break-words min-w-0"
-    />
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      rehypePlugins={[rehypeHighlight, rehypeBidi]}
+      className="prose prose-sm max-w-none dark:prose-invert prose-pre:bg-muted prose-pre:border prose-code:before:content-none prose-code:after:content-none break-words min-w-0"
+      components={{
+        pre: ({ children, ...props }) => <CodeBlock {...props}>{children}</CodeBlock>,
+        a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
+        // Only same-origin /uploads images load; anything else in model output (exfil via a
+        // prompt-injected image URL) shows its alt text instead of auto-fetching.
+        img: ({ src, alt }) => src && NEEDS_AUTH.test(src)
+          ? <AuthedImage src={src} alt={alt ?? ''} className="max-h-[80vh] max-w-full rounded-xl border object-contain cursor-pointer hover:opacity-80 transition-opacity" onClick={(s) => onImageClick?.(s)} />
+          : <span>{alt}</span>,
+      }}
+    >{clean}</ReactMarkdown>
+  );
+}
+
+function CodeBlock({ children, ...props }: any) {
+  const ref = useRef<HTMLPreElement>(null);
+  return (
+    <div className="relative group">
+      <pre ref={ref} {...props} className="rounded-lg border bg-muted p-4 overflow-x-auto text-xs text-foreground">
+        {children}
+      </pre>
+      <CopyButton getText={() => ref.current?.textContent || ''} />
+    </div>
+  );
+}
+
+function CopyButton({ getText }: { getText: () => string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={() => {
+        navigator.clipboard.writeText(getText());
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      }}
+      className="absolute top-2 right-2 p-1.5 rounded-md bg-background/80 border opacity-0 group-hover:opacity-100 transition-opacity"
+      title="Copy"
+    >
+      {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+    </button>
   );
 }
