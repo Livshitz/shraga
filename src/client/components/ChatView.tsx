@@ -10,12 +10,12 @@ import { AuthedImage, AuthedFileLink } from './AuthedImage';
 import { useSlots } from '@/lib/slots';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { ZoomableImage } from './ZoomableImage';
-import { AssistantMarkdown } from './AssistantMarkdown';
+import { AssistantMarkdown } from '@/components/AssistantMarkdown';
 
 // The appwrap iOS WKWebView wedges its GPU compositor when rendering react-markdown's DOM for a chat with
 // history — JS keeps running but paint + hit-testing freeze for ~1-2min (screen stuck/touch-dead) before
 // WebKit lazily restores. The SAME content in mobile Safari and on desktop is fine, so this is specific to
-// the native WKWebView shell, not the web app. (Observed with react-markdown; MarkdownStream is unverified there.) Until the native shell issue is fixed, render assistant
+// the native WKWebView shell, not the web app. Until the native shell issue is fixed, render assistant
 // messages as PLAIN TEXT inside the native app only; full markdown stays on Safari/desktop/web.
 const IS_APPWRAP_NATIVE = typeof window !== 'undefined' && !!(window as { webkit?: { messageHandlers?: { appwrap?: unknown } } }).webkit?.messageHandlers?.appwrap;
 
