@@ -147,9 +147,20 @@ async function resolveDeclaredOutcome(
     return next && next > Date.now() ? next - 60_000 : Infinity;
   };
   const absoluteStop = Date.now() + MAX_PENDING_MS;
+  // Each distinct declaration is resolved once, when first seen: a re-declared `pending` extends
+  // the wait, but re-reading the same one must not keep moving its deadline.
+  let seen = '';
+  let declaredDeadline = 0;
   while (declared?.status === 'pending' && !ac.signal.aborted) {
+    const key = JSON.stringify(declared);
+    if (key !== seen) {
+      seen = key;
+      const r = pendingDeadline(declared, Date.now());
+      declaredDeadline = r.deadline;
+      if (r.pastDeadline) console.warn(`[scheduler] ${sessionId} declared pending with a deadline already in the past (${String(declared.deadline)}); using the default window instead`);
+    }
     const stop = windowStop();
-    const deadline = Math.min(pendingDeadline(declared, Date.now()), absoluteStop, stop);
+    const deadline = Math.min(declaredDeadline, absoluteStop, stop);
     if (Date.now() >= deadline) {
       const why = deadline === stop ? 'its next scheduled window arrived first' : `deadline ${new Date(deadline).toISOString()}`;
       return { status: 'error', error: `Run declared itself still in flight and never reported a terminal outcome (${why}).` };
