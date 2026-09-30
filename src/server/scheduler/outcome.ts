@@ -33,6 +33,8 @@ export interface DeclaredOutcome {
   error?: string;
   /** For `pending`: when the run gives up and is recorded as failed. Epoch ms or ISO-8601. */
   deadline?: number | string;
+  /** For `pending`: minutes from the moment of declaration. Preferred over `deadline` — no clock math. */
+  deadlineInMin?: number;
 }
 
 const dir = (): string => { const d = dataPath('scheduler', 'outcomes'); mkdirSync(d, { recursive: true }); return d; };
@@ -72,21 +74,34 @@ export function writeOutcome(sessionId: string, o: DeclaredOutcome): void {
   writeFileSync(outcomeFile(sessionId), JSON.stringify(o));
 }
 
-/** Absolute epoch ms a `pending` run expires at, clamped to MAX_PENDING_MS. */
-export function pendingDeadline(o: DeclaredOutcome, now: number): number {
+/**
+ * Absolute epoch ms a `pending` declaration expires at, resolved ONCE at the moment it was first seen.
+ *
+ * `deadlineInMin` wins over `deadline`. An absolute `deadline` that is missing, unparseable, or
+ * already in the past at declaration time is treated as a mistake in the declaration (a run that
+ * just said "still working" cannot have already run out of time) and falls back to the default
+ * window instead of failing the run on the spot. `pastDeadline` reports that fallback so the
+ * caller can surface it. Always clamped to MAX_PENDING_MS from declaration.
+ */
+export function pendingDeadline(o: DeclaredOutcome, declaredAt: number): { deadline: number; pastDeadline: boolean } {
+  const cap = declaredAt + MAX_PENDING_MS;
+  if (typeof o.deadlineInMin === 'number' && Number.isFinite(o.deadlineInMin) && o.deadlineInMin > 0)
+    return { deadline: Math.min(declaredAt + o.deadlineInMin * 60_000, cap), pastDeadline: false };
   const raw = typeof o.deadline === 'string' ? Date.parse(o.deadline) : o.deadline;
-  const asked = Number.isFinite(raw) ? (raw as number) : now + DEFAULT_PENDING_MS;
-  return Math.min(Math.max(asked, now), now + MAX_PENDING_MS);
+  if (!Number.isFinite(raw)) return { deadline: declaredAt + DEFAULT_PENDING_MS, pastDeadline: false };
+  if ((raw as number) <= declaredAt) return { deadline: declaredAt + DEFAULT_PENDING_MS, pastDeadline: true };
+  return { deadline: Math.min(raw as number, cap), pastDeadline: false };
 }
 
 /** The contract, appended to a scheduled prompt run so a run can report itself truthfully. */
 export function outcomePrompt(sessionId: string): string {
   return `# Reporting this run's outcome
+Current time: ${new Date().toISOString()} (UTC).
 This is a scheduled run. Unless you say otherwise, it is recorded as SUCCESSFUL the moment your turn returns — which is a lie whenever the work failed, was skipped, or is still in flight. Correct that by writing this file:
 \`${outcomeFile(sessionId)}\`
 - \`{"status":"ok"}\` — the run delivered what it was for.
 - \`{"status":"error","error":"<what went wrong>"}\` — it did not. This is what raises the failure alert; write it for a leg that never ran, a worker that died, or work you could not finish.
-- \`{"status":"pending","deadline":"<ISO-8601>"}\` — work you started outlives this turn (e.g. a background job). The run stays open and NOT successful until you write a terminal status from a later turn; if the deadline passes with no terminal status, the run is recorded as failed automatically.
+- \`{"status":"pending","deadlineInMin":<minutes>}\` — work you started outlives this turn (e.g. a background job). Give the deadline as minutes from now (pad it generously); an absolute \`"deadline":"<ISO-8601>"\` is also accepted, but a deadline already in the past is ignored and replaced with ${DEFAULT_PENDING_MS / 60_000} minutes. The run stays open and NOT successful until you write a terminal status from a later turn; if the deadline passes with no terminal status, the run is recorded as failed automatically.
 Write it atomically — write a temp file next to it and \`mv\` it into place — so a reader can never catch it half-written.
 Declare \`pending\` BEFORE you end a turn that leaves work running, and re-declare \`ok\`/\`error\` from the turn that sees it finish. Never declare \`ok\` for a run that did not deliver.`;
 }
