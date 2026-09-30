@@ -127,10 +127,36 @@ describe('scheduled run outcome declaration', () => {
   });
 
   // The session dying mid-flight is exactly the case that used to report `ok`.
-  test('pending with an elapsed deadline → error, not ok', async () => {
-    const { summary } = await run({ status: 'pending', deadline: Date.now() - 1_000 });
+  test('pending whose deadline elapses with no terminal status → error, not ok', async () => {
+    const { summary } = await run({ status: 'pending', deadline: Date.now() + 500 });
     expect(summary.status).toBe('error');
     expect(summary.error).toContain('never reported a terminal outcome');
+  });
+
+  // A run that says "still working" cannot already be out of time — a past deadline is a clock
+  // mistake in the declaration, not a failure. It must not fail the run before the work lands.
+  test('pending declared with a deadline ALREADY in the past → default window, later ok lands ok', async () => {
+    const { summary } = await run(
+      { status: 'pending', deadline: new Date(Date.now() - 30 * 60_000).toISOString() },
+      (sid) => setTimeout(() => writeOutcome(sid, { status: 'ok' }), 1_500),
+    );
+    expect(summary.status).toBe('ok');
+  }, 30_000);
+
+  test('pending with a relative deadlineInMin → waits, later ok lands ok', async () => {
+    const { summary } = await run(
+      { status: 'pending', deadlineInMin: 5 },
+      (sid) => writeOutcome(sid, { status: 'ok' }),
+    );
+    expect(summary.status).toBe('ok');
+  }, 30_000);
+
+  test('the contract tells the run the current time and offers deadlineInMin', async () => {
+    script = DONE;
+    declareDuringTurn = null;
+    await runSchedule(makeSchedule(), () => {}, () => {});
+    expect(lastPrompt).toContain('Current time:');
+    expect(lastPrompt).toContain('deadlineInMin');
   });
 
   // A pending run keeps its schedule "running" (engine deletes that only when the run promise
