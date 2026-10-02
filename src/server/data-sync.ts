@@ -23,6 +23,12 @@ const PUSHING_STUCK_MS = 5 * 60_000;
  *  Circles box in a restart loop (2026-09-27: 8GB of raw Mixpanel exports auto-committed from workspace/). */
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 
+/** A file list for an owner alert: the first `max`, then a count — a conflicted node_modules tree once made the
+ *  unmerged alert a wall of hundreds of paths. The full list stays in the log and the alert fingerprint. */
+export function listFiles(files: string[], max = 10): string {
+  return files.length > max ? `${files.slice(0, max).join(', ')} … +${files.length - max} more` : files.join(', ');
+}
+
 /**
  * Reject after `ms` so a hung subprocess can't hold the push latch forever.
  * `onTimeout` runs on the timeout path only — use it to actually CANCEL the work
@@ -484,8 +490,8 @@ export class DataSync {
     }
     console.error(`${TAG} Stash pop conflict repaired: kept local side of ${conflicted.length} file(s)${conflicted.length ? ` (${conflicted.join(', ')})` : ''}${kept ? `; stash KEPT — markers: [${marked.join(', ')}], unrestored untracked: [${lostUntracked.join(', ')}]` : '; stash dropped'}`);
     await this.alertOnce('stash-pop', [...conflicted, ...marked, ...lostUntracked].join('\n'),
-      `⚠️ Data sync: a pre-pull stash failed to re-apply. Kept this instance's version of: ${conflicted.join(', ') || '(none)'}.` +
-      (kept ? `\n\nNOT fully repaired — stash kept. Markers in: ${marked.join(', ') || '-'}; untracked not restored: ${lostUntracked.join(', ') || '-'}. Inspect: \`cd data && git stash show -p --include-untracked\`` : ''),
+      `⚠️ Data sync: a pre-pull stash failed to re-apply. Kept this instance's version of: ${listFiles(conflicted) || '(none)'}.` +
+      (kept ? `\n\nNOT fully repaired — stash kept. Markers in: ${listFiles(marked) || '-'}; untracked not restored: ${listFiles(lostUntracked) || '-'}. Inspect: \`cd data && git stash show -p --include-untracked\`` : ''),
     ).catch(e => console.warn(`${TAG} Stash-pop notify failed:`, (e as Error).message));
   }
 
@@ -761,7 +767,7 @@ export class DataSync {
       if (!parsed.length) {
         console.error(`${TAG} Could not parse conflict resolution, notifying owners`);
         await this.notifyOwners(
-          `🚨 Found conflict markers in data/ but auto-resolution failed.\n\nFiles: ${conflicted.join(', ')}\n\nManual fix needed.`,
+          `🚨 Found conflict markers in data/ but auto-resolution failed.\n\nFiles: ${listFiles(conflicted)}\n\nManual fix needed.`,
         );
         return;
       }
@@ -898,17 +904,29 @@ export class DataSync {
     console.error(`${TAG} 🚫 Oversized file(s) staged — unstaged, not committed: ${big.join(', ')}`);
     await this.git('reset', '-q', 'HEAD', '--', ...big).catch(e => console.error(`${TAG} Unstaging oversized files failed:`, (e as Error).message));
     await this.alertOnce('oversized', big.join('\n'),
-      `🚫 Data sync refused file(s) over ${MAX_FILE_BYTES / 1024 / 1024}MB: ${big.join(', ')}. Left on disk unsynced — move them out of data/ or gitignore them.`,
+      `🚫 Data sync refused file(s) over ${MAX_FILE_BYTES / 1024 / 1024}MB: ${listFiles(big)}. Left on disk unsynced — move them out of data/ or gitignore them.`,
     ).catch(e => console.warn(`${TAG} Oversized notify failed:`, (e as Error).message));
     return !(await this.git('diff', '--cached', '--name-only').catch(() => '')).trim();
   }
 
   private async guardConflictMarkers(): Promise<boolean> {
-    const unmerged = await this.getConflictedFiles().catch(() => [] as string[]);
+    let unmerged = await this.getConflictedFiles().catch(() => [] as string[]);
+    // A conflicted path the repo's own .gitignore covers (a node_modules tree committed before it was ignored)
+    // is build output, not data: drop it from the index (kept on disk) rather than block every commit on it.
+    // Bounded like untrackIgnored(): this runs after flush's deletion guard, so a larger tree stays reported.
+    const untrackMax = parseInt(process.env.DATA_SYNC_UNTRACK_BLOCK || '500', 10);
+    const ignored = unmerged.length
+      ? (await this.git('-c', 'core.excludesFile=/dev/null', 'check-ignore', '--no-index', '--', ...unmerged).catch(() => '')).split('\n').filter(Boolean)
+      : [];
+    if (ignored.length && ignored.length <= untrackMax) {
+      await this.git('rm', '-q', '-r', '--cached', '--ignore-unmatch', '--', ...ignored)
+        .then(() => { console.error(`${TAG} Untracked ${ignored.length} conflicted gitignored path(s): ${listFiles(ignored)}`); unmerged = unmerged.filter(f => !ignored.includes(f)); })
+        .catch(e => console.error(`${TAG} Untracking conflicted gitignored paths failed:`, (e as Error).message));
+    }
     if (unmerged.length) {
       console.error(`${TAG} 🚫 Unmerged paths in data/ — commit skipped: ${unmerged.join(', ')}`);
       await this.alertOnce('unmerged', unmerged.join('\n'),
-        `🚫 Data sync is not committing: unmerged paths in data/: ${unmerged.join(', ')}. Resolve them (keep both sides), then \`git add\` them.`,
+        `🚫 Data sync is not committing: unmerged paths in data/: ${listFiles(unmerged)}. Resolve them (keep both sides), then \`git add\` them.`,
       ).catch(e => console.warn(`${TAG} Unmerged notify failed:`, (e as Error).message));
       return true;
     }
@@ -922,7 +940,7 @@ export class DataSync {
     console.error(`${TAG} 🚫 Conflict markers staged — unstaged, not committed: ${staged.join(', ')}`);
     await this.git('reset', '-q', 'HEAD', '--', ...staged).catch(e => console.error(`${TAG} Unstaging marked files failed:`, (e as Error).message));
     await this.alertOnce('markers', staged.join('\n'),
-      `🚫 Data sync refused to commit file(s) containing git conflict markers: ${staged.join(', ')}. They are left on disk unsynced; fix their content.`,
+      `🚫 Data sync refused to commit file(s) containing git conflict markers: ${listFiles(staged)}. They are left on disk unsynced; fix their content.`,
     ).catch(e => console.warn(`${TAG} Markers notify failed:`, (e as Error).message));
     return !(await this.git('diff', '--cached', '--name-only').catch(() => '')).trim();
   }
