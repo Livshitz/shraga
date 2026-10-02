@@ -419,14 +419,21 @@ export class DataSync {
     // Stash dirty + untracked files before merging (untracked can block merge if remote adds same paths) — except audit/:
     // stashing removes the live log from disk while the server appends to it (lost lines, forked chain) and fails under
     // `chattr +a`. The merge can't touch audit/ (checked above), so it stays dirty in place.
-    const dirty = !!(await this.git('status', '--porcelain', ...NOT_AUDIT)).trim();
-    if (dirty) {
+    // `stashed` is whether THIS push created an entry — not whether status was dirty. A dirty nested repo
+    // (` m gh-work/x`) passes the status check but `stash push` saves nothing and exits 0; popping then
+    // re-applied a weeks-old stash (feedox 2026-10-02: a 09-04 stash with 10k tracked node_modules → 1949
+    // unmerged paths + an owner alert at every 16:00 garden pull).
+    let stashed = false;
+    if ((await this.git('status', '--porcelain', ...NOT_AUDIT)).trim()) {
+      const stashRef = () => this.git('rev-parse', '-q', '--verify', 'refs/stash').then(s => s.trim(), () => '');
+      const before = await stashRef();
       try {
         await this.git('stash', 'push', '--include-untracked', '-m', 'data-sync: pre-pull stash', ...NOT_AUDIT);
       } catch (err) {
         console.warn(`${TAG} Stash failed, skipping pull:`, (err as Error).message);
         return;
       }
+      stashed = (await stashRef()) !== before;
     }
 
     try {
@@ -443,7 +450,7 @@ export class DataSync {
       }
     }
 
-    if (dirty) await this.popStash();
+    if (stashed) await this.popStash();
     this.rebuildLog().catch(() => {});
   }
 

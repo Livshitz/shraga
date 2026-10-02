@@ -86,3 +86,64 @@ test('a stash-pop conflict is repaired (local side kept, stash dropped) and mark
     rmSync(root, { recursive: true, force: true });
   }
 }, 90_000);
+
+// 2026-10-02 feedox: only a nested repo was dirty (` m gh-work/x`), so the status check said dirty but `stash push`
+// saved nothing (exit 0) — and the pop re-applied a weeks-old stash, wedging the index on 1949 paths.
+test('a pull whose stash push saves nothing never pops an older stash', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'ds-stale-'));
+  const BARE = path.join(root, 'remote.git'), PEER = path.join(root, 'peer'), DATA = path.join(root, 'data');
+  const env = {
+    ...process.env, DATA_DIR: DATA, BARE, PEER, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t',
+  };
+  const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, env, stdio: 'pipe' });
+  try {
+    git(root, 'init', '-q', '--bare', '-b', 'main', BARE);
+    git(root, 'init', '-q', '-b', 'main', PEER);
+    writeFileSync(path.join(PEER, 'links.json'), '{"at":1}\n');
+    git(PEER, 'add', '-A'); git(PEER, 'commit', '-qm', 'seed'); git(PEER, 'remote', 'add', 'origin', BARE); git(PEER, 'push', '-qu', 'origin', 'main');
+
+    const code = `
+      const { execFileSync } = await import('node:child_process');
+      const { mkdirSync, readFileSync, writeFileSync } = await import('node:fs');
+      const path = await import('node:path');
+      const { DataSync } = await import(${JSON.stringify(path.join(import.meta.dir, '../data-sync.ts'))});
+      const { BARE, PEER, DATA_DIR } = process.env;
+      const git = (cwd, ...a) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: 'pipe' }).trim();
+      console.error = () => {};
+      const out = {};
+      try {
+        const ds = new DataSync({ repoUrl: BARE, branch: 'main', enabled: true, deploymentId: '' });
+        ds.askClaude = async () => 'sync';
+        ds.notifyOwners = async () => {};
+        await ds.init();
+
+        // A stale stash left behind from an earlier failed pop.
+        writeFileSync(path.join(DATA_DIR, 'links.json'), '{"at":"stale"}\\n');
+        git(DATA_DIR, 'stash', 'push', '-m', 'data-sync: pre-pull stash');
+        // A committed nested repo whose own worktree is dirty: status shows it, stash cannot save it.
+        const sub = path.join(DATA_DIR, 'gh-work', 'x'); mkdirSync(sub, { recursive: true });
+        git(sub, 'init', '-q', '-b', 'main'); writeFileSync(path.join(sub, 'f'), 'a\\n'); git(sub, 'add', 'f'); git(sub, 'commit', '-qm', 's');
+        git(DATA_DIR, 'add', 'gh-work/x'); git(DATA_DIR, 'commit', '-qm', 'nested'); git(DATA_DIR, 'push', '-q', 'origin', 'main');
+        writeFileSync(path.join(sub, 'f'), 'dirty\\n');
+
+        git(PEER, 'pull', '-q'); writeFileSync(path.join(PEER, 'links.json'), '{"at":3}\\n');
+        git(PEER, 'add', '-A'); git(PEER, 'commit', '-qm', 'peer'); git(PEER, 'push', '-q');
+
+        await ds.pull();
+        out.links = readFileSync(path.join(DATA_DIR, 'links.json'), 'utf8');
+        out.unmerged = git(DATA_DIR, 'diff', '--name-only', '--diff-filter=U');
+        out.stashes = git(DATA_DIR, 'stash', 'list').split('\\n').filter(Boolean).length;
+      } catch (e) { out.err = String(e?.stack || e); }
+      process.stdout.write('\\nRESULT' + JSON.stringify(out));
+    `;
+    const stdout = execFileSync('bun', ['-e', code], { env, encoding: 'utf8', timeout: 60_000 });
+    const res = JSON.parse(stdout.slice(stdout.lastIndexOf('RESULT') + 6));
+    expect(res.err).toBeUndefined();
+    expect(res.links).toBe('{"at":3}\n');
+    expect(res.unmerged).toBe('');
+    expect(res.stashes).toBe(1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 90_000);
