@@ -147,3 +147,76 @@ test('a pull whose stash push saves nothing never pops an older stash', async ()
     rmSync(root, { recursive: true, force: true });
   }
 }, 90_000);
+
+// 2026-10-02 23:28 feedox: workspace/socials.kanban was untracked; the pre-pull `stash push --include-untracked` took it
+// off disk, an editor saved an empty board in its place during the pull, the pop refused ("already exists") and the
+// stash — the only copy — was dropped because the path existed. Same loss when a peer adds a path a local untracked
+// file already holds. An untracked file must survive any pull.
+test('a pull never loses an untracked file (rewritten mid-pull, or colliding with a path the peer adds)', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'ds-untracked-'));
+  const BARE = path.join(root, 'remote.git'), PEER = path.join(root, 'peer'), DATA = path.join(root, 'data');
+  const env = {
+    ...process.env, DATA_DIR: DATA, BARE, PEER, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t',
+  };
+  const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, env, stdio: 'pipe' });
+  try {
+    git(root, 'init', '-q', '--bare', '-b', 'main', BARE);
+    git(root, 'init', '-q', '-b', 'main', PEER);
+    writeFileSync(path.join(PEER, 'links.json'), '{"at":1}\n');
+    git(PEER, 'add', '-A'); git(PEER, 'commit', '-qm', 'seed'); git(PEER, 'remote', 'add', 'origin', BARE); git(PEER, 'push', '-qu', 'origin', 'main');
+
+    const code = `
+      const { execFileSync } = await import('node:child_process');
+      const { existsSync, mkdirSync, readFileSync, writeFileSync } = await import('node:fs');
+      const path = await import('node:path');
+      const { DataSync } = await import(${JSON.stringify(path.join(import.meta.dir, '../data-sync.ts'))});
+      const { BARE, PEER, DATA_DIR } = process.env;
+      const git = (cwd, ...a) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: 'pipe' }).trim();
+      console.error = () => {};
+      const out = {};
+      try {
+        const ds = new DataSync({ repoUrl: BARE, branch: 'main', enabled: true, deploymentId: '' });
+        ds.askClaude = async () => 'sync';
+        ds.notifyOwners = async () => {};
+        await ds.init();
+
+        const board = path.join(DATA_DIR, 'workspace', 'socials.kanban');
+        mkdirSync(path.dirname(board), { recursive: true });
+        writeFileSync(board, 'REAL BOARD\\n');
+        writeFileSync(path.join(DATA_DIR, 'clash.json'), '{"mine":true}\\n');
+        writeFileSync(path.join(DATA_DIR, 'links.json'), '{"at":"local"}\\n');
+        // An editor that recreates its file (empty) whenever it finds it missing — what Bare did with the board.
+        const realGit = ds.git.bind(ds);
+        ds.git = async (...a) => {
+          const r = await realGit(...a);
+          if (a[0] === 'merge' && !existsSync(board)) { mkdirSync(path.dirname(board), { recursive: true }); writeFileSync(board, ''); }
+          return r;
+        };
+
+        git(PEER, 'pull', '-q');
+        writeFileSync(path.join(PEER, 'clash.json'), '{"peer":true}\\n');
+        writeFileSync(path.join(PEER, 'peer.json'), '{}\\n');
+        git(PEER, 'add', '-A'); git(PEER, 'commit', '-qm', 'peer'); git(PEER, 'push', '-q');
+
+        await ds.pull();
+        out.board = readFileSync(board, 'utf8');
+        out.clash = readFileSync(path.join(DATA_DIR, 'clash.json'), 'utf8');
+        out.links = readFileSync(path.join(DATA_DIR, 'links.json'), 'utf8');
+        out.pulled = existsSync(path.join(DATA_DIR, 'peer.json'));
+        out.unmerged = git(DATA_DIR, 'diff', '--name-only', '--diff-filter=U');
+      } catch (e) { out.err = String(e?.stack || e); }
+      process.stdout.write('\\nRESULT' + JSON.stringify(out));
+    `;
+    const stdout = execFileSync('bun', ['-e', code], { env, encoding: 'utf8', timeout: 60_000 });
+    const res = JSON.parse(stdout.slice(stdout.lastIndexOf('RESULT') + 6));
+    expect(res.err).toBeUndefined();
+    expect(res.board).toBe('REAL BOARD\n');
+    expect(res.clash).toBe('{"mine":true}\n');
+    expect(res.links).toBe('{"at":"local"}\n');
+    expect(res.pulled).toBe(true);
+    expect(res.unmerged).toBe('');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 90_000);
