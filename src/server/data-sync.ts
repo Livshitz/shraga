@@ -422,19 +422,33 @@ export class DataSync {
     }
     this.clearAlert('audit-pull');
 
-    // Stash dirty + untracked files before merging (untracked can block merge if remote adds same paths) — except audit/:
-    // stashing removes the live log from disk while the server appends to it (lost lines, forked chain) and fails under
-    // `chattr +a`. The merge can't touch audit/ (checked above), so it stays dirty in place.
+    // Stash tracked changes before merging — never untracked files, and never audit/: stashing removes the live log
+    // from disk while the server appends to it (lost lines, forked chain) and fails under `chattr +a`; the merge can't
+    // touch audit/ (checked above), so it stays dirty in place. Untracked files stayed off disk for the whole pull with
+    // the stash as their only copy: a writer recreating one mid-pull (feedox 2026-10-02 23:28: Bare saved an empty
+    // workspace/socials.kanban) made the pop refuse it ("already exists") and the stash was dropped — file gone. The
+    // merge can only collide with an untracked path the remote ADDS; those few are staged first, so they ride the stash
+    // as tracked changes and a re-apply conflict keeps the local side (popStash).
     // `stashed` is whether THIS push created an entry — not whether status was dirty. A dirty nested repo
     // (` m gh-work/x`) passes the status check but `stash push` saves nothing and exits 0; popping then
     // re-applied a weeks-old stash (feedox 2026-10-02: a 09-04 stash with 10k tracked node_modules → 1949
     // unmerged paths + an owner alert at every 16:00 garden pull).
+    const incoming = new Set((await this.git('diff', '--name-only', '--diff-filter=A', `HEAD...origin/${this.options.branch}`).catch(() => '')).split('\n').filter(Boolean));
+    const colliding = (await this.git('ls-files', '--others', '--exclude-standard', '-z').catch(() => '')).split('\0').filter(f => incoming.has(f));
+    if (colliding.length) {
+      try {
+        await this.git('add', '--', ...colliding);
+      } catch (err) {
+        console.warn(`${TAG} Staging untracked paths the pull adds failed, skipping pull:`, (err as Error).message);
+        return;
+      }
+    }
     let stashed = false;
-    if ((await this.git('status', '--porcelain', ...NOT_AUDIT)).trim()) {
+    if ((await this.git('status', '--porcelain', '--untracked-files=no', ...NOT_AUDIT)).trim()) {
       const stashRef = () => this.git('rev-parse', '-q', '--verify', 'refs/stash').then(s => s.trim(), () => '');
       const before = await stashRef();
       try {
-        await this.git('stash', 'push', '--include-untracked', '-m', 'data-sync: pre-pull stash', ...NOT_AUDIT);
+        await this.git('stash', 'push', '-m', 'data-sync: pre-pull stash', ...NOT_AUDIT);
       } catch (err) {
         console.warn(`${TAG} Stash failed, skipping pull:`, (err as Error).message);
         return;
