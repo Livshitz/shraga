@@ -220,3 +220,116 @@ test('a pull never loses an untracked file (rewritten mid-pull, or colliding wit
     rmSync(root, { recursive: true, force: true });
   }
 }, 90_000);
+
+/** Bare remote + peer clone seeded with links.json + old.json; runs `body` (JS, with ds/git/write/read/PEER/DATA_DIR/out/alerts in scope) in a child. */
+function runScenario(body: string): Record<string, any> {
+  const root = mkdtempSync(path.join(tmpdir(), 'ds-scen-'));
+  const BARE = path.join(root, 'remote.git'), PEER = path.join(root, 'peer'), DATA = path.join(root, 'data');
+  const env = {
+    ...process.env, DATA_DIR: DATA, BARE, PEER, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t',
+  };
+  const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, env, stdio: 'pipe' });
+  try {
+    git(root, 'init', '-q', '--bare', '-b', 'main', BARE);
+    git(root, 'init', '-q', '-b', 'main', PEER);
+    writeFileSync(path.join(PEER, 'links.json'), '{"at":1}\n');
+    writeFileSync(path.join(PEER, 'old.json'), 'old content line\nmore\n');
+    git(PEER, 'add', '-A'); git(PEER, 'commit', '-qm', 'seed'); git(PEER, 'remote', 'add', 'origin', BARE); git(PEER, 'push', '-qu', 'origin', 'main');
+    const code = `
+      const { execFileSync } = await import('node:child_process');
+      const { existsSync, readFileSync, writeFileSync } = await import('node:fs');
+      const path = await import('node:path');
+      const { DataSync } = await import(${JSON.stringify(path.join(import.meta.dir, '../data-sync.ts'))});
+      const { BARE, PEER, DATA_DIR } = process.env;
+      const git = (cwd, ...a) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: 'pipe' }).trim();
+      const write = (f, s) => writeFileSync(path.join(DATA_DIR, f), s);
+      const read = f => existsSync(path.join(DATA_DIR, f)) ? readFileSync(path.join(DATA_DIR, f), 'utf8') : null;
+      console.error = () => {}; console.warn = () => {};
+      const out = {}, alerts = [];
+      try {
+        const ds = new DataSync({ repoUrl: BARE, branch: 'main', enabled: true, deploymentId: '' });
+        ds.askClaude = async () => 'sync';
+        ds.notifyOwners = async t => { alerts.push(t); };
+        await ds.init();
+        git(PEER, 'pull', '-q');
+        ${body}
+      } catch (e) { out.err = String(e?.stack || e); }
+      process.stdout.write('\\nRESULT' + JSON.stringify(out));
+    `;
+    const stdout = execFileSync('bun', ['-e', code], { env, encoding: 'utf8', timeout: 60_000 });
+    return JSON.parse(stdout.slice(stdout.lastIndexOf('RESULT') + 6));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const peerCommit = `git(PEER, 'add', '-A'); git(PEER, 'commit', '-qm', 'peer'); git(PEER, 'push', '-q');`;
+
+// A local untracked file colliding with a path the peer adds is force-staged to ride the stash. When the merge
+// aborts, the pop restored it STAGED and the next flush committed + pushed a file this instance never tracked.
+test('a colliding untracked file stays untracked (never pushed) when the merge aborts', () => {
+  const res = runScenario(`
+    write('clash.json', 'MINE\\n');
+    writeFileSync(path.join(PEER, 'clash.json'), 'peer\\n'); ${peerCommit}
+    const real = ds.git.bind(ds);
+    ds.git = async (...a) => { if (a[0] === 'merge' && a[1] !== '--abort') throw new Error('simulated merge failure'); return real(...a); };
+    await ds.pull();
+    ds.git = real;
+    out.clash = read('clash.json');
+    out.status = git(DATA_DIR, 'status', '--porcelain', '--', 'clash.json');
+    const pre = git(DATA_DIR, 'rev-parse', 'HEAD');
+    write('links.json', 'flushed\\n'); ds.pending.add('links.json'); await ds.flush();
+    const flushCommit = git(DATA_DIR, 'rev-list', '--reverse', '--first-parent', pre + '..HEAD').split('\\n')[0];
+    out.committed = git(DATA_DIR, 'show', '--name-only', '--format=', flushCommit);
+  `);
+  expect(res.err).toBeUndefined();
+  expect(res.clash).toBe('MINE\n');
+  expect(res.status).toBe('?? clash.json');
+  expect(res.committed).toBe('links.json');
+});
+
+// `diff --diff-filter=A` with rename detection reports a remote rename as R, so a local untracked file at the
+// rename target was never staged and the merge refused forever ("Merge failed for unknown reason").
+test('a path the remote introduces by rename does not wedge the pull', () => {
+  const res = runScenario(`
+    write('x.json', 'MINE\\n');
+    git(PEER, 'mv', 'old.json', 'x.json'); ${peerCommit}
+    await ds.pull();
+    out.merged = git(DATA_DIR, 'rev-parse', 'HEAD') === git(DATA_DIR, 'rev-parse', 'origin/main');
+    out.x = read('x.json');
+  `);
+  expect(res.err).toBeUndefined();
+  expect(res.merged).toBe(true);
+  expect(res.x).toBe('MINE\n');
+});
+
+// A writer saving a stashed tracked file mid-pull makes `stash pop` refuse ("would be overwritten") with no
+// conflicts — the stash was then dropped and the unflushed edit lost.
+test('a refused stash pop keeps the stash and alerts', () => {
+  const res = runScenario(`
+    write('links.json', 'LOCAL UNFLUSHED EDIT\\n');
+    writeFileSync(path.join(PEER, 'peer.json'), '{}\\n'); ${peerCommit}
+    const real = ds.git.bind(ds);
+    ds.git = async (...a) => { const r = await real(...a); if (a[0] === 'merge') write('links.json', ''); return r; };
+    await ds.pull();
+    out.stash = git(DATA_DIR, 'stash', 'list') ? git(DATA_DIR, 'show', 'stash@{0}:links.json') : '';
+    out.alerted = alerts.some(a => a.includes('stash kept'));
+  `);
+  expect(res.err).toBeUndefined();
+  expect(res.stash).toBe('LOCAL UNFLUSHED EDIT');
+  expect(res.alerted).toBe(true);
+});
+
+test('a colliding untracked file stays untracked when the stash push fails (pull skipped)', () => {
+  const res = runScenario(`
+    write('clash.json', 'MINE\\n'); write('links.json', 'dirty\\n');
+    writeFileSync(path.join(PEER, 'clash.json'), 'peer\\n'); ${peerCommit}
+    const real = ds.git.bind(ds);
+    ds.git = async (...a) => { if (a[0] === 'stash' && a[1] === 'push') throw new Error('simulated stash failure'); return real(...a); };
+    await ds.pull();
+    out.status = git(DATA_DIR, 'status', '--porcelain', '--', 'clash.json');
+  `);
+  expect(res.err).toBeUndefined();
+  expect(res.status).toBe('?? clash.json');
+});

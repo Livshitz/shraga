@@ -433,7 +433,10 @@ export class DataSync {
     // (` m gh-work/x`) passes the status check but `stash push` saves nothing and exits 0; popping then
     // re-applied a weeks-old stash (feedox 2026-10-02: a 09-04 stash with 10k tracked node_modules → 1949
     // unmerged paths + an owner alert at every 16:00 garden pull).
-    const incoming = new Set((await this.git('diff', '--name-only', '--diff-filter=A', `HEAD...origin/${this.options.branch}`).catch(() => '')).split('\n').filter(Boolean));
+    // --no-renames: a path the remote introduces by rename is still an addition that collides.
+    const incoming = new Set((await this.git('diff', '--name-only', '--diff-filter=A', '--no-renames', `HEAD...origin/${this.options.branch}`).catch(() => '')).split('\n').filter(Boolean));
+    // Force-added paths must end untracked again unless the merge made them tracked — else the next flush commits them.
+    const unstage = () => colliding.length ? this.git('reset', '-q', '--', ...colliding).then(() => {}, e => console.error(`${TAG} Unstaging untracked paths failed:`, (e as Error).message)) : Promise.resolve();
     const colliding = (await this.git('ls-files', '--others', '--exclude-standard', '-z').catch(() => '')).split('\0').filter(f => incoming.has(f));
     if (colliding.length) {
       try {
@@ -451,6 +454,7 @@ export class DataSync {
         await this.git('stash', 'push', '-m', 'data-sync: pre-pull stash', ...NOT_AUDIT);
       } catch (err) {
         console.warn(`${TAG} Stash failed, skipping pull:`, (err as Error).message);
+        await unstage();
         return;
       }
       stashed = (await stashRef()) !== before;
@@ -471,6 +475,7 @@ export class DataSync {
     }
 
     if (stashed) await this.popStash();
+    await unstage();
     this.rebuildLog().catch(() => {});
   }
 
@@ -496,16 +501,19 @@ export class DataSync {
     }
     // Clear the unmerged index (worktree kept) so later commits are not refused.
     await this.git('reset', '-q').catch(e => console.error(`${TAG} Index reset after failed pop failed:`, (e as Error).message));
+    // No conflicts = git refused the pop outright (a writer saved a stashed path mid-pull: "would be overwritten").
+    // Nothing was applied, so the stash is the only copy of those unflushed edits — never drop it.
+    const refused = conflicted.length === 0;
     const marked = await this.filesWithMarkers(conflicted);
-    const lostUntracked = await this.stashUntrackedMissing();
-    const kept = marked.length > 0 || lostUntracked.length > 0;
+    const kept = refused || marked.length > 0;
     if (!kept) {
       await this.git('stash', 'drop').catch(e => console.error(`${TAG} Stash drop failed:`, (e as Error).message));
     }
-    console.error(`${TAG} Stash pop conflict repaired: kept local side of ${conflicted.length} file(s)${conflicted.length ? ` (${conflicted.join(', ')})` : ''}${kept ? `; stash KEPT — markers: [${marked.join(', ')}], unrestored untracked: [${lostUntracked.join(', ')}]` : '; stash dropped'}`);
-    await this.alertOnce('stash-pop', [...conflicted, ...marked, ...lostUntracked].join('\n'),
+    const stashFiles = refused ? (await this.git('stash', 'show', '--name-only').catch(() => '')).split('\n').filter(Boolean) : [];
+    console.error(`${TAG} Stash pop ${refused ? 'refused' : 'conflict repaired'}: kept local side of ${conflicted.length} file(s)${conflicted.length ? ` (${conflicted.join(', ')})` : ''}${kept ? `; stash KEPT — markers: [${marked.join(', ')}], not re-applied: [${stashFiles.join(', ')}]` : '; stash dropped'}`);
+    await this.alertOnce('stash-pop', [...conflicted, ...marked, ...stashFiles].join('\n'),
       `⚠️ Data sync: a pre-pull stash failed to re-apply. Kept this instance's version of: ${listFiles(conflicted) || '(none)'}.` +
-      (kept ? `\n\nNOT fully repaired — stash kept. Markers in: ${listFiles(marked) || '-'}; untracked not restored: ${listFiles(lostUntracked) || '-'}. Inspect: \`cd data && git stash show -p --include-untracked\`` : ''),
+      (kept ? `\n\nNOT repaired — stash kept. Markers in: ${listFiles(marked) || '-'}; unflushed edits not re-applied: ${listFiles(stashFiles) || '-'}. Inspect: \`cd data && git stash show -p\`` : ''),
     ).catch(e => console.warn(`${TAG} Stash-pop notify failed:`, (e as Error).message));
   }
 
@@ -516,12 +524,6 @@ export class DataSync {
       try { if (CONFLICT_MARKER.test(readFileSync(path.join(DATA_DIR, f), 'utf-8'))) out.push(f); } catch { /* missing = no markers */ }
     }
     return out;
-  }
-
-  /** Untracked files saved in stash@{0} that are not on disk (a pop that refused them: "already exists"). */
-  private async stashUntrackedMissing(): Promise<string[]> {
-    const listed = await this.git('ls-tree', '-r', '--name-only', 'stash@{0}^3').catch(() => '');
-    return listed.split('\n').filter(Boolean).filter(f => !existsSync(path.join(DATA_DIR, f)));
   }
 
   trackWrite(relativePath: string): void {
