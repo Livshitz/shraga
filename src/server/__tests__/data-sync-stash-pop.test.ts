@@ -333,3 +333,21 @@ test('a colliding untracked file stays untracked when the stash push fails (pull
   expect(res.err).toBeUndefined();
   expect(res.status).toBe('?? clash.json');
 });
+
+// A local untracked path that blocks the merge without being an added name (untracked `a/b` vs remote file `a`):
+// git refuses, the pull aborts every cycle and local flushes never reach the remote — it must alert, naming the path.
+test('a merge refused by a blocking untracked path alerts once with the path, and never touches it', () => {
+  const res = runScenario(`
+    require('node:fs').mkdirSync(path.join(DATA_DIR, 'a'), { recursive: true }); write('a/b', 'MINE\\n');
+    writeFileSync(path.join(PEER, 'a'), 'peer\\n'); ${peerCommit}
+    await ds.pull(); await ds.pull();
+    out.merged = git(DATA_DIR, 'rev-parse', 'HEAD') === git(DATA_DIR, 'rev-parse', 'origin/main');
+    out.ab = read('a/b');
+    out.alerts = alerts.filter(a => a.includes('pull is blocked'));
+  `);
+  expect(res.err).toBeUndefined();
+  expect(res.merged).toBe(false);
+  expect(res.ab).toBe('MINE\n');
+  expect(res.alerts.length).toBe(1);
+  expect(res.alerts[0]).toContain('a/b');
+});

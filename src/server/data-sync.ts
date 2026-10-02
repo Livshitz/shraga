@@ -463,14 +463,25 @@ export class DataSync {
     try {
       await this.git('merge', `origin/${this.options.branch}`, '--no-edit');
       console.log(`${TAG} Pulled latest`);
-    } catch {
+      this.clearAlert('merge-refused');
+    } catch (err) {
       const conflicted = await this.getConflictedFiles();
       if (conflicted.length) {
         console.log(`${TAG} Merge conflicts in ${conflicted.length} file(s), resolving...`);
         await this.resolveConflicts(conflicted);
       } else {
-        console.error(`${TAG} Merge failed for unknown reason, aborting`);
+        // Git refused before merging — typically a local untracked path the incoming tree needs (untracked `a/b`
+        // vs a remote file `a`). It recurs every cycle and local flushes stop reaching the remote, so alert.
+        const msg = (err as Error).message;
+        // Git names the INCOMING path (`a`); expand to the local untracked files at or under it (`a/b`).
+        const named = msg.split('\n').filter(l => /^\t/.test(l)).map(l => l.trim());
+        const untracked = named.length ? (await this.git('ls-files', '--others', '--exclude-standard', '-z').catch(() => '')).split('\0').filter(Boolean) : [];
+        const blocking = named.flatMap(p => { const u = untracked.filter(f => f === p || f.startsWith(`${p}/`)); return u.length ? u : [p]; });
+        console.error(`${TAG} Merge failed (no conflicts), aborting: ${msg}`);
         await this.git('merge', '--abort').catch(() => {});
+        await this.alertOnce('merge-refused', blocking.join('\n') || msg,
+          `⚠️ Data sync pull is blocked: git refused to merge origin/${this.options.branch}${blocking.length ? ` — local untracked path(s) in the way: ${listFiles(blocking)}` : `: ${msg.slice(0, 300)}`}. ` +
+          `Until fixed, this instance's changes are not reaching the remote. Fix: move/rename the listed path(s) in data/ (back them up first), then the next sync will merge.`);
       }
     }
 
