@@ -139,7 +139,10 @@ function bootDataSync(): void {
 await loadShragaConfig();
 // Process-wide policy + audit (shadow mode: decide + audit, never deny). Audit writes only on the
 // active instance — a PASSIVE standby shares DATA_DIR. `activated` is declared above.
-initSecurity({ isActive: () => !PASSIVE || activated, policy: { migrate: __reg.security?.migrate } });
+// A syncing instance that isn't the audit writer (data-sync mirror) logs to an untracked dir: the shared data/audit
+// chain belongs to the writer alone.
+const auditMirror = dataSync.isEnabled() && !dataSync.options.auditWriter;
+initSecurity({ isActive: () => !PASSIVE || activated, policy: { migrate: __reg.security?.migrate }, audit: auditMirror ? { dir: dataPath('.tmp/audit') } : {} });
 // Programmatic engines register through the same seam an overlay uses — BEFORE initEngines() so
 // getAvailableEngines() includes them and a directive can resolve to one immediately.
 for (const e of __reg.engines ?? []) registerEngine(e);
