@@ -13,6 +13,13 @@ on:
 permissions:
   contents: write # push the version-bump commit + tag
 
+# Two pushes minutes apart used to run in parallel, both bump from their own SHA to the same version, and the
+# loser died on npm E409 with its commit unpublished (v0.1.154, 2026-10-03). Serialize, and build from current
+# main so a queued run sees the previous run's bump (and ships every commit up to now).
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
 jobs:
   publish:
     if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
@@ -20,6 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: main
           fetch-depth: 0
 
       - uses: actions/setup-node@v5
