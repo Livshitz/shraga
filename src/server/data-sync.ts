@@ -128,6 +128,13 @@ export class DataSyncOptions {
    * DM gave no way to tell which instance sent it. Suppressed alerts are still logged locally.
    */
   notify = process.env.DATA_SYNC_SCHEDULER_ACTIVE === 'true';
+  /**
+   * audit/ is single-writer: only the designated instance (same marker as `notify`) commits it and refuses remote
+   * rewrites of it. Any other syncing instance (a dev laptop on the shared repo) is a MIRROR: it never stages audit/
+   * and takes the remote's audit/ on pull. Without this every instance believed it was the writer, so a box commit
+   * (which always carries audit lines) was refused by every other clone forever (feedox laptop, 2026-10: 68 behind).
+   */
+  auditWriter = process.env.DATA_SYNC_SCHEDULER_ACTIVE === 'true';
 }
 
 export class DataSync {
@@ -403,24 +410,35 @@ export class DataSync {
       return;
     }
 
-    // The audit log is append-only with ONE writer, this instance. A remote commit touching audit/ would rewrite the local
-    // chain (and under `chattr +a` git can't even apply it) — refuse the whole pull and alert.
-    let incomingAudit: string;
-    try {
-      incomingAudit = (await this.git('diff', '--name-only', `HEAD...origin/${this.options.branch}`, '--', AUDIT_DIR)).trim();
-    } catch (err) {
-      console.warn(`${TAG} Audit pull check failed, skipping pull:`, (err as Error).message);
-      return;
+    if (this.options.auditWriter) {
+      // The audit log is append-only with ONE writer, this instance. A remote commit touching audit/ would rewrite the local
+      // chain (and under `chattr +a` git can't even apply it) — refuse the whole pull and alert.
+      let incomingAudit: string;
+      try {
+        incomingAudit = (await this.git('diff', '--name-only', `HEAD...origin/${this.options.branch}`, '--', AUDIT_DIR)).trim();
+      } catch (err) {
+        console.warn(`${TAG} Audit pull check failed, skipping pull:`, (err as Error).message);
+        return;
+      }
+      if (incomingAudit) {
+        console.error(`${TAG} 🚫 Remote commits change the audit log — pull refused:\n${incomingAudit}`);
+        await this.alertOnce('audit-pull', incomingAudit,
+          `🚫 Data sync refused a pull: remote commits change the audit log, which only this instance writes.\n\n${incomingAudit}\n\n` +
+          `Inspect: \`cd data && git log origin/${this.options.branch} -- ${AUDIT_DIR}\``,
+        ).catch(err => console.warn(`${TAG} Audit pull notify failed:`, (err as Error).message));
+        return;
+      }
+      this.clearAlert('audit-pull');
+    } else {
+      // Mirror: the remote's audit/ is authoritative. Drop any local audit/ edits (a pre-fix build wrote here) so the
+      // merge can take theirs; this instance's own audit goes to an untracked dir (auditDir()).
+      const local = (await this.git('status', '--porcelain', '--', AUDIT_DIR).catch(() => '')).trim();
+      if (local) {
+        console.warn(`${TAG} Not the audit writer — discarding local audit/ changes so the remote's log wins:\n${local}`);
+        await this.git('checkout', 'HEAD', '--', AUDIT_DIR).catch(e => console.warn(`${TAG} Resetting audit/ failed:`, (e as Error).message));
+        await this.git('clean', '-fdq', '--', AUDIT_DIR).catch(e => console.warn(`${TAG} Cleaning audit/ failed:`, (e as Error).message));
+      }
     }
-    if (incomingAudit) {
-      console.error(`${TAG} 🚫 Remote commits change the audit log — pull refused:\n${incomingAudit}`);
-      await this.alertOnce('audit-pull', incomingAudit,
-        `🚫 Data sync refused a pull: remote commits change the audit log, which only this instance writes.\n\n${incomingAudit}\n\n` +
-        `Inspect: \`cd data && git log origin/${this.options.branch} -- ${AUDIT_DIR}\``,
-      ).catch(err => console.warn(`${TAG} Audit pull notify failed:`, (err as Error).message));
-      return;
-    }
-    this.clearAlert('audit-pull');
 
     // Stash tracked changes before merging — never untracked files, and never audit/: stashing removes the live log
     // from disk while the server appends to it (lost lines, forked chain) and fails under `chattr +a`; the merge can't
@@ -465,7 +483,17 @@ export class DataSync {
       console.log(`${TAG} Pulled latest`);
       this.clearAlert('merge-refused');
     } catch (err) {
-      const conflicted = await this.getConflictedFiles();
+      let conflicted = await this.getConflictedFiles();
+      if (!this.options.auditWriter) {
+        // A mirror's committed-but-unpushed audit lines (pre-fix build) lose to the writer's chain.
+        const audit = conflicted.filter(f => f.startsWith(`${AUDIT_DIR}/`));
+        if (audit.length) {
+          await this.git('checkout', '--theirs', '--', ...audit).then(() => this.git('add', '--', ...audit))
+            .catch(e => console.error(`${TAG} Taking remote audit/ failed:`, (e as Error).message));
+          conflicted = conflicted.filter(f => !audit.includes(f));
+          if (!conflicted.length) await this.git('commit', '--no-edit').catch(e => console.error(`${TAG} Commit after audit resolve failed:`, (e as Error).message));
+        }
+      }
       if (conflicted.length) {
         console.log(`${TAG} Merge conflicts in ${conflicted.length} file(s), resolving...`);
         await this.resolveConflicts(conflicted);
@@ -582,6 +610,7 @@ export class DataSync {
 
     try {
       for (const f of files) {
+        if (!this.options.auditWriter && (f === AUDIT_DIR || f.startsWith(`${AUDIT_DIR}/`))) continue;
         const abs = path.join(DATA_DIR, f);
         if (existsSync(abs)) {
           await this.git('add', f);
@@ -592,8 +621,8 @@ export class DataSync {
 
       // The audit log rides along with every sync commit — the data repo is its offsite copy — and the commit message
       // anchors its head. Head read BEFORE staging: the committed chain always contains that hash.
-      const auditHead = this.auditHead();
-      if (existsSync(path.join(DATA_DIR, AUDIT_DIR))) {
+      const auditHead = this.options.auditWriter ? this.auditHead() : undefined;
+      if (this.options.auditWriter && existsSync(path.join(DATA_DIR, AUDIT_DIR))) {
         await this.git('add', '--', AUDIT_DIR).catch(err => console.warn(`${TAG} Staging audit log failed:`, (err as Error).message));
       }
 

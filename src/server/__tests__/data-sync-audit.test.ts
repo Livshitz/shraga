@@ -34,7 +34,7 @@ test('data-sync keeps the audit log single-writer and policy.json local', async 
       const peerCommit = (file) => { git(PEER, 'pull', '-q'); writeFileSync(path.join(PEER, file), 'peer\\n'); git(PEER, 'add', '-A'); git(PEER, 'commit', '-qm', file); git(PEER, 'push', '-q'); };
       const out = {};
       try {
-      const ds = new DataSync({ repoUrl: BARE, branch: 'main', enabled: true, deploymentId: '' });
+      const ds = new DataSync({ repoUrl: BARE, branch: 'main', enabled: true, deploymentId: '', auditWriter: true });
       ds.askClaude = async () => 'update notes';
       await ds.init();
 
