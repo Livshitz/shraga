@@ -30,7 +30,8 @@ test('an idle clone pulls a peer commit within the poll interval, with no local 
       const out = {};
       try {
         const ds = new DataSync({ repoUrl: process.env.BARE, branch: 'main', enabled: true, deploymentId: '', pollMs: 300, notify: false, auditWriter: false });
-        ds.askClaude = async () => 'sync';
+        let asked = 0; ds.askClaude = async () => { asked++; return 'sync'; };
+        const errors = []; console.error = (...a) => errors.push(a.join(' '));
         ds.notifyOwners = async () => {};
         await ds.init();
         await ds.syncOnBoot();
@@ -48,6 +49,13 @@ test('an idle clone pulls a peer commit within the poll interval, with no local 
         out.caughtUp = git(DATA_DIR, 'rev-parse', 'HEAD') === origin;
         out.hasB = existsSync(path.join(DATA_DIR, 'b.json'));
         ds.stopPolling?.();
+
+        // The workspace watcher reports the files the pull just wrote → a flush with nothing to commit. With an
+        // untracked file around it must be a silent no-op: no LLM commit message, no "Commit failed".
+        writeFileSync(path.join(DATA_DIR, 'untracked.json'), '{}\\n');
+        asked = 0; ds.pending.add('b.json');
+        await ds.flush();
+        out.noopFlush = { asked, errors: errors.filter(e => e.includes('Commit failed')) };
       } catch (e) { out.err = String(e?.stack || e); }
       process.stdout.write('\\nRESULT' + JSON.stringify(out));
       process.exit(0);
@@ -59,6 +67,7 @@ test('an idle clone pulls a peer commit within the poll interval, with no local 
     expect(res.startedBehind).toBe(true);
     expect(res.caughtUp).toBe(true);
     expect(res.hasB).toBe(true);
+    expect(res.noopFlush).toEqual({ asked: 0, errors: [] });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
