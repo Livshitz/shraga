@@ -135,6 +135,12 @@ export class DataSyncOptions {
    * (which always carries audit lines) was refused by every other clone forever (feedox laptop, 2026-10: 68 behind).
    */
   auditWriter = process.env.DATA_SYNC_SCHEDULER_ACTIVE === 'true';
+  /**
+   * Poll origin every N ms and pull when behind (0 = off). The GitHub webhook only reaches the publicly routed
+   * instance, so any other clone (a dev laptop) pulled only on boot or after its own push — an idle one stayed
+   * behind indefinitely and its agents acted on stale files (feedox laptop, 2026-10).
+   */
+  pollMs = parseInt(process.env.DATA_SYNC_POLL_MS ?? '60000', 10) || 0;
 }
 
 export class DataSync {
@@ -145,6 +151,7 @@ export class DataSync {
   private pushingSince = 0;
   private pulling = false;
   private pullPending = false;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
   private ready = false;
   private warnedDisabled = false;
   /** key -> fingerprint+timestamp of the last DM sent for that guard, so a STANDING condition
@@ -255,6 +262,36 @@ export class DataSync {
         .then(() => this.runIntegrityAudit())
         .catch(err => console.warn(`${TAG} Post-init integrity audit failed:`, (err as Error).message));
     }, 60_000);
+    this.startPolling();
+  }
+
+  /** Start the periodic origin poll (idempotent). */
+  startPolling(): void {
+    if (this.pollTimer || !this.ready || !this.options.pollMs) return;
+    let failing = false; // warn once per failure streak — an offline laptop would otherwise log every tick
+    this.pollTimer = setInterval(() => {
+      this.pollOnce().then(() => { failing = false; }, err => {
+        if (!failing) console.warn(`${TAG} Poll failed (quiet until it recovers):`, (err as Error).message);
+        failing = true;
+      });
+    }, this.options.pollMs);
+    this.pollTimer.unref?.();
+  }
+
+  stopPolling(): void {
+    if (this.pollTimer) clearInterval(this.pollTimer);
+    this.pollTimer = null;
+  }
+
+  /** One poll tick: a quiet fetch, then a full pull() only when origin has commits HEAD lacks.
+   *  Skipped while a pull or flush is in flight — each of those already ends synced. */
+  async pollOnce(): Promise<void> {
+    if (this.pulling || this.pushing || !this.isEnabled()) return;
+    await this.git('fetch', '-q', 'origin', this.options.branch);
+    const behind = await this.git('merge-base', '--is-ancestor', `origin/${this.options.branch}`, 'HEAD').then(() => false, () => true);
+    if (!behind || this.pulling || this.pushing) return;
+    console.log(`${TAG} Poll: behind origin/${this.options.branch} — pulling`);
+    await this.pull();
   }
 
   /** Compare HEAD against HEAD~1 to catch regressions. Notifies owner — never auto-reverts.
