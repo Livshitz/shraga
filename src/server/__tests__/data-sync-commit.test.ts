@@ -86,6 +86,7 @@ function harness(opts: { askClaude: (p?: string, m?: string, ac?: AbortControlle
     calls.push(args);
     if (opts.failOn && args[0] === opts.failOn) throw new Error(`boom in git ${args[0]}`);
     if (args[0] === 'status') return opts.status ?? ' M CLAUDE.md\n';
+    if (args.join(' ') === 'diff --cached --name-only') return opts.status ?? 'CLAUDE.md\n'; // flush's staged check
     if (args[0] === 'diff' && args.includes('--stat')) return ' CLAUDE.md | 2 +-\n';
     if (args[0] === 'diff') return '--- a/CLAUDE.md\n+++ b/CLAUDE.md\n+rule\n';
     if (args[0] === 'rev-list') return '1\n';

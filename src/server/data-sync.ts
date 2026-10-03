@@ -706,8 +706,9 @@ export class DataSync {
         await this.git('add', '--', AUDIT_DIR).catch(err => console.warn(`${TAG} Staging audit log failed:`, (err as Error).message));
       }
 
-      const status = await this.git('status', '--porcelain');
-      if (!status.trim()) return;
+      // Staged changes only: untracked files made `status --porcelain` non-empty, so a flush of files a pull had just
+      // written (workspace watcher → trackWrite) paid an LLM commit message and then failed "nothing to commit".
+      if (!(await this.git('diff', '--cached', '--name-only')).trim()) return;
 
       if (await this.guardMassDeletions('flush')) return;
       if (await this.guardConflictMarkers()) return;
