@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, cpSync, rmSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { DATA_DIR } from './paths.ts';
@@ -331,7 +331,9 @@ export class DataSync {
         const [addRaw, delRaw, file] = line.split('\t');
         if (addRaw === '-' || delRaw === '-' || !file) continue; // binary
         const net = (parseInt(delRaw, 10) || 0) - (parseInt(addRaw, 10) || 0);
-        if (net <= shrinkThreshold || isChurnPath(file) || isAuthoredDocPath(file)) continue;
+        // Untracking keeps every file on disk, so a "shrink" to zero lines loses nothing — same exemption as (1). Without it
+        // the big files were unstaged and the rest left half-staged (feedox 2026-10-03: 35 of 49 .agent/ deletions).
+        if (untracking || net <= shrinkThreshold || isChurnPath(file) || isAuthoredDocPath(file)) continue;
         // Size of the file as it stands in HEAD. Unreadable (e.g. not in HEAD) => no ratio to
         // judge by, so fall through to blocking rather than silently letting the shrink past.
         const before = await this.git('show', `HEAD:${file}`)
@@ -464,6 +466,7 @@ export class DataSync {
         return;
       }
     }
+    const kept = await this.backupIncomingDeletions();
     let stashed = false;
     if ((await this.git('status', '--porcelain', '--untracked-files=no', ...NOT_AUDIT)).trim()) {
       const stashRef = () => this.git('rev-parse', '-q', '--verify', 'refs/stash').then(s => s.trim(), () => '');
@@ -515,7 +518,47 @@ export class DataSync {
 
     if (stashed) await this.popStash();
     await unstage();
+    await this.restoreUntracked(kept);
     this.rebuildLog().catch(() => {});
+  }
+
+  private get untrackBackupDir(): string { return path.join(DATA_DIR, '.git', 'data-sync-untrack-backup'); }
+
+  /** Copy aside every local file the incoming commits delete. An untrack commit (`git rm --cached` by the designated
+   *  instance) is a deletion to every other clone: merging it removed the files from disk — e.g. the box's agent
+   *  memory when workspace/.agent/ became ignored. Lives under .git/ so a crash mid-pull leaves the copy. */
+  private async backupIncomingDeletions(): Promise<string[]> {
+    const deleted = (await this.git('diff', '--name-only', '-z', '--diff-filter=D', '--no-renames', `HEAD...origin/${this.options.branch}`).catch(() => ''))
+      .split('\0').filter(f => f && existsSync(path.join(DATA_DIR, f)));
+    rmSync(this.untrackBackupDir, { recursive: true, force: true });
+    const kept: string[] = [];
+    for (const f of deleted) {
+      try { cpSync(path.join(DATA_DIR, f), path.join(this.untrackBackupDir, f)); kept.push(f); }
+      catch (e) { console.error(`${TAG} Backing up ${f} before pull failed:`, (e as Error).message); }
+    }
+    return kept;
+  }
+
+  /** After the merge: put back the backed-up files the merge removed that are now gitignored (an untrack, not a real
+   *  deletion — those stay deleted), untracked. */
+  private async restoreUntracked(kept: string[]): Promise<void> {
+    if (!kept.length) return;
+    const gone = kept.filter(f => !existsSync(path.join(DATA_DIR, f)));
+    // Per path (exit 0 = ignored, 1 = not): a batched call's output is quoted for unusual names and would miss them.
+    const ignored: string[] = [];
+    for (const f of gone) {
+      const hit = await this.git('-c', 'core.excludesFile=/dev/null', 'check-ignore', '-q', '--no-index', '--', f).then(() => true, e => {
+        if (!/failed \(1\)/.test((e as Error).message)) console.error(`${TAG} check-ignore ${f} after pull failed:`, (e as Error).message);
+        return false;
+      });
+      if (hit) ignored.push(f);
+    }
+    for (const f of ignored) {
+      try { cpSync(path.join(this.untrackBackupDir, f), path.join(DATA_DIR, f)); }
+      catch (e) { console.error(`${TAG} Restoring untracked ${f} failed — copy kept in ${this.untrackBackupDir}:`, (e as Error).message); return; }
+    }
+    if (ignored.length) console.log(`${TAG} Kept ${ignored.length} file(s) on disk that the pull untracked (now gitignored)`);
+    rmSync(this.untrackBackupDir, { recursive: true, force: true });
   }
 
   /** Restore the pre-pull stash. A failed pop used to be logged and left as-is: the worktree kept conflict
@@ -1047,15 +1090,25 @@ export class DataSync {
     // Only untrack files that actually exist on disk AND match .gitignore.
     // git ls-files -i can falsely report tracked files missing from the worktree
     // (remote-only files restored during init). Removing those wipes remote data.
-    const files = out.split('\n').map(l => l.trim()).filter(Boolean)
+    let files = out.split('\n').map(l => l.trim()).filter(Boolean)
       .filter(f => existsSync(path.join(DATA_DIR, f)));
+    // Only the designated instance (DATA_SYNC_SCHEDULER_ACTIVE, the audit writer) commits an untrack: one clean commit
+    // from one place. Other clones keep the files tracked until that commit arrives; _pull() then keeps them on disk.
+    if (files.length && !this.options.auditWriter) {
+      console.log(`${TAG} ${files.length} tracked file(s) now match .gitignore — left for the designated instance to untrack`);
+      files = [];
+    }
     if (files.length) {
       await this.git('rm', '--cached', '--', ...files).catch(err => {
         console.warn(`${TAG} Untrack ignored files failed:`, (err as Error).message);
       });
     }
     if (!(await this.git('diff', '--cached', '--name-only')).trim()) return;
-    if (await this.guardMassDeletions('untrackIgnored')) return;
+    if (await this.guardMassDeletions('untrackIgnored')) {
+      // All or nothing: a partially staged untrack rides the next flush as unexplained deletions.
+      await this.git('reset', '-q', 'HEAD').catch(e => console.error(`${TAG} Resetting a blocked untrack failed:`, (e as Error).message));
+      return;
+    }
     const msg = files.length
       ? `data-sync: refresh .gitignore, untrack ${files.length} now-ignored file(s)`
       : 'data-sync: refresh .gitignore';
