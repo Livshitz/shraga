@@ -702,7 +702,9 @@ export class DataSync {
       // The audit log rides along with every sync commit — the data repo is its offsite copy — and the commit message
       // anchors its head. Head read BEFORE staging: the committed chain always contains that hash.
       const auditHead = this.options.auditWriter ? this.auditHead() : undefined;
-      if (this.options.auditWriter && existsSync(path.join(DATA_DIR, AUDIT_DIR))) {
+      // A data repo may gitignore audit/ (anchors-only in commit messages): staging it then fails every flush.
+      const auditIgnored = await this.git('check-ignore', '-q', AUDIT_DIR).then(() => true, () => false);
+      if (this.options.auditWriter && !auditIgnored && existsSync(path.join(DATA_DIR, AUDIT_DIR))) {
         await this.git('add', '--', AUDIT_DIR).catch(err => console.warn(`${TAG} Staging audit log failed:`, (err as Error).message));
       }
 
