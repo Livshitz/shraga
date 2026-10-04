@@ -42,6 +42,11 @@ export function claudeForcesSubscription(): boolean {
   return process.env.CLAUDE_CODE_AUTH === 'subscription';
 }
 
+/** When subscription is forced, drop the API credentials from a child env so the stored login wins. */
+export function applyForcedSubscription(env: Record<string, string | undefined>): void {
+  if (claudeForcesSubscription()) for (const k of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) delete env[k];
+}
+
 /** Route a child env to `dir`: strip inherited credentials so neither the box's API key nor its token can win. */
 export function applyClaudeAccount(env: Record<string, string>, dir: string): void {
   for (const k of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']) delete env[k];
