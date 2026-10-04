@@ -1,4 +1,5 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import { applyForcedSubscription } from './claude-account.ts';
 
 /**
  * Run a simple SDK query that returns text only (no tools).
@@ -18,6 +19,8 @@ export async function runTextQuery(opts: {
   try {
     let result = '';
     const model = opts.model || 'haiku';
+    const env: Record<string, string | undefined> = { ...process.env };
+    applyForcedSubscription(env);
     for await (const ev of query({
       prompt: opts.prompt,
       options: {
@@ -25,6 +28,7 @@ export async function runTextQuery(opts: {
         maxTurns: opts.maxTurns || 1,
         systemPrompt: opts.systemPrompt,
         abortController: opts.abortController,
+        env,
       },
     })) {
       const m = ev as any;
