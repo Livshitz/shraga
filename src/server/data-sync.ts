@@ -714,8 +714,15 @@ export class DataSync {
       if (await this.guardConflictMarkers()) return;
       if (await this.guardOversized()) return;
       const msg = await this.generateCommitMessage(files);
-      await this.git('commit', '-m', auditHead ? `${msg}\n\naudit-head: ${auditHead}` : msg).catch(err =>
-        console.error(`${TAG} Commit failed — nothing from this flush is synced:`, (err as Error).message));
+      // The LLM wait is slow; another committer in this repo (e.g. the nightly reconcile job) may have committed the
+      // staged changes meanwhile. That's a no-op, not a failure.
+      const committedElsewhere = () => console.log(`${TAG} Nothing to commit (committed elsewhere)`);
+      if (!(await this.git('diff', '--cached', '--name-only')).trim()) committedElsewhere();
+      else await this.git('commit', '-m', auditHead ? `${msg}\n\naudit-head: ${auditHead}` : msg).catch(err => {
+        const m = (err as Error).message;
+        if (/nothing to commit|nothing added to commit/.test(m)) committedElsewhere();
+        else console.error(`${TAG} Commit failed — nothing from this flush is synced:`, m);
+      });
       const ahead = await this.git('rev-list', '--count', `origin/${this.options.branch}..HEAD`).catch(() => '0');
       if (parseInt(ahead.trim()) === 0) return;
       await this.git('push', 'origin', this.options.branch).catch(async (err) => {
@@ -1207,7 +1214,7 @@ export class DataSync {
       new Response(proc.stderr).text(),
     ]);
     const code = await proc.exited;
-    if (code !== 0) throw new Error(`${cmd} ${args[0]} failed (${code}): ${stderr.trim()}`);
+    if (code !== 0) throw new Error(`${cmd} ${args[0]} failed (${code}): ${stderr.trim() || stdout.trim()}`);
     return stdout;
   }
 }
