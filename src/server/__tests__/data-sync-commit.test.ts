@@ -294,3 +294,47 @@ describe('guardOversized', () => {
     } finally { rmSync(big, { force: true }); rmSync(join(DATA_DIR, 'small.md'), { force: true }); }
   });
 });
+
+describe('flush() when another committer lands the staged changes during the LLM wait', () => {
+  async function captureErrors(fn: () => Promise<void>) {
+    const errors: unknown[][] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => { errors.push(a); };
+    try { await fn(); } finally { console.error = orig; }
+    return errors;
+  }
+
+  test('index emptied during message generation → no commit, no error', async () => {
+    let committedElsewhere = false;
+    const { ds, calls } = harness({ askClaude: async () => { committedElsewhere = true; return 'add a rule'; } });
+    ds.git = (((orig) => async (...args: string[]) =>
+      (committedElsewhere && args.join(' ') === 'diff --cached --name-only' ? '' : orig(...args)))(ds.git)) as any;
+    const errors = await captureErrors(() => ds.flush());
+    expect(calls.some(c => c[0] === 'commit')).toBe(false);
+    expect(errors).toEqual([]);
+    expect(ds.pushing).toBe(false);
+  });
+
+  test('git commit itself loses the race ("nothing to commit") → no error', async () => {
+    const { ds } = harness({ askClaude: async () => 'add a rule', failOn: 'commit' });
+    ds.git = (((orig) => async (...args: string[]) => {
+      if (args[0] === 'commit') throw new Error('git commit failed (1): nothing to commit, working tree clean');
+      return orig(...args);
+    })(ds.git)) as any;
+    const errors = await captureErrors(() => ds.flush());
+    expect(errors).toEqual([]);
+  });
+
+  test('real git: commit with an empty index surfaces stdout ("nothing to commit") in the error', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'ds-race-'));
+    const ds: any = new DataSync({ repoUrl: 'x', branch: 'main', enabled: true } as any);
+    try {
+      await ds.spawn('git', ['init', '-q'], dir);
+      await ds.spawn('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init'], dir);
+      await expect(ds.spawn('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-m', 'x'], dir)).rejects.toThrow(/nothing to commit/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
