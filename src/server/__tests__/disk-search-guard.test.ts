@@ -37,3 +37,13 @@ test('the hook denies Bash and Grep/Glob rooted at /, with a pointer to the data
   expect(await run('Bash', { command: 'find . -name x' })).toBeNull();
   expect(await run('Grep', { pattern: 'x', path: 'src' })).toBeNull();
 });
+
+test('the skill index names the absolute skills dir (no relative data/skills/ for the agent to hunt for)', async () => {
+  const { buildSkillIndexBlock } = await import('../skills.ts');
+  const { DATA_DIR } = await import('../paths.ts');
+  const block = buildSkillIndexBlock();
+  if (block) {
+    expect(block).toContain(`${DATA_DIR}/skills/`);
+    expect(block).not.toContain('available in data/skills/');
+  }
+});
