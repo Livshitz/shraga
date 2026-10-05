@@ -10,6 +10,8 @@ import { rewriteSlackMentions } from './slack/mention-rewrite.ts';
 import { PROTECTED_DATA_MESSAGE, writesProtectedData } from './security/enforce.ts';
 import { getOffload, type OffloadSettings } from './shraga-config.ts';
 import { heavyCommandDenyMessage, heavyLocalCommand } from './offload.ts';
+import { wholeDiskSearch, wholeDiskSearchMessage } from './disk-search-guard.ts';
+import { DATA_DIR } from './paths.ts';
 
 /** Patterns that indicate a long-running script the model should background. */
 const LONG_RUNNING_PATTERNS = [
@@ -198,6 +200,24 @@ export const denyHeavyLocalMedia = (cfg: OffloadSettings): HookCallback => async
   };
 };
 
+/** Refuse searches rooted at / or the bare home dir (Bash find/grep -r/mdfind, or the Grep/Glob tools' `path`). */
+export const denyWholeDiskSearch: HookCallback = async (input) => {
+  if (input.hook_event_name !== 'PreToolUse') return {};
+  const { tool_name, tool_input } = input as PreToolUseHookInput;
+  const ti = (tool_input ?? {}) as Record<string, unknown>;
+  const what = tool_name === 'Bash' ? wholeDiskSearch(String(ti.command ?? ''))
+    : typeof ti.path === 'string' && wholeDiskSearch(`find ${ti.path}`) ? `${tool_name} ${ti.path}` : null;
+  if (!what) return {};
+  console.log(`[hooks] Denied whole-disk search: ${what}`);
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse' as const,
+      permissionDecision: 'deny' as const,
+      permissionDecisionReason: wholeDiskSearchMessage(what, DATA_DIR),
+    },
+  };
+};
+
 /** Build the hooks map to pass into SDK query() options.
  *  `exemptBashCommand` is the one command the turn was explicitly told to run in the foreground
  *  (a `bash` schedule's command) — see forceBackgroundForScripts. */
@@ -205,6 +225,7 @@ export function buildHooks(opts?: { exemptBashCommand?: string; offload?: Offloa
   const offload = opts && 'offload' in opts ? opts.offload : getOffload();
   return {
     PreToolUse: [
+      { matcher: 'Bash|Grep|Glob', hooks: [denyWholeDiskSearch] },
       ...(offload ? [{ matcher: 'Bash', hooks: [denyHeavyLocalMedia(offload)] }] : []),
       { matcher: 'Bash', hooks: [forceBackgroundForScripts(opts?.exemptBashCommand, opts?.durableJobs), ...(opts?.durableJobs ? [denyNativeBackground] : [])] },
       { matcher: 'mcp__mcp-slack-use__post_slack_.*', hooks: [resolveSlackMentions] },
