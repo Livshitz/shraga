@@ -586,6 +586,7 @@ export class ClaudeCodeEngine implements AgentEngine {
     const streamedToolUseIds = new Set<string>();
     const streamingToolInputsByIndex = new Map<number, { id: string; name: string; inputJson: string }>();
     const outstandingTasks = new Set<string>();
+    const foregroundTasks = new Set<string>();
 
     const iter = q[Symbol.asyncIterator]();
     let pendingNext: Promise<IteratorResult<any>> | null = null;
@@ -613,8 +614,11 @@ export class ClaudeCodeEngine implements AgentEngine {
             yield { type: 'done', sessionId: lastSessionId, stopReason: graceStop };
             return;
           }
-          // The follow-up turn started: it gets the full bg wait, not the grace window.
-          if (graceStop) { graceStop = null; clearBgTimer(); }
+          // The follow-up turn started: it gets the full bg wait, not the grace window. CLI housekeeping
+          // (status/rate-limit events) is not a turn — letting it cancel the grace held every such turn for 15 min.
+          const v = raced === '__bgtimeout' ? undefined : (raced as IteratorResult<any>).value;
+          const housekeeping = v?.type === 'rate_limit_event' || (v?.type === 'system' && !String(v.subtype).startsWith('task_'));
+          if (graceStop && !housekeeping) { graceStop = null; clearBgTimer(); }
           if (raced === '__bgtimeout') {
             console.warn(`[claude] Background-task wait timed out (${elapsed()})`);
             yield { type: 'done', sessionId: lastSessionId, stopReason: 'end_turn' };
@@ -672,11 +676,15 @@ export class ClaudeCodeEngine implements AgentEngine {
         }
 
         if (m.type === 'system' && m.subtype === 'task_started') {
+          // The CLI also reports a FOREGROUND Bash (>~2s) as a task. Its result is already in the turn, so it gets
+          // no follow-up — counting it armed the follow-up hold and kept every such turn open for 15 min.
+          if (m.is_backgrounded === false) { foregroundTasks.add(m.task_id); continue; }
           outstandingTasks.add(m.task_id);
           console.log(`[claude] Background task started: ${m.task_id} (${outstandingTasks.size} pending) (${elapsed()})`);
           continue;
         }
         if (m.type === 'system' && m.subtype === 'task_notification') {
+          if (foregroundTasks.delete(m.task_id)) continue;
           outstandingTasks.delete(m.task_id);
           if (!answered) notifiedBeforeAnswer = true;
           console.log(`[claude] Background task ${m.status}: ${m.task_id} (${outstandingTasks.size} pending) (${elapsed()})`);

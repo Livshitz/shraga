@@ -138,7 +138,7 @@ describe('flag ON: the engine applies the effective profile', () => {
     expect(o.env.INTERNAL_API_TOKEN).not.toBe(process.env.INTERNAL_API_TOKEN);
     expect(o.env.INTERNAL_API_TOKEN).toMatch(/^[0-9a-f]{64}\.\d+:u-sec:sec@x\.test$/); // scoped to the turn's uid/email (+ issued-at, for tokensValidAfter), never the raw secret
     expect(o.hooks.PreToolUse[0].matcher).toBeUndefined();
-    expect(o.hooks.PreToolUse.slice(1).map((m: any) => m.matcher)).toEqual(['Bash', 'mcp__mcp-slack-use__post_slack_.*', 'mcp__mcp-firebase-(?:prod|lab)__get_db.*', 'Write|Edit|MultiEdit|NotebookEdit']);
+    expect(o.hooks.PreToolUse.slice(1).map((m: any) => m.matcher)).toEqual(['Bash|Grep|Glob', 'Bash', 'mcp__mcp-slack-use__post_slack_.*', 'mcp__mcp-firebase-(?:prod|lab)__get_db.*', 'Write|Edit|MultiEdit|NotebookEdit']);
     expect(await deny(o, 'Bash', { command: 'ls' })).toBe('allow');
   });
 
