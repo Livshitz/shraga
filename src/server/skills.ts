@@ -322,7 +322,7 @@ export function buildSkillIndexBlock(): string {
   }
   // ABSOLUTE: the agent's cwd is the app dir, not DATA_DIR, so a relative "data/skills/" (or a skill's own
   // `scripts/…`) resolved nowhere and agents fell back to `find /` (3-7 min per call).
-  return `<available-skills>\nSkills live in ${SKILLS_DIR}/ — skill X is ${SKILLS_DIR}/X.md, and its bundled files (scripts/, reference/) are under ${SKILLS_DIR}/X/. In a skill, a path starting with skills/ is relative to ${DATA_DIR}/ and any other relative path (scripts/…) to the skill's own folder ${SKILLS_DIR}/X/; never search the disk for them. Use Read to load full skill content when needed.\n${lines.join('\n')}\n</available-skills>`;
+  return `<available-skills>\nSkills live in ${SKILLS_DIR}/ — skill X is ${SKILLS_DIR}/X.md, and its bundled files (scripts/, reference/) are under ${SKILLS_DIR}/X/. A relative path in a skill lives under the data dir ${DATA_DIR}/: look in the skill's folder ${SKILLS_DIR}/X/, then ${DATA_DIR}/workspace/, then ${DATA_DIR}/ (skills/… is relative to ${DATA_DIR}/). If you must search, search inside ${DATA_DIR} only — never the whole disk. Use Read to load full skill content when needed.\n${lines.join('\n')}\n</available-skills>`;
 }
 
 /* ── Trigger matching ─────────────────────────────────────────────────────────
