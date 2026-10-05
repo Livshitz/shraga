@@ -322,6 +322,41 @@ describe('background tasks and resumed sessions', () => {
     expect(events.at(-1)).toMatchObject({ type: 'done', stopReason: 'success' });
   }, 15_000);
 
+  test('a foreground Bash reported as a task does not hold the turn after its result', async () => {
+    reset();
+    const sid = newSid(); const conv: ConvMessage[] = [];
+    scripts = [async function* (_o, { first, input }) {
+      yield init('cc-fg');
+      yield { type: 'system', subtype: 'task_started', task_id: 'fg1', is_backgrounded: false, session_id: 'cc-fg' };
+      yield { type: 'system', subtype: 'task_notification', task_id: 'fg1', status: 'completed', session_id: 'cc-fg' };
+      yield text('cc-fg', 'published');
+      yield result('cc-fg', 2, 'published', first.uuid);
+      await input.next();
+    }];
+    const t0 = Date.now();
+    const events = await turn(sid, conv, ALICE, 'publish it');
+    expect(Date.now() - t0).toBeLessThan(1_000); // no 5s grace, no 15-min hold
+    expect(events.at(-1)).toMatchObject({ type: 'done', stopReason: 'success' });
+  }, 15_000);
+
+  test('CLI housekeeping during the grace window does not extend it to the full bg wait', async () => {
+    reset();
+    const sid = newSid(); const conv: ConvMessage[] = [];
+    scripts = [async function* (_o, { first, input }) {
+      yield init('cc-hk');
+      yield { type: 'system', subtype: 'task_notification', task_id: 'bg1', status: 'completed', session_id: 'cc-hk' };
+      yield text('cc-hk', 'all done');
+      yield result('cc-hk', 2, 'all done', first.uuid);
+      yield { type: 'system', subtype: 'status', status: 'idle', session_id: 'cc-hk' };
+      yield { type: 'rate_limit_event', rate_limit_info: {} };
+      await input.next();
+    }];
+    const t0 = Date.now();
+    const events = await turn(sid, conv, ALICE, 'check it');
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    expect(events.at(-1)).toMatchObject({ type: 'done', stopReason: 'success' });
+  }, 15_000);
+
   test("a resumed session's stale zero-turn result does not end the turn before the user's prompt is answered", async () => {
     reset();
     const sid = newSid(); const conv: ConvMessage[] = [];
