@@ -182,6 +182,10 @@ function formatEventBlock(e: EventContext): string {
   return `An external event triggered this automation.\nSource: ${e.source}\nEvent data:\n\`\`\`json\n${body}\n\`\`\``;
 }
 
+/** Prefix of every session id a scheduled run mints — the marker that a session belongs to the scheduler. */
+export const SCHEDULED_SESSION_PREFIX = 'sched-';
+export const isScheduledSession = (sessionId: string): boolean => sessionId.startsWith(SCHEDULED_SESSION_PREFIX);
+
 export async function runSchedule(
   schedule: Schedule,
   onEvent: (ev: object) => void,
@@ -192,7 +196,7 @@ export async function runSchedule(
 ): Promise<ScheduleRunSummary> {
   const now = Date.now();
   // Resume reuses the interrupted run's session (same convo) instead of spawning a new one.
-  const sessionId = resume ? resume.sessionId : `sched-${schedule.id}-${now}`;
+  const sessionId = resume ? resume.sessionId : `${SCHEDULED_SESSION_PREFIX}${schedule.id}-${now}`;
   const abortController = new AbortController();
   registerRun(sessionId, abortController);
 
@@ -326,6 +330,7 @@ export async function runSchedule(
           abortController,
           onPermissionRequest,
           foregroundBashCommand: allowedCmd ?? undefined,
+          scheduled: true,
         })) {
           onEvent({ type: 'session_stream', sessionId, event: ev });
           if (ev.type === 'text_delta') {

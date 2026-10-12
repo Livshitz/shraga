@@ -113,7 +113,7 @@ Prefer a programmatic `createShraga().registerFeature(...)` embed when you own t
   a private link ⇒ error telling the agent to attach the file instead (contract in
   [`src/server/offload.ts`](../../../src/server/offload.ts)), a PreToolUse Bash hook refuses ffmpeg video encodes (audio-only extraction, heredoc bodies, `--help` allowed) /
   remotion renders / starting mcp-video|mcp-audio, and agent env gets `SHRAGA_OFFLOAD=1`,
-  `SHRAGA_OFFLOAD_GATEWAY`, `SHRAGA_OFFLOAD_MAX_LOCAL_FILE_MB`. Unset = today's behavior. Agent settings (model/engine/turns/thinking) live in the agent config written
+  `SHRAGA_OFFLOAD_GATEWAY`, `SHRAGA_OFFLOAD_MAX_LOCAL_FILE_MB`. Unset = today's behavior. Agent settings (model/engine/turns/thinking, plus `scheduleModel` — the default for unattended scheduled runs) live in the agent config written
   through the API, not this file.
 - **MCPs** — global (via `shraga.config.ts` `mcps`) + per-user (UI-editable, under `data/`).
   Shorthand entries auto-resolve from `vendor/{name}`; full entries give explicit `command`/`args`/`env`.

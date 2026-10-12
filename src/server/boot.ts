@@ -31,6 +31,7 @@ import { setBroadcaster, emitToSession } from './session-bus.ts';
 import { TURN_CONTROL_EVENTS } from './turn-stream.ts';
 import * as scheduler from './scheduler/index.ts';
 import { initPolls } from './polls.ts';
+import { isScheduledSession } from './scheduler/runner.ts';
 import { initBackgroundJobs } from './background-jobs.ts';
 import { pushEnabled } from './push/push.ts';
 import { upsertToken, removeToken } from './push/store.ts';
@@ -1365,7 +1366,7 @@ initPolls({
       // NOTHING until it ended — and an add-on engine's subagent events were dropped outright — so a
       // turn that dispatched a worker was indistinguishable from one that only claimed to.
       return await consumeStream(
-        streamChat({ principal: fromInternal({ uid, email: userEmail, lane: 'wake' }), prompt, sessionId, uid, userEmail, mcpServers: getMcpConfig(uid), abortController, onPermissionRequest: async () => ({ allow: true }) }),
+        streamChat({ principal: fromInternal({ uid, email: userEmail, lane: 'wake' }), prompt, sessionId, uid, userEmail, mcpServers: getMcpConfig(uid), abortController, onPermissionRequest: async () => ({ allow: true }), scheduled: isScheduledSession(sessionId) }),
         undefined,
         {
           maxResultChars: STREAMED_RESULT_MAX,

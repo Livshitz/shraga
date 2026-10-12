@@ -11,6 +11,8 @@ import { ClaudeAccountSection } from './ClaudeAccountSection';
 
 interface AgentConfig {
   model?: string;
+  /** Default model for scheduled runs; unset = same as `model`. */
+  scheduleModel?: string;
   engine?: string;
   systemPrompt?: string;
   allowedTools?: string[];
@@ -176,6 +178,18 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
       )
     : null;
 
+  /** The model <option>s (grouped by provider when the engine has several). `skipDefault` drops the "" entry. */
+  const modelOptions = (skipDefault = false) => {
+    const opts = (list: EngineModel[]) => list.filter((m) => !skipDefault || m.value).map((m) => (
+      <option key={m.value} value={m.value}>{m.label}</option>
+    ));
+    return groupedModels
+      ? groupedModels.map(([provider, providerModels]) => (
+          <optgroup key={provider} label={provider.charAt(0).toUpperCase() + provider.slice(1)}>{opts(providerModels)}</optgroup>
+        ))
+      : opts(models);
+  };
+
   const selectClass = 'flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
 
   return (
@@ -237,20 +251,22 @@ export function ConfigPanel({ getToken, onSaved, trigger, sessionId, sessionDire
               onChange={(e) => setConfig((c) => ({ ...c, model: e.target.value || undefined }))}
               className={selectClass}
             >
-              {groupedModels ? (
-                groupedModels.map(([provider, providerModels]) => (
-                  <optgroup key={provider} label={provider.charAt(0).toUpperCase() + provider.slice(1)}>
-                    {providerModels.map((m) => (
-                      <option key={m.value} value={m.value}>{m.label}</option>
-                    ))}
-                  </optgroup>
-                ))
-              ) : (
-                models.map((m) => (
-                  <option key={m.value} value={m.value}>{m.label}</option>
-                ))
-              )}
+              {modelOptions()}
             </select>
+          </div>
+
+          <div>
+            <label className="text-sm font-medium mb-1.5 block">Scheduled tasks model</label>
+            <select
+              disabled={!canGlobal}
+              value={config.scheduleModel ?? ''}
+              onChange={(e) => setConfig((c) => ({ ...c, scheduleModel: e.target.value || undefined }))}
+              className={selectClass}
+            >
+              <option value="">Same as default model ({(sessionId && !applyGlobally ? globalRef.current.model : config.model) || DEFAULT_MODEL})</option>
+              {modelOptions(true)}
+            </select>
+            <p className="text-xs text-muted-foreground mt-1">Used by scheduled runs whose prompt has no <code>[model:…]</code> directive.</p>
           </div>
 
           {slots.settingsSections?.({ getToken, sessionId })}

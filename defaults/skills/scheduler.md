@@ -144,6 +144,8 @@ Schedule: { id, name, enabled, trigger, task, scope, createdBy, nextRun?, lastRu
 deployment-specific). Both are prepended to the prompt as a `[engine:…,model:…]` directive, so a
 prompt that opens with its OWN model group (`[opus] …`) would out-rank the pin — drop it from the
 prompt text when pinning. `job` tasks run a command, not an agent, so neither applies.
+An unpinned run uses agent-config `scheduleModel` ("Scheduled tasks model" in the Agent Config panel)
+when set, else the regular `model` — so interactive chats and unattended runs can default differently.
 
 ## Missed windows (`onMissed` / `missedRun`)
 
