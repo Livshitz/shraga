@@ -44,6 +44,8 @@ function isFullEntry(entry: McpEntry): entry is McpFullEntry {
 
 export interface AgentSettings {
   model?: string;
+  /** Model for scheduled (unattended) runs whose prompt names no `[model:…]`. Unset = `model`. */
+  scheduleModel?: string;
   engine?: string;
   systemPrompt?: string;
   allowedTools?: string[];

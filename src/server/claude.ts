@@ -207,6 +207,8 @@ export interface StreamChatOpts {
    * where an add-on's contributor reads its own keys. */
   turnHints?: Record<string, unknown>;
   context?: Record<string, string>;
+  /** Unattended scheduled run: `config.scheduleModel` (when set) replaces `config.model` as the default. */
+  scheduled?: boolean;
 }
 
 /** Run one agent turn. Security wrapper: resolves the principal's role/profile and audits turn.start / turn.end.
@@ -285,8 +287,16 @@ export async function taintSession(sessionId: string, principal: Principal | (()
   return lowerSessionFloor(sessionId, resolvePrincipal(sec.policy, p).rank);
 }
 
-async function* runTurn(opts: StreamChatOpts, guard?: TurnGuard): AsyncGenerator<WsEvent> {
+/** The agent config a turn runs under. A scheduled run swaps in `scheduleModel` as its default model —
+ *  at the config layer, so every engine's `directives.model || config.model` picks it up and an
+ *  explicit `[model:…]` directive still wins. */
+export function effectiveAgentConfig(opts: Pick<StreamChatOpts, 'scheduled'>): AgentConfig {
   const config = getAgentConfig();
+  return opts.scheduled && config.scheduleModel ? { ...config, model: config.scheduleModel } : config;
+}
+
+async function* runTurn(opts: StreamChatOpts, guard?: TurnGuard): AsyncGenerator<WsEvent> {
+  const config = effectiveAgentConfig(opts);
   const { prompt: cleanPrompt, directives: parsed, unresolvedModel } = parseDirectives(opts.prompt);
 
   // An explicit model selection that resolves to nothing is a HARD stop, for the same reason an

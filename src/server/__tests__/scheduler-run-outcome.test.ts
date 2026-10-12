@@ -13,6 +13,7 @@ let script: StreamEvent[] = [];
 /** What the "agent" writes to its outcome file during the turn (see scheduler/outcome.ts). */
 let declareDuringTurn: unknown = null;
 let lastPrompt = '';
+let lastScheduled: boolean | undefined;
 
 // See scheduler-bash-exit.test.ts for why this stub has to delegate to the real module: mock.module
 // is process-global and has no per-file teardown.
@@ -23,6 +24,7 @@ mock.module('../claude.ts', () => ({
   async *streamChat(opts: Parameters<typeof realClaude.streamChat>[0]) {
     if (!stubActive) { yield* realClaude.streamChat(opts); return; }
     lastPrompt = opts.prompt;
+    lastScheduled = opts.scheduled;
     if (declareDuringTurn !== null) writeOutcome(opts.sessionId!, declareDuringTurn as any);
     for (const ev of script) yield ev;
   },
@@ -88,6 +90,12 @@ describe('scheduled run outcome declaration', () => {
     await runSchedule(makeSchedule(), () => {}, (s) => { sid = s; });
     expect(lastPrompt).toContain(outcomeFile(sid));
     expect(lastPrompt).toContain('"status":"pending"');
+  });
+
+  // Marks the turn unattended, so agent-config `scheduleModel` applies (claude.ts effectiveAgentConfig).
+  test('the run is marked scheduled', async () => {
+    await run(null);
+    expect(lastScheduled).toBe(true);
   });
 
   // The incident: a chatty, upbeat turn that delivered nothing must not be recorded as success.

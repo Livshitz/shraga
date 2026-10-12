@@ -61,6 +61,7 @@ Persistent settings that apply to all messages until changed:
 | Setting | Options | Default |
 |---------|---------|---------|
 | Model | Fable 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5, Sonnet 4.6, Haiku 4.5 | Sonnet 5 |
+| Scheduled tasks model (`scheduleModel`) | Same list, or same as Model | Same as Model — used by scheduled runs whose prompt has no `[model:…]` |
 | Permission Mode | Accept Edits, Plan, Bypass All | Accept Edits |
 | Max Turns | 1–200 | 50 |
 | Thinking | Adaptive, Enabled, Disabled | Off |

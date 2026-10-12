@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import cronstrue from 'cronstrue';
 import type { Schedule, Trigger, Task } from '@/lib/schedule-types';
 import { Button } from '../ui/button';
@@ -7,6 +7,7 @@ import { Textarea } from '../ui/textarea';
 import { AutocompleteTextarea } from '../AutocompleteTextarea';
 import { useEngines } from '@/hooks/useEngines';
 import { readRuntimeDirective, writeRuntimeDirective } from '@/lib/prompt-directives';
+import { DEFAULT_MODEL } from '../../../shared/models';
 
 interface Props {
   getToken: () => Promise<string | null>;
@@ -72,6 +73,15 @@ function MatchEditor({ match, onChange }: { match: Record<string, string>; onCha
  *  drift out of sync with the prompt the way a shadow `task.model` did. */
 function RuntimePicker({ prompt, onChange, getToken }: { prompt: string; onChange: (p: string) => void; getToken: () => Promise<string | null> }) {
   const { engines } = useEngines(getToken);
+  // The model an unpinned scheduled run actually uses: scheduleModel > model > built-in default.
+  const [defaultModel, setDefaultModel] = useState<string>();
+  useEffect(() => {
+    let alive = true;
+    getToken().then((token) => (token ? fetch('/api/config', { headers: { Authorization: `Bearer ${token}` } }).then((r) => r.json()) : null))
+      .then((c) => { if (alive && c) setDefaultModel(c.scheduleModel || c.model || DEFAULT_MODEL); })
+      .catch((e) => console.warn('[schedules] agent config load failed', e));
+    return () => { alive = false; };
+  }, [getToken]);
   // Until the registry has loaded we cannot tell a bare model token from prose, so a rewrite could
   // leave a stale duplicate pin behind. Read-only until then.
   const ready = engines.length > 0;
@@ -111,7 +121,7 @@ function RuntimePicker({ prompt, onChange, getToken }: { prompt: string; onChang
         {engines.map((e) => <option key={e.name} value={e.name}>{e.name}</option>)}
       </select>
       <select className={selectClass} disabled={!ready} value={sel.model ?? ''} onChange={(e) => set({ model: e.target.value || undefined })}>
-        <option value="">Default model (agent config)</option>
+        <option value="">Default model ({(!sel.engineExplicit && defaultModel) || 'agent config'})</option>
         {!modelListed && <option value={sel.model}>{sel.model} — not offered by this engine</option>}
         {options.map(({ engine, models }) => (
           <optgroup key={engine} label={engine}>
