@@ -538,11 +538,13 @@ export class ClaudeCodeEngine implements AgentEngine {
     // where the profile grants Bash — job_start is arbitrary shell — and only for a real session id
     // (wake reports need a session to land in).
     if (durableJobs) {
-      // The job store scrubs `*_API_KEY` from children, so a nested agent (the social legs' agentx worker)
-      // died "No provider key found" (2026-09-24). Hand back the provider keys THIS turn's own env already
-      // carries (profile-filtered by buildAgentEnv) — the same set the agentx engine gives its jobs.
-      const providerEnv = Object.fromEntries(Object.entries(sdkEnv).filter(([k, v]) => /_API_KEY$/.test(k) && v));
-      const server = jobsMcpServer({ sessionId: opts.sessionId!, uid: opts.uid, userEmail: opts.userEmail, cwd, env: providerEnv });
+      // The job store scrubs credentials from children, but here the turn's own Bash already sees this
+      // env (profile-filtered by buildAgentEnv). Scrubbing it made job_start strictly weaker than Bash, and
+      // the hook steers long scripts INTO job_start: a nested agent died "No provider key found" (2026-09-24),
+      // AGF Post-Daily lost MIXPANEL_API_SECRET_AGF/GOOGLE_SERVICE_ACCOUNT (2026-10-20). Hand the job the
+      // turn's env, minus PORT (the server's own; a job honouring it would shadow us).
+      const jobEnv = Object.fromEntries(Object.entries(sdkEnv).filter(([k, v]) => v && k !== 'PORT'));
+      const server = jobsMcpServer({ sessionId: opts.sessionId!, uid: opts.uid, userEmail: opts.userEmail, cwd, env: jobEnv });
       options['mcpServers'] = { ...(options['mcpServers'] as object | undefined), [server.name]: server };
       options['allowedTools'] = [...((options['allowedTools'] as string[] | undefined) ?? allowedTools), ...JOBS_TOOL_IDS];
     }
