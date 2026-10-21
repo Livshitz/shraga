@@ -313,6 +313,11 @@ async function* runTurn(opts: StreamChatOpts, guard?: TurnGuard): AsyncGenerator
 
   const sessionMeta = opts.sessionId ? getSession(opts.sessionId) : undefined;
   const directives: Directives = { ...sessionMeta?.directives, ...parsed };
+  // A two-model mode (delegate/advisor) is sticky like the model: `[off]` clears it, and a new mode
+  // replaces the other one. `modeOff` is a command, not a setting — never stored.
+  if (parsed.modeOff || parsed.advisor) delete directives.delegate;
+  if (parsed.modeOff || parsed.delegate) delete directives.advisor;
+  delete directives.modeOff;
   // Persist ONLY what was explicitly chosen (inline directives, or the Agent Config panel's
   // per-conversation save). Gaps stay gaps: every engine resolves `directives.x ?? config.x` at
   // send time, so the global agent-config keeps applying live to sessions nobody pinned —
