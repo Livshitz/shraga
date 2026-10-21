@@ -6,6 +6,12 @@ export interface Directives {
   engine?: string;
   /** claude-code SDK session resume for this conversation (overrides agent-config `sdkResume`). */
   resume?: boolean;
+  /** agentx DELEGATE mode `[planner->worker]` (key `delegate`): the worker model; `model` (left side) plans. */
+  delegate?: string;
+  /** agentx ADVISOR mode `[worker<-advisor]` (key `advisor`): the advisor model; `model` (left side) works. */
+  advisor?: string;
+  /** `[off]` / `[mode:off]`: clears a sticky delegate/advisor mode. Consumed by streamChat, never stored. */
+  modeOff?: boolean;
 }
 
 export interface ParsedPrompt {
@@ -28,7 +34,15 @@ import { MODEL_ALIASES } from './model-aliases.ts';
 
 const DIRECTIVE_RE = /^\s*\[([^\]]*)\]\s*([\s\S]*)/;
 
-const DIRECTIVE_KEYS = ['model', 'turns', 'thinking', 'think', 'effort', 'engine', 'resume'];
+const DIRECTIVE_KEYS = ['model', 'turns', 'thinking', 'think', 'effort', 'engine', 'resume', 'delegate', 'advisor', 'mode'];
+
+/** `a->b` (delegate) / `a<-b` (advisor) — agentx's two-model mode grammar; the left side may be empty. */
+function splitModePair(token: string): { left: string; op: '->' | '<-'; right: string } | null {
+  const i = token.search(/->|<-/);
+  if (i === -1) return null;
+  const right = token.slice(i + 2).trim();
+  return right ? { left: token.slice(0, i).trim(), op: token.slice(i, i + 2) as '->' | '<-', right } : null;
+}
 
 /** MODEL_ALIASES only covers the bare Anthropic shorthands. A `provider/model` id
  *  (`cursor/composer-2.5`, `openai/gpt-5.6`) is already concrete — gating it on the alias table
@@ -72,6 +86,9 @@ export function isDirectiveGroup(raw: string): boolean {
     const colonIdx = t.indexOf(':');
     if (colonIdx !== -1) return DIRECTIVE_KEYS.includes(t.slice(0, colonIdx).trim().toLowerCase());
     const v = t.toLowerCase();
+    const pair = splitModePair(v);
+    if (pair) return (!pair.left || !!resolveModelAlias(pair.left)) && !!resolveModelAlias(pair.right);
+    if (v === 'off') return true;
     return !!MODEL_ALIASES[v] || !!modelResolver?.(v) || /^\d+$/.test(v) || ['think', 'adaptive', 'nothink', 'nothinking'].includes(v);
   });
 }
@@ -132,6 +149,17 @@ export function parseDirectives(text: string): ParsedPrompt {
       unresolvedModel = applyDirective(directives, key, val) ?? unresolvedModel;
     } else {
       const val = t.toLowerCase();
+      const pair = splitModePair(val);
+      if (pair) {
+        // Both sides must resolve: a half-resolved pair would silently run a mode on the wrong model.
+        const worker = resolveModelAlias(pair.right);
+        if (worker && (!pair.left || resolveModelToken(directives, pair.left))) {
+          if (pair.op === '->') directives.delegate = worker.model; else directives.advisor = worker.model;
+        } else unresolvedModel ??= t;
+        positionalIndex++;
+        continue;
+      }
+      if (val === 'off') { directives.modeOff = true; positionalIndex++; continue; }
       if (positionalIndex === 0 && resolveModelToken(directives, val)) {
         // handled
       } else if (positionalIndex <= 1 && /^\d+$/.test(val)) {
@@ -178,6 +206,18 @@ function applyDirective(d: Directives, key: string, val: string): string | undef
       break;
     case 'engine':
       d.engine = val;
+      break;
+    case 'delegate':
+    case 'advisor': {
+      const hit = resolveModelAlias(val);
+      if (hit) d[key] = hit.model;
+      else if (isQualifiedModel(val)) d[key] = val;
+      else return val;
+      break;
+    }
+    case 'mode':
+      if (val === 'off') d.modeOff = true;
+      else console.warn(`[directives] Invalid mode value: "${val}"`);
       break;
     case 'resume':
       if (['on', 'true', '1'].includes(val)) d.resume = true;
