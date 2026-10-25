@@ -352,6 +352,12 @@ export class ClaudeCodeEngine implements AgentEngine {
     if (opts.userEmail) sdkEnv.SHRAGA_USER_EMAIL = sdkEnv.UNCLAW_USER_EMAIL = opts.userEmail;
     sdkEnv.SHRAGA_SESSION_ID = sdkEnv.UNCLAW_SESSION_ID = opts.sessionId ?? '';
     Object.assign(sdkEnv, offloadEnv());
+    // No CLAUDE.md, ever. settingSources:['project'] does NOT stop it: CC walks UP from cwd and loads
+    // every ancestor's CLAUDE.md / .claude/CLAUDE.md as a "Project" file — with the app under $HOME
+    // that is the host's ~/.claude/CLAUDE.md (an operator's personal dev rules: "plan first, let me
+    // review"), which made the agent and its sub-agents stop for approval (feedox, 2026-10-25). The
+    // agent's instructions are ours (system prompt + DATA_DIR/skills); a repo CLAUDE.md is dev docs.
+    sdkEnv.CLAUDE_CODE_DISABLE_CLAUDE_MDS = '1';
     // Per-command wall-clock cap for the SDK's Bash tool. Without it a single unbounded command
     // (e.g. `curl` with no `-m` against an SSE endpoint that streams nothing) eats the whole turn and
     // the agent answers with "reads were interrupted". The model still sees `[exit 124]` + partial
