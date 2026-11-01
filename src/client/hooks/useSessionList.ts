@@ -99,11 +99,11 @@ export function useSessionList({ getToken, filter, refreshKey, hydrateIds }: Opt
     acRef.current = ac;
     setLoading(true);
     // Hydrated rows are re-read too: `extras` is fetch-time data (title, lastModified, runStatus)
-    // and without this a by-id row keeps its first snapshot for the life of the page. Cleared HERE,
-    // synchronously at commit, not in the fetch's .then() — doing it on resolve lost the mount race
-    // against the by-id hydration and left the deep-linked active session with no row at all.
+    // and without this a by-id row keeps its first snapshot for the life of the page. Only the
+    // request ledger is reset; the rows stay until the re-read REPLACES them. Wiping `extras` here
+    // blanked the active row (rendered on top) on every global broadcast — the "top convo appears
+    // and disappears" flicker.
     requestedRef.current.clear();
-    setExtras({});
     fetchWindow(depthRef.current, filter, ac.signal)
       .then((page) => {
         if (!page || ac.signal.aborted) return;
@@ -148,7 +148,10 @@ export function useSessionList({ getToken, filter, refreshKey, hydrateIds }: Opt
   // server never returns (e.g. a deleted session still in the unread map).
   const hydrateKey = hydrateIds.join(',');
   useEffect(() => {
-    const want = hydrateIds.filter((id) => !!id && !byId.has(id) && !requestedRef.current.has(id)).slice(0, 200);
+    // Checked against the loaded WINDOW, not `byId`: a row already in `extras` must still be re-read
+    // after a refresh reset the ledger — it is just never blanked while that happens.
+    const inWindow = new Set(sessions.map((s) => s.sessionId));
+    const want = hydrateIds.filter((id) => !!id && !inWindow.has(id) && !requestedRef.current.has(id)).slice(0, 200);
     if (!want.length) return;
     for (const id of want) requestedRef.current.add(id);
     let cancelled = false;
@@ -163,7 +166,7 @@ export function useSessionList({ getToken, filter, refreshKey, hydrateIds }: Opt
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [hydrateKey, byId, fetchSessions]);
+  }, [hydrateKey, sessions, fetchSessions]);
 
   return { sessions, cursor, loading, byId, loadMore };
 }
