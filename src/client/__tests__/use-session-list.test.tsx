@@ -74,6 +74,8 @@ const getToken = async () => 'tok';
 /** Probe component: exposes the hook's state and lets the test change its inputs. */
 let ctl: { setFilter: (f: 'mine' | 'all') => void; bump: () => void; setIds: (ids: string[]) => void };
 let snap: ReturnType<typeof useSessionList>;
+/** Every committed render's byId — a row that blinks out for one frame shows up here. */
+let renders: Map<string, SessionRow>[] = [];
 
 function Probe() {
   const [filter, setFilter] = useState<'mine' | 'all'>('all');
@@ -81,6 +83,7 @@ function Probe() {
   const [ids, setIds] = useState<string[]>([]);
   ctl = { setFilter, bump: () => setRefreshKey((k) => k + 1), setIds };
   snap = useSessionList({ getToken, filter, refreshKey, hydrateIds: ids });
+  renders.push(snap.byId);
   return null;
 }
 
@@ -156,6 +159,19 @@ describe('useSessionList', () => {
     hydrateGen = 2;
     await act(async () => ctl.bump()); await flush();
     expect(snap.byId.get(far)?.title).toBe('t400#2'); // refreshed, not the first snapshot
+  });
+
+  it('D6 — a hydrated row never drops out while a refresh is in flight (active-row flicker)', async () => {
+    const far = ALL[400].sessionId; // the open chat, outside the window — rendered at the top
+    hydrateGen = 1;
+    await act(async () => ctl.setIds([far])); await flush();
+    expect(snap.byId.has(far)).toBe(true);
+
+    renders = [];
+    hydrateGen = 2;
+    await act(async () => ctl.bump()); await flush(); // what every session_messages_changed does
+    expect(renders.every((m) => m.has(far))).toBe(true); // present in EVERY render, no blink
+    expect(snap.byId.get(far)?.title).toBe('t400#2'); // and still refreshed in place
   });
 
   it('D5 — a paged row still wins over a hydrated one', async () => {
