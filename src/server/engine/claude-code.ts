@@ -864,19 +864,20 @@ export class ClaudeCodeEngine implements AgentEngine {
                   }
                 } catch (err) { console.warn('[claude] Failed to track proactive message:', (err as Error).message); }
               }
-              if (pending?.tool === 'mcp__mcp-slack-use__post_slack_poll') {
+              if (pending?.tool === 'mcp__mcp-slack-use__post_slack_poll' || pending?.tool === 'mcp__mcp-slack-use__post_slack_card') {
                 try {
                   const parsed = typeof output === 'string' ? JSON.parse(output) : output;
                   const body = ((pending.input as any)?.body ?? {}) as Record<string, any>;
                   const sid = opts.sessionId || lastSessionId;
                   if (parsed?.ok && parsed.pollId && parsed.ts && parsed.channel && sid) {
                     registerPoll({
-                      pollId: parsed.pollId, channel: parsed.channel, ts: parsed.ts, title: String(body.title ?? ''),
+                      pollId: parsed.pollId, channel: parsed.channel, ts: parsed.ts, title: String(parsed.title ?? body.title ?? ''),
                       options: parsed.options ?? body.options ?? [], kind: parsed.kind ?? 'poll',
                       multi: parsed.multi, targetUser: parsed.targetUser,
                       deadlineMinutes: typeof body.deadline_minutes === 'number' ? body.deadline_minutes : undefined,
                       quorum: typeof body.quorum === 'number' ? body.quorum : undefined,
                       sessionId: sid, uid: opts.uid, userEmail: opts.userEmail,
+                      cardBlocks: Array.isArray(parsed.blocks) ? parsed.blocks : undefined,
                     });
                   }
                 } catch (err) { console.warn('[claude] Failed to register poll:', (err as Error).message); }

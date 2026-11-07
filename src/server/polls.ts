@@ -17,6 +17,7 @@ export interface PollRecord extends PollSpec {
   channel: string;
   ts: string;
   useUserToken?: boolean;
+  cardBlocks?: unknown[]; // a post_slack_card card: keep its content, swap only its buttons on close
   votes: Record<string, number[]>; // userId -> chosen option indices
   status: 'open' | 'closed';
   deadlineAt?: number;
@@ -71,8 +72,18 @@ function tallies(p: PollRecord): number[] {
 }
 const voterCount = (p: PollRecord): number => Object.keys(p.votes).length;
 
+/** A card keeps its content; on close its action rows become one line naming the choice. */
+export function closedCardBlocks(p: PollRecord): unknown[] {
+  const [userId, idxs] = Object.entries(p.votes)[0] ?? [];
+  const choice = userId && idxs ? `✅ <@${userId}> chose *${p.options[idxs[0]]?.label ?? '?'}*` : '🔒 Closed without an answer';
+  const kept = (p.cardBlocks ?? []).filter((b: any) => b?.type !== 'actions');
+  return [...kept, { type: 'context', elements: [{ type: 'mrkdwn', text: choice }] }];
+}
+
 async function rerender(p: PollRecord, closed = false): Promise<void> {
-  await slackPost('chat.update', { channel: p.channel, ts: p.ts, text: p.title, blocks: buildPollBlocks(toSpec(p), tallies(p), voterCount(p), closed) }, p.useUserToken)
+  if (p.cardBlocks && !closed) return; // a card has no live tally to refresh
+  const blocks = p.cardBlocks ? closedCardBlocks(p) : buildPollBlocks(toSpec(p), tallies(p), voterCount(p), closed);
+  await slackPost('chat.update', { channel: p.channel, ts: p.ts, text: p.title, blocks }, p.useUserToken)
     .catch((e) => console.error(`${PREFIX} rerender failed:`, (e as Error)?.message));
 }
 
@@ -81,14 +92,14 @@ export interface RegisterPollInput {
   pollId: string; channel: string; ts: string; title: string;
   options: { label: string; description?: string }[];
   kind: 'poll' | 'question'; multi?: boolean; targetUser?: string;
-  deadlineMinutes?: number; quorum?: number; useUserToken?: boolean;
+  deadlineMinutes?: number; quorum?: number; useUserToken?: boolean; cardBlocks?: unknown[];
   sessionId: string; uid: string; userEmail?: string;
 }
 
 export function registerPoll(i: RegisterPollInput): void {
   const p: PollRecord = {
     pollId: i.pollId, title: i.title, options: i.options, kind: i.kind, multi: i.multi, targetUser: i.targetUser,
-    channel: i.channel, ts: i.ts, useUserToken: i.useUserToken,
+    channel: i.channel, ts: i.ts, useUserToken: i.useUserToken, cardBlocks: i.cardBlocks,
     votes: {}, status: 'open', createdAt: Date.now(),
     deadlineAt: i.deadlineMinutes ? Date.now() + i.deadlineMinutes * 60_000 : undefined,
     quorum: i.quorum, sessionId: i.sessionId, uid: i.uid, userEmail: i.userEmail,
