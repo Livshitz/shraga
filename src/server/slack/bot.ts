@@ -264,7 +264,7 @@ export async function* runAgentTurn(msg: IngressMessage): AsyncGenerator<AgentEv
   const replyCtx = `Slack channel: ${channel}, thread_ts: ${threadTs}`;
   appendMessage(sessionId, {
     id: crypto.randomUUID(), role: 'user',
-    blocks: [{ type: 'context', label: 'Slack reply coordinates', text: `${replyCtx}\nYour text responses are AUTOMATICALLY streamed to this Slack conversation — do NOT use post_slack_message to reply. Only use post_slack_files (with these coordinates) to share files/images, or post_slack_message to post in a DIFFERENT channel.` }],
+    blocks: [{ type: 'context', label: 'Slack reply coordinates', text: `${replyCtx}\nYour text responses are AUTOMATICALLY streamed to this Slack conversation — do NOT use post_slack_message to reply. Only use post_slack_files (with these coordinates) to share files/images, post_slack_card (with these coordinates) when the answer is a table/fields/chart or needs a button click, or post_slack_message to post in a DIFFERENT channel.` }],
     channel: 'slack',
   });
 
