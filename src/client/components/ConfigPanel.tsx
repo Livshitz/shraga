@@ -6,7 +6,7 @@ import { Textarea } from './ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogBody, DialogFooter } from './ui/dialog';
 import { useSlots } from '@/lib/slots';
 import { useEngines, type EngineModel } from '@/hooks/useEngines';
-import { DEFAULT_MODEL } from '../../shared/models';
+import { DEFAULT_MODEL, claudeCodeModels } from '../../shared/models';
 import { ClaudeAccountSection } from './ClaudeAccountSection';
 
 interface AgentConfig {
@@ -24,19 +24,7 @@ interface AgentConfig {
   allowUntrustedReplies?: boolean;
 }
 
-const FALLBACK_MODELS: EngineModel[] = [
-  { value: '', label: `Default (${DEFAULT_MODEL})` },
-  { value: 'claude-fable-5-1', label: 'Fable 5.1 — frontier, most capable' },
-  { value: 'claude-fable-5', label: 'Fable 5' },
-  { value: 'claude-opus-5-5', label: 'Opus 5.5 — most capable, best for complex/agentic tasks' },
-  { value: 'claude-opus-5', label: 'Opus 5' },
-  { value: 'claude-opus-4-8', label: 'Opus 4.8' },
-  { value: 'claude-opus-4-7', label: 'Opus 4.7' },
-  { value: 'claude-opus-4-6', label: 'Opus 4.6' },
-  { value: 'claude-sonnet-5', label: 'Sonnet 5 — balanced speed & intelligence' },
-  { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
-  { value: 'claude-haiku-4-5', label: 'Haiku 4.5 — fastest' },
-];
+const FALLBACK_MODELS: EngineModel[] = claudeCodeModels();
 
 const PERMISSION_MODES = [
   { value: 'acceptEdits', label: 'Accept Edits (auto-approve file changes)' },

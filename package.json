@@ -63,6 +63,7 @@
     "@radix-ui/react-scroll-area": "^1.2.2",
     "@radix-ui/react-slot": "^1.1.1",
     "@tailwindcss/typography": "^0.5.19",
+    "ai.libx.js": "^0.18.92",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cron-parser": "^5.5.0",

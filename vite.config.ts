@@ -22,9 +22,13 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src/client'),
     },
   },
+  // ai.libx.js (the model catalog) ships CommonJS. When it is symlinked to a sibling repo it sits OUTSIDE
+  // node_modules, where vite's CommonJS handling does not apply by default — include it by name.
+  optimizeDeps: { include: ['ai.libx.js/models'] },
   build: {
     outDir: 'dist/client',
     emptyOutDir: true,
+    commonjsOptions: { include: [/ai\.libx\.js/, /node_modules/] },
   },
   server: {
     host: true,

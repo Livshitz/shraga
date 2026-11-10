@@ -16,6 +16,7 @@ import {
   type TurnPath, type ClaudeResumeState,
 } from './claude-resume.ts';
 import { DEFAULT_MODEL } from '../directives.ts';
+import { claudeCodeModels } from '../../shared/models';
 import { resolveModelSwitch, MODEL_ALIASES } from '../model-aliases.ts';
 import type { WsEvent, AskQuestion, QuestionAnswers, QuestionHandler } from '../claude.ts';
 import type { AgentEngine, EngineStreamOpts, EngineModel } from './types.ts';
@@ -252,19 +253,7 @@ export class ClaudeCodeEngine implements AgentEngine {
   readonly enforcesProfile = true;
 
   getModels(): EngineModel[] {
-    return [
-      { value: '', label: `Default (${DEFAULT_MODEL})` },
-      { value: 'claude-fable-5-1', label: 'Fable 5.1 — frontier, most capable' },
-      { value: 'claude-fable-5', label: 'Fable 5' },
-      { value: 'claude-opus-5-5', label: 'Opus 5.5 — most capable' },
-      { value: 'claude-opus-5', label: 'Opus 5' },
-      { value: 'claude-opus-4-8', label: 'Opus 4.8' },
-      { value: 'claude-opus-4-7', label: 'Opus 4.7' },
-      { value: 'claude-opus-4-6', label: 'Opus 4.6' },
-      { value: 'claude-sonnet-5', label: 'Sonnet 5 — balanced' },
-      { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
-      { value: 'claude-haiku-4-5', label: 'Haiku 4.5 — fastest' },
-    ];
+    return claudeCodeModels();
   }
 
   /** How long a resume-enabled turn waits for an earlier CLI process on the session to exit before going fresh. */

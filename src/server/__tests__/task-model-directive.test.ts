@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach } from 'bun:test';
-import { parseDirectives, setModelResolver } from '../directives.ts';
+import { parseDirectives, setModelResolver, MODEL_ALIASES } from '../directives.ts';
 
 // These assert the NO-resolver behaviour (a bare `composer-2.5` is unresolvable, so the token is
 // reported instead of silently becoming a model). The resolver is a module global that any other
@@ -14,12 +14,12 @@ beforeEach(() => setModelResolver(null));
 describe('schedule prompt [model] directive', () => {
   test('alias prefix resolves and is stripped from the prompt', () => {
     const { prompt, directives } = parseDirectives('[haiku] Dispatcher tick: do the thing.');
-    expect(directives.model).toBe('claude-haiku-4-5-20251001');
+    expect(directives.model).toBe(MODEL_ALIASES.haiku);
     expect(prompt).toBe('Dispatcher tick: do the thing.');
   });
   test('prefix survives multi-line prompts with appended sections', () => {
     const { directives } = parseDirectives('[haiku] Base prompt.\n\n---\nAdditional instructions for this run:\nmore');
-    expect(directives.model).toBe('claude-haiku-4-5-20251001');
+    expect(directives.model).toBe(MODEL_ALIASES.haiku);
   });
   test('engine + provider-qualified model (the runner prefix shape) both resolve', () => {
     const { prompt, directives } = parseDirectives('[engine:ext-agent,model:cursor/composer-2.5] Do the thing.');
