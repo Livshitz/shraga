@@ -1,27 +1,15 @@
 /**
- * Model aliasing + mid-conversation switch resolution — pure, dependency-free.
+ * Model aliasing + mid-conversation switch resolution — pure; aliases come from ai.libx.js's catalog.
  *
  * The shared mechanism every model consumer in Shraga uses to resolve `[opus]`-style aliases,
  * gate by an allow-list, and announce a switch identically. Policy (which models a caller may
  * use) and session state (the prior model) stay with the consumer; this module is the mechanism.
  */
+import { claudeModelAliases } from 'ai.libx.js/models';
 
-/** Canonical short aliases → concrete Anthropic model ids. */
-export const MODEL_ALIASES: Record<string, string> = {
-  fable: 'claude-fable-5-1',
-  'fable-5-1': 'claude-fable-5-1',
-  'fable-5': 'claude-fable-5',
-  opus: 'claude-opus-5-5',
-  'opus-5-5': 'claude-opus-5-5',
-  'opus-5': 'claude-opus-5',
-  'opus-4-8': 'claude-opus-4-8',
-  'opus-4-7': 'claude-opus-4-7',
-  'opus-4-6': 'claude-opus-4-6',
-  sonnet: 'claude-sonnet-5',
-  'sonnet-5': 'claude-sonnet-5',
-  'sonnet-4-6': 'claude-sonnet-4-6',
-  haiku: 'claude-haiku-4-5-20251001',
-};
+/** Canonical short aliases → concrete Anthropic model ids — DERIVED from ai.libx.js's catalog (newest entry per
+ *  family, plus versioned `opus-5`-style aliases). Never hand-pin an id here: a new model = an ai.libx.js bump. */
+export const MODEL_ALIASES: Record<string, string> = { ...claudeModelAliases };
 
 /** Resolve an alias to a concrete id. A provider prefix ("anthropic/") is preserved; unknown ids pass through. */
 export function resolveModelAlias(input: string): string {

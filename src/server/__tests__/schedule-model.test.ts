@@ -1,5 +1,6 @@
 import { describe, test, expect, afterAll } from 'bun:test';
 import { fromInternal } from '../security/principal.ts';
+import { MODEL_ALIASES } from '../model-aliases.ts';
 
 /**
  * `scheduleModel`: unattended scheduled turns default to it instead of `model`, through the REAL
@@ -50,7 +51,7 @@ describe('scheduleModel', () => {
 
   test('an explicit [model:…] directive in the scheduled prompt still wins', async () => {
     saveAgentConfig({ ...before, engine: 'schedule-model-probe', model: 'claude-opus-5-5', scheduleModel: 'claude-sonnet-5' });
-    expect(await modelFor('[haiku] do the routine', true)).toBe('claude-haiku-4-5-20251001');
+    expect(await modelFor('[haiku] do the routine', true)).toBe(MODEL_ALIASES.haiku);
   });
 
   test('unset scheduleModel = unchanged behaviour (falls back to model)', async () => {

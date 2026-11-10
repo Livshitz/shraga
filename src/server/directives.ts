@@ -27,7 +27,7 @@ export interface ParsedPrompt {
 // The default model lives in src/shared/models.ts so the client header names the same one.
 export { DEFAULT_MODEL } from '../shared/models';
 
-// Canonical model aliases + label. Vendored, pure, dependency-free (src/server/model-aliases.ts).
+// Canonical model aliases + label (src/server/model-aliases.ts — derived from ai.libx.js's catalog).
 // Re-exported here so the rest of shraga keeps importing model helpers from one place.
 export { MODEL_ALIASES, modelShortLabel } from './model-aliases.ts';
 import { MODEL_ALIASES } from './model-aliases.ts';
