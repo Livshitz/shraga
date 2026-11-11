@@ -1102,7 +1102,7 @@ export class DataSync {
     'gmail-thread-sessions.json', 'slack/', 'slack-*.json',
     'uploads/', 'repos/', '.tmp/', 'schedules.json.bak', 'git-log.json',
     '.internal-token', 'comms-log.jsonl', 'sessions/', 'unread/', '.DS_Store',
-    'scheduler/', '.mcp-catalog.json',
+    'scheduler/', '.mcp-catalog.json', '.mcp-pool-cache.json',
     'api-keys.json.bak', // pre-hashing plaintext keys (api-keys.ts migration) — never commit
     'workspace/users/*/.claude/', // per-user Claude logins (claude-account.ts) — credentials, never commit
     // Live security state of the ACTIVE instance, which is its single writer — a pull must never overwrite it:
