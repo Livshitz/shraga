@@ -410,7 +410,7 @@ export class ClaudeCodeEngine implements AgentEngine {
       agents: loadAgents(),
       // Enforced: the profile gate runs FIRST on every tool call — hooks fire even for auto-approved `allowedTools`,
       // which never reach canUseTool.
-      hooks: ((h) => (guard ? { ...h, PreToolUse: [{ hooks: [guard.hook()] }, ...(h.PreToolUse ?? [])] } : h))(buildHooks({ exemptBashCommand: opts.foregroundBashCommand, durableJobs })),
+      hooks: ((h) => (guard ? { ...h, PreToolUse: [{ hooks: [guard.hook()] }, ...(h.PreToolUse ?? [])] } : h))(buildHooks({ exemptBashCommand: opts.foregroundBashCommand, durableJobs, headless: opts.headless })),
     };
 
     const userHandler = opts.onPermissionRequest;

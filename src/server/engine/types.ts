@@ -30,6 +30,8 @@ export interface EngineStreamOpts {
   /** The single command this turn was spawned to run in the foreground (a `bash` schedule).
    *  Exempted from the long-running-script background guard — see server/hooks.ts. */
   foregroundBashCommand?: string;
+  /** No human attached (scheduled/event run): the turn's end is the run's end. See server/hooks.ts. */
+  headless?: boolean;
   /** Opaque per-send hints bag, forwarded verbatim from the client. The core interprets no key of it;
    *  an add-on engine reads its own keys (e.g. a duplex engine's `voice` marker). */
   turnHints?: Record<string, unknown>;

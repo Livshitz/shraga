@@ -512,6 +512,7 @@ async function* runTurn(opts: StreamChatOpts, guard?: TurnGuard): AsyncGenerator
     onDestructiveApproval: opts.onDestructiveApproval,
     onUserQuestion: opts.onUserQuestion,
     foregroundBashCommand: opts.foregroundBashCommand,
+    headless: !!opts.scheduled,
     turnHints: opts.turnHints,
     conversationReset: opts.conversationReset,
     context: opts.context,
