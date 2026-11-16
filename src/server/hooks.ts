@@ -79,6 +79,26 @@ const denyNativeBackground: HookCallback = async (input) => {
 };
 
 /**
+ * Headless runs (scheduled / event-triggered) end when the turn ends and nothing wakes them for a
+ * background subagent's completion. A run that spawns background agents and then "waits" for them
+ * stalls until its outcome deadline. Force subagents to the foreground so the turn waits for them.
+ */
+const foregroundSubagents: HookCallback = async (input) => {
+  if (input.hook_event_name !== 'PreToolUse') return {};
+  const { tool_name, tool_input } = input as PreToolUseHookInput;
+  if (tool_name !== 'Agent' && tool_name !== 'Task') return {};
+  const ti = tool_input as Record<string, unknown>;
+  if (ti.run_in_background === false) return {};
+  console.log(`[hooks] Headless run: forcing ${tool_name} to foreground`);
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse' as const,
+      updatedInput: { ...ti, run_in_background: false },
+    },
+  };
+};
+
+/**
  * Text fields per Slack MCP tool that may carry `@name` prose the agent typed.
  * (Not `post_slack_poll` — its options are structured labels, not mention prose.)
  */
@@ -221,13 +241,14 @@ export const denyWholeDiskSearch: HookCallback = async (input) => {
 /** Build the hooks map to pass into SDK query() options.
  *  `exemptBashCommand` is the one command the turn was explicitly told to run in the foreground
  *  (a `bash` schedule's command) — see forceBackgroundForScripts. */
-export function buildHooks(opts?: { exemptBashCommand?: string; offload?: OffloadSettings; durableJobs?: boolean }): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+export function buildHooks(opts?: { exemptBashCommand?: string; offload?: OffloadSettings; durableJobs?: boolean; headless?: boolean }): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
   const offload = opts && 'offload' in opts ? opts.offload : getOffload();
   return {
     PreToolUse: [
       { matcher: 'Bash|Grep|Glob', hooks: [denyWholeDiskSearch] },
       ...(offload ? [{ matcher: 'Bash', hooks: [denyHeavyLocalMedia(offload)] }] : []),
       { matcher: 'Bash', hooks: [forceBackgroundForScripts(opts?.exemptBashCommand, opts?.durableJobs), ...(opts?.durableJobs ? [denyNativeBackground] : [])] },
+      ...(opts?.headless ? [{ matcher: 'Agent|Task', hooks: [foregroundSubagents] }] : []),
       { matcher: 'mcp__mcp-slack-use__post_slack_.*', hooks: [resolveSlackMentions] },
       { matcher: 'mcp__mcp-firebase-(?:prod|lab)__get_db.*', hooks: [guardFirebaseReads] },
       { matcher: 'Write|Edit|MultiEdit|NotebookEdit', hooks: [denyProtectedDataWrites] },
