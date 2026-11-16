@@ -52,6 +52,7 @@ import { startEventDispatcher } from './events/dispatcher.ts';
 import { seedOperators } from './contacts.ts';
 import { dataSync } from './data-sync.ts';
 import { mountMcpServer } from './mcp-server.ts';
+import { mountMcpPool, stopMcpPool } from './mcp-pool.ts';
 import { fromInternal, type Principal } from './security/principal.ts';
 import { initSecurity, security, admitTurn, requestIp } from './security/runtime.ts';
 import type { PolicyOptions } from './security/policy.ts';
@@ -960,6 +961,8 @@ app.use(apiKeyRouter({ base: '/api/api-keys', gate: [requireAuth] }));
 
 // ── MCP Server ────────────────────────────────────────────────────────────────
 mountMcpServer(app, { runChatTurn });
+// Shared stdio-MCP pool: turns reach long-lived MCP children over loopback instead of spawning their own.
+mountMcpPool(app);
 
 // Mount deployment drop-in routes from data/extensions/*.ext.ts (hot-reload, before catch-all).
 const { loadExtensions, registerExtension } = await import('./extensions.ts');
@@ -2274,6 +2277,7 @@ async function gracefulShutdown(signal: string, opts: { exit?: boolean } = {}) {
   console.log(`[server] ${signal} — draining (up to ${Math.round(DRAIN_MS / 1000)}s)…`);
   setShuttingDown();
   stopSidecars();
+  stopMcpPool();
 
   for (const ws of activeConnections.keys()) send(ws, { type: 'server_restarting' });
 
