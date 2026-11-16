@@ -186,6 +186,28 @@ describe('SelfUpgrade report delivery', () => {
     expect(s.inFlight()).toBeNull();               // and a further upgrade is not blocked
   });
 
+  // Seen on feedox (0.1.170): boot found a LEFTOVER report from the previous upgrade (0.1.168),
+  // delivered it, kept the live 0.1.170 marker (correct) — but never watched for the 0.1.170 report,
+  // so that marker blocked every retry until it aged out.
+  test('after delivering a leftover report, it still watches for the live upgrade\'s report', async () => {
+    const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
+    const reportFile = path.join(root, '.self-upgrade', 'report.json');
+    const lockFile = path.join(root, '.self-upgrade', 'in-flight.json');
+    mkdirSync(path.dirname(reportFile), { recursive: true });
+    const rep = (v: string) => JSON.stringify({ status: 'ok', detail: `upgraded to ${v}`, from: '0.1.32', target: v, installed: v, package: 'shraga', log: '/tmp/x.log', finishedAt: '2026-08-21T00:00:00Z' });
+    writeFileSync(reportFile, rep('0.1.33'));
+    writeFileSync(lockFile, JSON.stringify({ target: '0.1.34', startedAt: new Date().toISOString(), at: Date.now() }));
+    const s = subject(root, { reportFile, lockFile, reportPollMs: 10 });
+
+    expect(s.deliverPendingReport()?.target).toBe('0.1.33');   // the leftover
+    expect(s.inFlight()?.target).toBe('0.1.34');               // live marker kept
+
+    writeFileSync(reportFile, rep('0.1.34'));
+    await new Promise((r) => setTimeout(r, 120));
+    expect(existsSync(reportFile)).toBe(false);
+    expect(s.inFlight()).toBeNull();
+  });
+
   // A failed install never restarts the service, so no boot ever looks for the report. The process
   // that started the upgrade must collect it itself, or the marker blocks every retry for 30m.
   test('a failed install (no restart) clears the in-flight marker in the process that started it', async () => {

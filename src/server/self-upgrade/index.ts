@@ -209,6 +209,8 @@ export class SelfUpgrade {
     const marker = this.inFlight();
     if (!marker || marker.target === report.target) {
       try { unlinkSync(this.o.lockFile); } catch { /* no lock to clear */ }
+    } else {
+      this.watchForReport(); // the live upgrade's own report is still to come
     }
 
     console.log(`${TAG} ${report.status}: ${report.detail}`);
