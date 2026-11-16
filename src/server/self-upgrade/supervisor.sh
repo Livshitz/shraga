@@ -160,9 +160,9 @@ soak() { # version seconds
 # An upgrade usually targets a version published minutes ago. bun resolves a changed pin from its
 # CACHED registry manifest, which predates the publish -> "No version matching ... (but package
 # exists)" (observed 0.1.168, 5 min after publish). --no-cache forces a fresh manifest fetch. The
-# registry CDN can lag a fresh publish too, so that one error also gets a bounded retry.
-INSTALL_RETRIES="${INSTALL_RETRIES:-4}"
-INSTALL_RETRY_SLEEP="${INSTALL_RETRY_SLEEP:-30}"
+# registry CDN caches manifests for 300s (max-age=300), so that one error retries for 5 min (6 x 60s).
+INSTALL_RETRIES="${INSTALL_RETRIES:-6}"
+INSTALL_RETRY_SLEEP="${INSTALL_RETRY_SLEEP:-60}"
 bun_install() {
   local out attempt=1
   out="$(mktemp)"
