@@ -316,7 +316,7 @@ export async function handlePoolMessage(srv: PooledServer, msg: Json, onNotify?:
 export function mountMcpPool(app: Application) {
   app.post('/mcp-pool/:key', async (req: Request, res: Response) => {
     if (!authorized(req)) return res.status(403).json({ error: 'forbidden' });
-    const srv = servers.get(req.params.key);
+    const srv = servers.get(String(req.params.key));
     if (!srv) return res.status(404).json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'unknown pool key (server restarted?)' } });
     const body = req.body;
     const batch = Array.isArray(body);
