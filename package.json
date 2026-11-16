@@ -73,7 +73,7 @@
     "firebase": "^11.0.0",
     "highlight.js": "~11.11.0",
     "lucide-react": "^0.468.0",
-    "mcp-slack-use": "github:Livshitz/mcp-slack-use#ce2bd32",
+    "mcp-slack-use": "github:Livshitz/mcp-slack-use#841bde2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^9.0.0",
