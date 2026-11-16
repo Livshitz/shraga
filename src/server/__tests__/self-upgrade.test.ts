@@ -185,6 +185,23 @@ describe('SelfUpgrade report delivery', () => {
     expect(existsSync(reportFile)).toBe(false);    // consumed => the owner was told
     expect(s.inFlight()).toBeNull();               // and a further upgrade is not blocked
   });
+
+  // A failed install never restarts the service, so no boot ever looks for the report. The process
+  // that started the upgrade must collect it itself, or the marker blocks every retry for 30m.
+  test('a failed install (no restart) clears the in-flight marker in the process that started it', async () => {
+    const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
+    const registry = Bun.serve({ port: 0, fetch: () => Response.json({ version: '0.1.34' }) });
+    const supervisorScript = path.join(root, 'fake-supervisor.sh');
+    writeFileSync(supervisorScript, `printf '{"status":"failed","detail":"install failed","from":"0.1.33","target":"0.1.34","installed":"0.1.33","package":"shraga","log":"x","finishedAt":"t"}' > "$REPORT"`);
+    try {
+      const s = subject(root, { supervisorScript, registry: `http://127.0.0.1:${registry.port}`, reportPollMs: 10, hasPython3: () => true, runningJobs: () => [], runningTurns: () => 0 });
+      expect((await s.start({ version: '0.1.34' })).started).toBe(true);
+      expect(s.inFlight()).not.toBeNull();
+      for (let i = 0; i < 100 && s.inFlight(); i++) await new Promise((r) => setTimeout(r, 20));
+      expect(s.inFlight()).toBeNull();
+      expect(s.blockers()).toEqual([]);
+    } finally { registry.stop(true); }
+  });
 });
 
 // The supervisor is a shell script that runs detached, so it is exercised the only honest way:
@@ -201,7 +218,7 @@ describe('supervisor.sh', () => {
   const secs = (n: number) => String(n * SCALE);
   const budget = (ms: number) => ms * SCALE;
 
-  async function runSupervisor(env: Record<string, string>, healthVersion: () => string | null): Promise<string> {
+  async function runSupervisor(env: Record<string, string>, healthVersion: () => string | null, killMs = budget(25_000)): Promise<string> {
     const server = Bun.serve({
       port: 0,
       fetch() {
@@ -220,7 +237,7 @@ describe('supervisor.sh', () => {
       // as an "Unhandled error between tests" — which poisons every LATER file in the run. Measured
       // 2026-09-08: two slow supervisor tests turned into 52 failures across the suite. Bounding it
       // here means a slow supervisor fails its own assertion with its own log, and nothing else.
-      const kill = setTimeout(() => proc?.kill('SIGKILL'), budget(25_000));
+      const kill = setTimeout(() => proc?.kill("SIGKILL"), killMs);
       try { await proc.exited; } finally { clearTimeout(kill); }
     } finally { server.stop(true); }
     // The script's only diagnostic channel. Without it a CI-only "revert-failed" is unfalsifiable.
@@ -290,7 +307,7 @@ describe('supervisor.sh', () => {
       RESTART_CMD: 'true', REPORT: report, BUN: 'true', BOOT_TIMEOUT: secs(15), SOAK: '60',
       // dies during the soak (3 consecutive misses = the limit), then the reverted old version
       // answers again — the sequence a real rollback produces.
-    }, () => { hits++; if (hits <= 2) return '0.1.99'; if (hits <= 7) return null; return '0.1.33'; });
+    }, () => { hits++; if (hits <= 2) return '0.1.99'; if (hits <= 7) return null; return '0.1.33'; }, budget(55_000)); // ~30s of real probes: must stay under this test's own budget, not the 25s default
 
     expect(JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).dependencies.shraga).toBe('0.1.33');
     expect(readReport(report, log).status).toBe('reverted');
@@ -328,6 +345,28 @@ describe('supervisor.sh', () => {
 
     expect(JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).dependencies.shraga).toBe('0.1.40');
     expect(readReport(report, log).status).toBe('failed');
+  }, budget(30_000));
+
+  // A version published minutes ago is missing from bun's cached manifest ("No version matching
+  // ... but package exists"). The install must bypass that cache and retry while the registry lags.
+  test('a just-published version installs: fresh manifest + retry on "No version matching"', async () => {
+    const root = deployment({ dependencies: { shraga: '0.1.33' } }, { nodeModules: true });
+    const report = path.join(root, 'report.json');
+    const calls = path.join(root, 'calls');
+    const fakeBun = path.join(root, 'fake-bun.sh');
+    writeFileSync(fakeBun, [
+      '#!/usr/bin/env bash',
+      `echo "$*" >> "${calls}"`,
+      `[ "$(wc -l < "${calls}")" -ge 2 ] && exit 0`,
+      `echo 'error: No version matching "0.1.34" found for specifier "shraga" (but package exists)'; exit 1`,
+    ].join('\n'), { mode: 0o755 });
+    const log = await runSupervisor({
+      APP_ROOT: root, PKG: 'shraga', TARGET: '0.1.34', FROM: '0.1.33', INSTALL_RETRY_SLEEP: '0',
+      RESTART_CMD: 'true', REPORT: report, BUN: fakeBun, BOOT_TIMEOUT: secs(5), SOAK: '1',
+    }, () => '0.1.34');
+
+    expect(readReport(report, log).status).toBe('ok');
+    expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual(['install --no-cache', 'install --no-cache']);
   }, budget(30_000));
 
   test('a failed install reverts and never restarts a half-installed tree', async () => {

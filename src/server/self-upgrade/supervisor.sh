@@ -157,10 +157,28 @@ soak() { # version seconds
   return 0
 }
 
+# An upgrade usually targets a version published minutes ago. bun resolves a changed pin from its
+# CACHED registry manifest, which predates the publish -> "No version matching ... (but package
+# exists)" (observed 0.1.168, 5 min after publish). --no-cache forces a fresh manifest fetch. The
+# registry CDN can lag a fresh publish too, so that one error also gets a bounded retry.
+INSTALL_RETRIES="${INSTALL_RETRIES:-4}"
+INSTALL_RETRY_SLEEP="${INSTALL_RETRY_SLEEP:-30}"
+bun_install() {
+  local out attempt=1
+  out="$(mktemp)"
+  while :; do
+    if "$BUN" install --no-cache 2>&1 | tee "$out"; then rm -f "$out"; return 0; fi
+    if [ "$attempt" -ge "$INSTALL_RETRIES" ] || ! grep -q 'No version matching' "$out"; then rm -f "$out"; return 1; fi
+    say "registry has not caught up with $PKG@$TARGET yet (attempt $attempt/$INSTALL_RETRIES) — retrying in ${INSTALL_RETRY_SLEEP}s"
+    attempt=$(( attempt + 1 ))
+    sleep "$INSTALL_RETRY_SLEEP"
+  done
+}
+
 install_and_restart() { # version expected-current label
   say "installing $PKG@$1 ($3)"
   if ! pin "$1" "$2"; then say "pin failed"; return 1; fi
-  if ! "$BUN" install; then say "bun install failed"; return 1; fi
+  if ! bun_install; then say "bun install failed"; return 1; fi
   say "restarting via: $RESTART_CMD"
   eval "$RESTART_CMD" || say "restart command returned non-zero (continuing — some managers do)"
   return 0

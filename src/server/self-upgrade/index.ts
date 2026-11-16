@@ -172,6 +172,10 @@ export class SelfUpgrade {
       return { started: false, from, target, reason: `could not start the upgrade supervisor: ${(err as Error).message}` };
     }
 
+    // Watch from THIS process too: a failed install never restarts the service, so no boot ever
+    // runs deliverPendingReport — the report sat unread and the marker blocked retries for 30m
+    // (observed 0.1.168). On success the restart kills this watch and the boot-time one takes over.
+    this.watchForReport();
     console.log(`${TAG} handed off ${this.o.pkg} ${from} -> ${target} to supervisor pid ${child.pid}`);
     return { started: true, from, target, reason: `upgrading to ${target}; the result will be reported when the server comes back` };
   }
