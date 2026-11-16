@@ -100,6 +100,11 @@ const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) 
   signal?.addEventListener('abort', done, { once: true });
 });
 
+/** Hard ceiling on one scheduled run's agent turn (all retry attempts together). Generous on purpose:
+ *  it exists to end a run that went silent, not to police slow ones. `SCHEDULER_MAX_TURN_MS` overrides. */
+export const DEFAULT_MAX_TURN_MS = 3 * 60 * 60_000;
+const maxTurnMs = (): number => Number(process.env.SCHEDULER_MAX_TURN_MS) || DEFAULT_MAX_TURN_MS;
+
 /** How often a `pending` run is re-checked while it waits for its terminal declaration. */
 const OUTCOME_POLL_MS = 10_000;
 
@@ -311,6 +316,16 @@ export async function runSchedule(
 
   onEvent({ type: 'schedule:run_started', scheduleId: schedule.id, sessionId, at: now });
 
+  // Watchdog for the turn itself. The `pending` outcome wait is bounded (outcome.ts), but the turn
+  // was not: a stream that went silent held the run "running" indefinitely (4.5h on 2026-11-16).
+  const turnLimitMs = maxTurnMs();
+  let turnTimedOut = false;
+  const turnDeadline = setTimeout(() => {
+    turnTimedOut = true;
+    console.error(`[scheduler] ${schedule.id} exceeded its turn deadline (${turnLimitMs}ms) — aborting ${sessionId}`);
+    abortController.abort(new Error('scheduled run turn deadline exceeded'));
+  }, turnLimitMs);
+
   try {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       status = 'ok';
@@ -419,7 +434,14 @@ export async function runSchedule(
       // Cancelling during the backoff is a user cancel, not a failure — don't spawn attempt N+1.
       if (abortController.signal.aborted) { status = 'aborted'; error = undefined; break; }
     }
+    // A deadline abort is a failure that must alert, not a user cancel.
+    if (turnTimedOut) {
+      status = 'error';
+      error = `Run exceeded its ${Math.round(turnLimitMs / 60_000)}-minute turn deadline and was stopped.`;
+      assistantBlocks.push({ type: 'error', text: error });
+    }
   } finally {
+    clearTimeout(turnDeadline);
     flush();
     // Run reached a terminal state in-process — drop the running marker (a crash leaves it
     // behind on purpose; catch-up's isProcessAlive guard then handles the dead pid).

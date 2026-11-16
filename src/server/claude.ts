@@ -26,6 +26,7 @@ import { parseSlashCommand, formatCommandBlock } from './commands.ts';
 import { getUserContextBlock } from './user-context.ts';
 import { collectTurnContext } from './turn-context.ts';
 import { DATA_DIR, dataPath } from './paths.ts';
+import { untilAborted } from './abortable-stream.ts';
 import * as contacts from './contacts.ts';
 import type { Principal } from './security/principal.ts';
 import { security, resolvePrincipal } from './security/runtime.ts';
@@ -495,7 +496,9 @@ async function* runTurn(opts: StreamChatOpts, guard?: TurnGuard): AsyncGenerator
   const resumeState = getSession(sessionId)?.claudeResume;
   if (engine.name !== 'claude-code' && resumeState && !resumeState.interruptedBy) setClaudeResume(sessionId, undefined, { interruptedBy: engine.name });
 
-  yield* engine.stream({
+  // Raced against the abort signal: a stuck await below the engine must not outlive a cancel and
+  // leave the caller's session lock / scheduler entry held forever (see abortable-stream.ts).
+  yield* untilAborted(engine.stream({
     prompt: turnPrompt,
     conversation,
     contextBlock,
@@ -519,7 +522,7 @@ async function* runTurn(opts: StreamChatOpts, guard?: TurnGuard): AsyncGenerator
     ...(guard ? { security: guard } : {}),
     directives,
     config,
-  });
+  }), opts.abortController?.signal);
 }
 
 /** The notice appended to a turn that ran out of steps. Shared so every transport says the same
