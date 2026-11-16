@@ -1,7 +1,10 @@
 import { describe, expect, mock, test } from 'bun:test';
 
 let captured: any;
+// Spread the real SDK: bun's mock.module is process-wide, so a partial mock strips exports (createSdkMcpServer) from every later importer.
+const realSdk = { ...(await import('@anthropic-ai/claude-agent-sdk')) };
 mock.module('@anthropic-ai/claude-agent-sdk', () => ({
+  ...realSdk,
   query: (args: any) => { captured = args; return (async function* () {})(); },
 }));
 const { runTextQuery } = await import('../sdk-utils.ts');
