@@ -5,6 +5,7 @@ import path from 'node:path';
 import { signInternalToken } from '../auth.ts';
 import { buildHooks } from '../hooks.ts';
 import { offloadEnv } from '../offload.ts';
+import { poolMcpServers } from '../mcp-pool.ts';
 import { listSkills } from '../skills.ts';
 import { loadAgents } from '../agents.ts';
 import { registerProactiveMessage } from '../slack/sessions.ts';
@@ -506,7 +507,11 @@ export class ClaudeCodeEngine implements AgentEngine {
     // writeMcpConfigFile. Setting both would re-add the argv copy, so it's one or the other.
     let mcpConfigFile: { path: string; cleanup: () => void } | undefined;
     // Enforced: servers outside profile.mcps never reach the file, so the CLI never starts them.
-    const mcpServers = eff ? filterMcpServers(opts.mcpServers, eff.profile) : opts.mcpServers;
+    // Full-access turns share one long-lived process per stdio server (mcp-pool.ts) instead of the CLI
+    // spawning dozens per turn. Profile-restricted turns keep per-turn stdio, whose env is profile-filtered.
+    const mcpServers = eff
+      ? filterMcpServers(opts.mcpServers, eff.profile)
+      : opts.mcpServers && poolMcpServers(opts.mcpServers);
     if (mcpServers && Object.keys(mcpServers).length > 0) {
       mcpConfigFile = writeMcpConfigFile(mcpServers);
       options['extraArgs'] = { ...(options['extraArgs'] as Record<string, string> | undefined), 'mcp-config': mcpConfigFile.path };
