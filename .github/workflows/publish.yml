@@ -1,10 +1,9 @@
 name: Publish to npm
 
 # Publishes to public npm on every push to main.
-# The npm token is NOT stored per-repo — it's fetched at publish time from the secrets-broker
-# secrets store, the one place every repo of ours reads its publishing credential from.
-# Only the store's credential lives in a GitHub secret (BROKER_API_KEY); no token and no
-# endpoint credential is written in this file, so it's safe in a public repo.
+# The npm token is NOT stored per-repo: it is fetched at publish time from a scoped,
+# read-only secrets broker. The endpoint URL and its credential live in GitHub secrets
+# (NPM_TOKEN_URL, NPM_BROKER_SECRET), never in this file, so it's safe in a public repo.
 on:
   push:
     branches: [main]
@@ -57,29 +56,27 @@ jobs:
           git commit -m "chore(release): v$(node -p "require('./package.json').version") [skip ci]"
           git tag -a "v$(node -p "require('./package.json').version")" -m "v$(node -p "require('./package.json').version")"
 
-      # Fetch the npm token from the secrets-broker secrets store at publish time — the SAME source every
-      # other repo of ours publishes from, so rotating the token in ONE place fixes them all. A
-      # per-repo NPM_TOKEN copy goes stale silently and every publish then dies on a 404 (npm
-      # returns 404, not 403, for a token that cannot see the package — it reads as "no such
-      # package"). The only GitHub secret this needs is BROKER_API_KEY.
-      - name: Fetch npm token from secrets-broker secrets store
+      # Fetch the npm token from the secrets broker at publish time: ONE source for every repo,
+      # so rotating the token in one place fixes them all. A per-repo NPM_TOKEN copy goes stale
+      # silently and every publish then dies on a 404 (npm returns 404, not 403, for a token that
+      # cannot see the package: it reads as "no such package").
+      - name: Fetch npm token from secrets broker
         env:
-          BROKER_API_KEY: ${{ secrets.BROKER_API_KEY }}
+          TOKEN_URL: ${{ secrets.NPM_TOKEN_URL }}
+          APP_SECRET: ${{ secrets.NPM_BROKER_SECRET }}
         run: |
-          token=$(curl -sS -f -H "Authorization: Bearer $BROKER_API_KEY" \
-            "https://secrets-broker.example/api/apps/REDACTED-APP-ID/env/NPM_TOKEN?environment=prod" \
-            | jq -r '.value')
+          token=$(curl -sS -f -H "x-app-secret: $APP_SECRET" "$TOKEN_URL" | jq -r '.value')
           if [ -z "$token" ] || [ "$token" = "null" ]; then
-            echo "::error::Failed to fetch NPM_TOKEN from the secrets-broker secrets store"; exit 1
+            echo "::error::Failed to fetch the npm token from the secrets broker"; exit 1
           fi
           # Load-bearing: without the mask the token can be echoed into a public run log.
           echo "::add-mask::$token"
           # Fail loudly HERE on a dead token, rather than letting npm report it as a 404 on the
-          # package — the misreading that cost a release cycle.
+          # package: the misreading that cost a release cycle.
           who=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
             https://registry.npmjs.org/-/whoami)
           if [ "$who" != "200" ]; then
-            echo "::error::NPM_TOKEN in secrets-broker is not valid (npm whoami -> HTTP $who). Rotate it there."; exit 1
+            echo "::error::The npm token from the broker is not valid (npm whoami -> HTTP $who). Rotate it there."; exit 1
           fi
           echo "NODE_AUTH_TOKEN=$token" >> "$GITHUB_ENV"
 
