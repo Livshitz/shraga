@@ -109,6 +109,9 @@ export class ClaudeUsageOptions {
   /** Seam: hands back the raw secret string, or null on ANY failure. Tests inject here so the suite
    *  never shells out to the real `security` binary. */
   readKeychain: (options: ClaudeUsageOptions) => Promise<string | null> = readKeychainSecret;
+  /** Called once when the agent's own inference first reports a window exhausted (not again until it
+   *  clears), so a human can switch the login before users notice silence. null = nobody to tell. */
+  onLimitReached: ((hit: { window: string; resetsAt: Date }) => void) | null = null;
 }
 
 /** `security` writes the secret to stdout with -w. The value is never logged or returned upward;
@@ -201,7 +204,13 @@ export class ClaudeUsageReader {
     const type = info?.rateLimitType;
     if (!type || !RATE_LIMIT_WINDOW[type]) return;
     if (info.status === 'rejected' && typeof info.resetsAt === 'number') {
-      if (!this.exhausted.has(type)) console.warn(`${TAG} agent reports ${type} limit reached; resets ${new Date(info.resetsAt * 1000).toISOString()}`);
+      // A mark whose reset already passed is a NEW hit (overlay only sweeps marks on get()).
+      if (!((this.exhausted.get(type) ?? 0) > Date.now())) {
+        const resetsAt = new Date(info.resetsAt * 1000);
+        console.warn(`${TAG} agent reports ${type} limit reached; resets ${resetsAt.toISOString()}`);
+        try { this.options.onLimitReached?.({ window: type, resetsAt }); }
+        catch (err) { console.error(`${TAG} limit notice failed:`, (err as Error).message); }
+      }
       this.exhausted.set(type, info.resetsAt * 1000);
     } else {
       this.exhausted.delete(type);
@@ -521,7 +530,14 @@ function claudeCodeVersion(): string {
   return cachedVersion!;
 }
 
-export const claudeUsage = new ClaudeUsageReader();
+/** The box's shared login: its quota running out silences the agent for everyone, so tell the owners. */
+export const claudeUsage = new ClaudeUsageReader({
+  onLimitReached: ({ window, resetsAt }) => {
+    import('./notify-owners.ts')
+      .then(m => m.notifyOwners('claude-usage', `:warning: Claude Code limit reached (${window.replace(/_/g, ' ')}) on the agent's Claude login. Replies fail until ${resetsAt.toUTCString()} unless the login is switched.`))
+      .catch((err: Error) => console.error(`${TAG} could not notify owners:`, err.message));
+  },
+});
 
 const accountReaders = new Map<string, ClaudeUsageReader>();
 /** The reader for a per-user Claude login dir (claude-account.ts), or the box default for null. One

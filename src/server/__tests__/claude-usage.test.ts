@@ -252,6 +252,23 @@ describe('agent-reported rate limits (SDK rate_limit_event)', () => {
     expect((await r.get())?.limits.find(l => l.kind === 'session')?.percent).toBe(5);
   });
 
+  it('tells someone once per hit: not on repeats, again after it clears or its reset passes', () => {
+    const hits: string[] = [];
+    const r = new ClaudeUsageReader({ onLimitReached: h => hits.push(`${h.window}@${h.resetsAt.getTime()}`) });
+    const past = Math.floor(Date.now() / 1000) - 1;
+    r.observeRateLimit({ status: 'rejected', rateLimitType: 'five_hour', resetsAt: past });
+    r.observeRateLimit({ status: 'rejected', rateLimitType: 'five_hour', resetsAt: inAnHour() }); // stale mark → new hit
+    r.observeRateLimit({ status: 'rejected', rateLimitType: 'five_hour', resetsAt: inAnHour() }); // repeat → silent
+    r.observeRateLimit({ status: 'allowed', rateLimitType: 'five_hour' });
+    r.observeRateLimit({ status: 'rejected', rateLimitType: 'seven_day', resetsAt: inAnHour() });
+    r.observeRateLimit({ status: 'rejected', rateLimitType: 'five_hour', resetsAt: inAnHour() });
+    expect(hits.map(h => h.split('@')[0])).toEqual(['five_hour', 'five_hour', 'seven_day', 'five_hour']);
+  });
+
+  it('the box default reader notifies the owners', () => {
+    expect(typeof claudeUsage.options.onLimitReached).toBe('function');
+  });
+
   it('never conjures a gauge for a box with no reading', async () => {
     const r = await reader({ claudeAiOauth: { accessToken: 'tok', scopes: ['user:inference'] } });
     r.observeRateLimit({ status: 'rejected', rateLimitType: 'five_hour', resetsAt: inAnHour() });
